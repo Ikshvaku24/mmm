@@ -1,0 +1,14 @@
+pymc>=5.16
+arviz>=0.18
+numpy>=1.25
+pandas>=2.0
+xarray>=2023.6
+matplotlib>=3.7
+scipy>=1.11
+# fast JIT/GPU sampling backend (optional but recommended)
+numpyro>=0.15
+jax>=0.4.28
+# On a Linux GPU machine (Databricks GPU cluster / Colab) instead install:
+#   pip install "jax[cuda12]"
+# Optional alternative fast CPU sampler:
+#   pip install nutpie
