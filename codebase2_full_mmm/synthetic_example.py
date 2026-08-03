@@ -95,11 +95,11 @@ def main():
         row = tp.loc[name]
         print(f"{name}: decay true={t['alpha']:.2f}  "
               f"est={row['decay_median']:.2f} "
-              f"[{row['decay_hdi_5']:.2f},{row['decay_hdi_95']:.2f}]   "
+              f"[{row['decay_hdi_low']:.2f},{row['decay_hdi_high']:.2f}]   "
               f"half-life true={half_life(t['alpha']):.1f}  "
               f"est={row['half_life_periods_median']:.1f}   "
               f"ec true={t['ec']:.2f}  est={row['hill_ec_scaled_median']:.2f} "
-              f"[{row['hill_ec_hdi_5']:.2f},{row['hill_ec_hdi_95']:.2f}]")
+              f"[{row['hill_ec_hdi_low']:.2f},{row['hill_ec_hdi_high']:.2f}]")
     print("\nSee outputs/synthetic_check/04_transforms/ for curves and ranges.")
 
 

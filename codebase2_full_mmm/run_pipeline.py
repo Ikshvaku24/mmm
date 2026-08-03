@@ -44,7 +44,8 @@ import pandas as pd
 
 from config import ModelConfig, RunConfig, SamplerConfig
 from data_prep import prepare_data, write_data_stage_outputs
-from diagnostics import convergence_report, prior_posterior_report
+from diagnostics import (convergence_report, enforce_convergence,
+                         prior_posterior_report, quick_convergence_checks)
 from eda import run_eda
 from fit import fit, sample_prior
 from model import build_model
@@ -87,6 +88,8 @@ def run(df: pd.DataFrame,
     convergence_report(idata, dirs["03_convergence"])
     prior_posterior_report(idata, dirs["03_convergence"])
     prior_predictive_plot(idata, pdata, dirs["03_convergence"])
+    enforce_convergence(quick_convergence_checks(idata),
+                        run_cfg.on_convergence_failure)
 
     print("[5/7] learned transform report")
     transforms = transform_report(idata, pdata, model_cfg, dirs["04_transforms"])

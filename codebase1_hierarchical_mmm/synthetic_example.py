@@ -88,9 +88,9 @@ def main():
         sub = coef[(coef.feature == name) & (coef.region != "__population__")]
         for _, row in sub.iterrows():
             t = true[row.region][name]
-            hit = row["hdi_5"] <= t <= row["hdi_95"]
+            hit = row["hdi_low"] <= t <= row["hdi_high"]
             print(f"{name:14s} {row.region}: true={t:+.3f}  est={row['median']:+.3f} "
-                  f"[{row['hdi_5']:+.3f},{row['hdi_95']:+.3f}] "
+                  f"[{row['hdi_low']:+.3f},{row['hdi_high']:+.3f}] "
                   f"{'OK' if hit else 'MISS'}")
 
 

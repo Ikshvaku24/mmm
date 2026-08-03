@@ -52,6 +52,10 @@ class ChannelSpec:
             s.prior_beta_mean = 0.05
         if s.max_lag < 1:
             raise ValueError(f"{s.name}: max_lag must be >= 1")
+        if not (np.isfinite(s.prior_beta_sd) and s.prior_beta_sd > 0):
+            raise ValueError(f"{s.name}: prior_beta_sd must be finite and > 0")
+        if not (np.isfinite(s.regional_sd) and s.regional_sd >= 0):
+            raise ValueError(f"{s.name}: regional_sd must be finite and >= 0")
         return s
 
 
@@ -79,6 +83,10 @@ class FeatureSpec:
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
+        if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
+            raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
+        if not (np.isfinite(s.regional_sd) and s.regional_sd >= 0):
+            raise ValueError(f"{s.name}: regional_sd must be finite and >= 0")
         return s
 
 
@@ -127,6 +135,7 @@ class ModelConfig:
     include_trend: bool = True
     alpha_prior_sd: float = 0.5
     alpha_regional_sd: float = 0.5
+    pool_sigma: bool = True               # partial-pool region noise on the log scale
     # Hill half-saturation prior on median-scaled media (Meridian default:
     # ec ~ TruncatedNormal(0.8, 0.8) on [0.1, 10])
     ec_mu: float = 0.8
@@ -170,6 +179,10 @@ class SamplerConfig:
     sampler: str = "numpyro"
     nuts_kwargs: dict = field(default_factory=dict)
     prior_predictive_draws: int = 500
+    store_log_likelihood: bool = False    # keep pointwise log-lik (needed for LOO/WAIC)
+    advi_iters: int = 30000               # sampler="advi": mean-field VI iterations
+                                          # (PE convention: ADVI for CV speed,
+                                          # NUTS for the final fit)
 
 
 @dataclass
@@ -184,3 +197,16 @@ class RunConfig:
     zero_fill_media: bool = True     # missing media/spend cells -> 0 (with a count warning)
     revenue_per_unit: float = 1.0    # ROI = contribution * revenue_per_unit / spend
                                      # (leave 1.0 if dv is already revenue)
+    on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail
+
+
+@dataclass
+class CVConfig:
+    """Expanding-window (rolling-origin) cross-validation settings."""
+    horizon: int = 13                  # test periods per fold
+    n_folds: int = 5
+    step: int | None = None            # spacing between origins (default: horizon)
+    min_train_periods: int = 52
+    draws: int | None = None           # override sampler draws for CV speed
+    tune: int | None = None
+    make_plots: bool = True

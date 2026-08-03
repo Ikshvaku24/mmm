@@ -22,6 +22,31 @@ import pandas as pd
 from config import ModelConfig, RunConfig, bucket_features
 
 
+def make_folds(n_dates: int, horizon: int, n_folds: int,
+               step: int | None = None, min_train: int = 52) -> list[tuple[int, int]]:
+    """Expanding-window (rolling-origin) fold boundaries, chronological order.
+
+    Returns [(test_start, test_end), ...] as indices into the sorted unique
+    dates; fold k trains on dates[:test_start] and tests on
+    dates[test_start:test_end].
+    """
+    step = step or horizon
+    folds = []
+    i = 0
+    while len(folds) < n_folds:
+        test_end = n_dates - i * step
+        test_start = test_end - horizon
+        if test_start < min_train:
+            break
+        folds.append((test_start, test_end))
+        i += 1
+    if not folds:
+        raise ValueError(
+            f"no valid CV folds: {n_dates} periods cannot fit horizon={horizon} "
+            f"with min_train={min_train}")
+    return folds[::-1]
+
+
 def fourier_features(dates: pd.DatetimeIndex, order: int, period_days: float = 365.25):
     t_days = (dates - dates.min()).days.to_numpy(dtype=float)
     cols, names = [], []
@@ -136,6 +161,9 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, cfg: ModelConfig) -> Pane
     T_train = T - run_cfg.holdout_periods if run_cfg.holdout_periods > 0 else T
     if T_train < 20:
         raise ValueError("fewer than 20 training periods after holdout")
+    if cfg.fourier_order > 0 and T_train < 6 * cfg.fourier_order:
+        warnings.warn(f"fourier_order={cfg.fourier_order} is high for {T_train} "
+                      "training periods - risk of overfitting the seasonal cycle")
 
     # ---- KPI scaling -------------------------------------------------------
     y_orig = pivot(yc)
@@ -182,6 +210,10 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, cfg: ModelConfig) -> Pane
     for k, s in enumerate(lin_specs):
         v = pivot(s.name if s.name in d.columns else
                   next(c.col for c in cfg.linear_channels if c.name == s.name))
+        if s.sign != "free" and (v < 0).any():
+            warnings.warn(f"{s.name}: sign-constrained features are scaled "
+                          "without centering, which assumes non-negative values - "
+                          f"found {(v < 0).sum()} negative entries")
         for g in range(G):
             tr = v[g, :T_train]
             if s.sign == "free":

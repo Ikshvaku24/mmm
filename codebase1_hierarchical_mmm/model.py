@@ -103,9 +103,16 @@ def build_model(pdata: PreparedData, cfg: ModelConfig) -> pm.Model:
 
         mu = sum(terms)
 
-        # noise: one sigma per region (production code had one per region too,
-        # but estimated in isolation; here they share one joint fit)
-        sigma = pm.HalfNormal("sigma_region", 1.0, dims="region")
+        # noise: one sigma per region. Default = partial pooling on the log scale
+        # so short/noisy regions borrow strength for their noise level too.
+        if cfg.pool_sigma:
+            mu_ls = pm.Normal("mu_log_sigma", -0.5, 1.0)
+            tau_ls = pm.HalfNormal("tau_log_sigma", 0.5)
+            z_ls = pm.Normal("z_log_sigma", 0.0, 1.0, dims="region")
+            sigma = pm.Deterministic("sigma_region",
+                                     pt.exp(mu_ls + tau_ls * z_ls), dims="region")
+        else:
+            sigma = pm.HalfNormal("sigma_region", 1.0, dims="region")
         s_obs = sigma[reg]
 
         if cfg.likelihood == "student_t":

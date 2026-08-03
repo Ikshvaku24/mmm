@@ -15,12 +15,40 @@ Scaling (stats computed on the TRAINING window only, stored for reuse):
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
 import pandas as pd
 
 from config import FeatureSpec, ModelConfig, RunConfig, bucket_features
+
+
+def make_folds(n_dates: int, horizon: int, n_folds: int,
+               step: int | None = None, min_train: int = 52) -> list[tuple[int, int]]:
+    """Expanding-window (rolling-origin) fold boundaries, chronological order.
+
+    Returns [(test_start, test_end), ...] as indices into the sorted unique
+    dates; fold k trains on dates[:test_start] and tests on
+    dates[test_start:test_end]. The last fold ends at the final date; earlier
+    folds step back by `step` (default: horizon). Folds whose training window
+    would fall below `min_train` periods are dropped.
+    """
+    step = step or horizon
+    folds = []
+    i = 0
+    while len(folds) < n_folds:
+        test_end = n_dates - i * step
+        test_start = test_end - horizon
+        if test_start < min_train:
+            break
+        folds.append((test_start, test_end))
+        i += 1
+    if not folds:
+        raise ValueError(
+            f"no valid CV folds: {n_dates} periods cannot fit horizon={horizon} "
+            f"with min_train={min_train}")
+    return folds[::-1]
 
 
 def fourier_features(dates: pd.Series, order: int, period_days: float = 365.25):
@@ -101,6 +129,19 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         train_mask = np.ones(len(d), dtype=bool)
     test_mask = ~train_mask
 
+    # per-region training support and seasonality sanity (config validation)
+    for g, r in enumerate(regions):
+        n_tr = int(((region_idx == g) & train_mask).sum())
+        if n_tr < 10:
+            raise ValueError(f"region {r} has only {n_tr} training periods after "
+                             "holdout - reduce holdout_periods or drop the region")
+    if model_cfg.fourier_order > 0:
+        n_dates_tr = len(np.unique(d.loc[train_mask, dc]))
+        if n_dates_tr < 6 * model_cfg.fourier_order:
+            warnings.warn(f"fourier_order={model_cfg.fourier_order} is high for "
+                          f"{n_dates_tr} training periods - risk of overfitting "
+                          "the seasonal cycle")
+
     # ---- dv scaling: standardise per region (train stats) -----------------
     y_orig = d[yc].to_numpy(dtype=float)
     y_mean = np.zeros(G)
@@ -117,6 +158,10 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     scale_rows = []
     for j, spec in enumerate(model_cfg.features):
         v = d[spec.name].to_numpy(dtype=float)
+        if spec.sign != "free" and (v < 0).any():
+            warnings.warn(f"{spec.name}: sign-constrained features are scaled "
+                          "without centering, which assumes non-negative values - "
+                          f"found {(v < 0).sum()} negative entries")
         for g in range(G):
             m_all = region_idx == g
             m_tr = m_all & train_mask

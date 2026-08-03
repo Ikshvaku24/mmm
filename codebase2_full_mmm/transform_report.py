@@ -26,13 +26,13 @@ import pandas as pd
 
 from config import ModelConfig
 from data_prep import PanelData
-from outputs import stack_posterior
+from outputs import _hdi, stack_posterior
 from transforms import adstock_weights_np, apply_adstock_np, half_life
 
 
-def _s(x, hdi=0.90):
-    lo, hi = np.percentile(x, [(1 - hdi) / 2 * 100, (1 + hdi) / 2 * 100])
-    return float(np.median(x)), float(lo), float(hi)
+def _s(x, prob=0.90):
+    lo, hi = _hdi(x, prob)
+    return float(np.median(x)), lo, hi
 
 
 def transform_report(idata, p: PanelData, cfg: ModelConfig, outdir: str,
@@ -59,21 +59,23 @@ def transform_report(idata, p: PanelData, cfg: ModelConfig, outdir: str,
         med_scale = p.media_scale[:, j]
         row = {
             "channel": ch.name, "adstock_type": ch.adstock, "max_lag": ch.max_lag,
-            "decay_median": am, "decay_hdi_5": alo, "decay_hdi_95": ahi,
-            "half_life_periods_median": hm, "half_life_hdi_5": hlo,
-            "half_life_hdi_95": hhi,
-            "hill_ec_scaled_median": em, "hill_ec_hdi_5": elo, "hill_ec_hdi_95": ehi,
+            "decay_median": am, "decay_hdi_low": alo, "decay_hdi_high": ahi,
+            "half_life_periods_median": hm, "half_life_hdi_low": hlo,
+            "half_life_hdi_high": hhi,
+            "hill_ec_scaled_median": em, "hill_ec_hdi_low": elo,
+            "hill_ec_hdi_high": ehi,
             # ec back in raw activity units: ec * per-region media median
             "hill_ec_raw_units_min_region": float(em * med_scale.min()),
             "hill_ec_raw_units_median_region": float(em * np.median(med_scale)),
             "hill_ec_raw_units_max_region": float(em * med_scale.max()),
-            "hill_slope_median": sm, "hill_slope_hdi_5": slo, "hill_slope_hdi_95": shi,
+            "hill_slope_median": sm, "hill_slope_hdi_low": slo,
+            "hill_slope_hdi_high": shi,
             "slope_learned": bool(ch.learn_slope),
         }
         if ch.adstock == "delayed":
             tm, tlo, thi = _s(th_d[:, j])
-            row.update({"peak_lag_median": tm, "peak_lag_hdi_5": tlo,
-                        "peak_lag_hdi_95": thi})
+            row.update({"peak_lag_median": tm, "peak_lag_hdi_low": tlo,
+                        "peak_lag_hdi_high": thi})
         for fx in ("fix_alpha", "fix_ec", "fix_slope", "fix_theta"):
             v = getattr(ch, fx)
             if v is not None:

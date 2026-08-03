@@ -57,11 +57,53 @@ with **known** decay and saturation and shows the model recovering them.
 |---|---|
 | `01_data` | panel summary, media scaling medians, KPI plots |
 | `02_eda` | `eda_report.md` + CSVs/PNGs: panel gaps, variable summary, media spend shares & zero-weeks, correlation heatmap + high-correlation pairs, VIF, **spend-vs-execution consistency** (catches "spend booked while channel dark"), outliers incl. partial-final-week detection |
-| `03_convergence` | sampling log, R-hat/ESS/divergences, prior-posterior contraction, prior-predictive check |
-| `04_transforms` | **`transform_parameters.csv`** — learned decay (+ half-life), peak lag, ec in scaled AND raw units, slope, all with 90% intervals; **`adstock_ranges.csv`** — per channel×region: the adstocked ranges actually used, % of active weeks above ec (how far up the saturation curve you operate), carryover share; decay-curve and saturation-curve plots |
-| `05_coefficients` | coefficient report (median, HDI, P(>0), population row) + forest plots |
-| `06_fit` | R²/MAPE/wMAPE/MAE/coverage per region, train & holdout; fit and residual plots |
+| `03_convergence` | `sampling_log.json` run manifest (versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, prior-posterior contraction, prior-predictive check |
+| `04_transforms` | **`transform_parameters.csv`** — learned decay (+ half-life), peak lag, ec in scaled AND raw units, slope, all with 90% HDIs; **`adstock_ranges.csv`** — per channel×region: the adstocked ranges actually used, % of active weeks above ec (how far up the saturation curve you operate), carryover share; decay-curve and saturation-curve plots |
+| `05_coefficients` | coefficient report: median, sd, true 90% HDI, P(>0), population row, **original-unit conversions** (linear features: KPI units per raw unit; media: KPI units at full saturation) and **data-support flags** with `support_warnings.txt` |
+| `06_fit` | R²/MAPE/wMAPE/MAE per region, train & holdout, with **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response); fit plots show both bands |
 | `07_contributions` | contribution totals + shares with HDIs, decomposition chart, **ROI per channel** with credible intervals (if spend given; set `revenue_per_unit` if dv is units, not revenue) |
+
+## Cross-validation (expanding window / rolling origin)
+
+```python
+from config import CVConfig
+from cross_validation import run_cv
+cv = run_cv(df, cfg, RunConfig(run_name="pilot"),
+            SamplerConfig(sampler="numpyro"), CVConfig(horizon=13, n_folds=5))
+```
+
+Same expanding-window design as codebase 1 (and the PE package's temporal CV): each
+fold refits on an expanding training window — transform parameters re-learned per
+fold, scaling stats recomputed, no leakage — and predicts the next `horizon` periods.
+Outputs in `08_cross_validation/`: per-fold and mean±sd metrics (wMAPE,
+region-weighted MAPE, CRPS, predictive coverage, convergence flags), coefficient
+stability across folds, and — specific to this codebase — **transform stability**
+(`cv_transform_stability.csv` + `.png`): if the learned adstock decay or half-saturation
+point moves materially with the origin, the response curves (and any budget
+conclusion) are not yet pinned down by the data — consider `fix_*` pins or more
+history. `cv_report.md` gives the headline readout.
+
+CV here is *more* important than in codebase 1: learned transforms add flexibility
+and therefore overfitting risk. Each fold is a full refit — for sweeps use
+`SamplerConfig(sampler="advi")` (PE convention: ADVI for CV speed, NUTS for the final
+fit; ADVI understates uncertainty) or `CVConfig(draws=..., tune=...)`.
+
+Not used, deliberately: purged/embargoed CV (adstock only carries the *past* forward
+and media is known in advance — carryover into the test window is information, not
+leakage), PSIS-LOO as primary (autocorrelation breaks exchangeability), and
+leave-region-out CV.
+
+## Convergence guardrail
+
+`RunConfig(on_convergence_failure="fail")` makes the pipeline raise on max
+R-hat > 1.05 or >1% divergent transitions instead of persisting a bad fit
+(PE-style guardrail; default `"warn"`).
+
+**Interpretation notes** (from the AI code review of codebase 1, applied here too):
+intervals are true HDIs (`hdi_low`/`hdi_high`); holdout coverage uses posterior
+predictive draws (parameter uncertainty + likelihood noise); scaled coefficients are
+per-region-relative — use the `*_orig_units` columns for absolute comparisons; region
+noise is partially pooled on the log scale by default (`pool_sigma=False` to disable).
 
 ## Honest caveats (state these when presenting)
 

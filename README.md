@@ -69,3 +69,35 @@ NUTS on a GPU-capable backend.
 Each codebase folder has its own README with the data contract, configuration guide and a
 runnable synthetic example (`python synthetic_example.py`) that also serves as a
 parameter-recovery test.
+
+## Validation strategy (v1.2) — adopted from the PE package
+
+Both codebases now ship `cross_validation.py`: **expanding-window (rolling-origin)
+CV** — the same design as the PE package's hierarchical temporal CV. Each fold refits
+the full model on an expanding training window and predicts the next `horizon`
+periods; the single `holdout_periods` split remains as a quick smoke test. Reported
+per fold and aggregated: wMAPE, **region-weighted MAPE** (PE's SKU-weighted MAPE
+analogue), **CRPS**, predictive 90% coverage, convergence flags — plus
+**coefficient stability across folds** (and in codebase 2, **transform stability**:
+learned adstock decay / EC50 across folds), which is the real MMM trust check.
+
+Also adopted from the PE package: the **ADVI fast path** (`sampler="advi"` — CV and
+sweeps on ADVI, final fit on NUTS) and the **convergence guardrail**
+(`on_convergence_failure="fail"` raises instead of persisting an unconverged fit).
+
+Considered and not adopted (with reasons in the codebase READMEs): purged/embargoed
+CV, PSIS-LOO as the primary validation, leave-region-out CV, and the PE package's
+HSGP time-varying intercept (a bigger modelling change — the Fourier + trend baseline
+is the deliberate conservative first version; revisit if residuals show unexplained
+low-frequency drift).
+
+## Review fixes applied (v1.1)
+
+Following the AI code review (`review codebase1.md`), both codebases were updated:
+posterior **predictive** intervals now drive holdout coverage (mean-response intervals
+are reported separately); intervals are true HDIs named `hdi_low`/`hdi_high`;
+coefficient reports add **original-unit conversions** and **data-support flags** per
+region×feature; region noise is **partially pooled on the log scale** by default
+(`pool_sigma`); config validation and a full run manifest (package versions, sampler
+requested vs used) were added. Per-region scaling was kept deliberately — it is a
+different estimand, now explicitly labelled in the reports.

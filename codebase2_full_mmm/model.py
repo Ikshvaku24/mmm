@@ -154,7 +154,15 @@ def build_model(p: PanelData, cfg: ModelConfig) -> pm.Model:
             mu = mu + (pt.constant(X_b) * beta[:, None, :]).sum(axis=2)
 
         # ---- likelihood ------------------------------------------------------
-        sigma = pm.HalfNormal("sigma_region", 1.0, dims="region")
+        # region noise: partially pooled on the log scale by default
+        if cfg.pool_sigma:
+            mu_ls = pm.Normal("mu_log_sigma", -0.5, 1.0)
+            tau_ls = pm.HalfNormal("tau_log_sigma", 0.5)
+            z_ls = pm.Normal("z_log_sigma", 0.0, 1.0, dims="region")
+            sigma = pm.Deterministic("sigma_region",
+                                     pt.exp(mu_ls + tau_ls * z_ls), dims="region")
+        else:
+            sigma = pm.HalfNormal("sigma_region", 1.0, dims="region")
         if cfg.likelihood == "student_t":
             nu_raw = pm.Exponential("nu_minus_2", 0.1)
             nu = pm.Deterministic("nu", nu_raw + 2.0)

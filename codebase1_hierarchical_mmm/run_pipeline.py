@@ -29,7 +29,8 @@ import pandas as pd
 
 from config import ModelConfig, RunConfig, SamplerConfig
 from data_prep import prepare_data, write_data_stage_outputs
-from diagnostics import convergence_report, prior_posterior_report
+from diagnostics import (convergence_report, enforce_convergence,
+                         prior_posterior_report, quick_convergence_checks)
 from fit import fit, sample_prior
 from model import build_model
 from outputs import (coefficient_report, compute_decomposition,
@@ -64,6 +65,8 @@ def run(df: pd.DataFrame,
     convergence_report(idata, dirs["02_convergence"])
     prior_posterior_report(idata, dirs["02_convergence"])
     prior_predictive_plot(idata, pdata, dirs["02_convergence"])
+    enforce_convergence(quick_convergence_checks(idata),
+                        run_cfg.on_convergence_failure)
 
     print("[4/5] coefficients + fit quality")
     coef = coefficient_report(idata, pdata, dirs["03_coefficients"])

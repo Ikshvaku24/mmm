@@ -58,6 +58,10 @@ class FeatureSpec:
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
+        if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
+            raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
+        if not (np.isfinite(s.regional_sd) and s.regional_sd >= 0):
+            raise ValueError(f"{s.name}: regional_sd must be finite and >= 0")
         return s
 
 
@@ -101,6 +105,10 @@ class ModelConfig:
     include_trend: bool = False
     alpha_prior_sd: float = 0.5         # population intercept prior (dv is standardised)
     alpha_regional_sd: float = 0.5
+    pool_sigma: bool = True             # partial-pool region noise on the log scale
+                                        # (recommended when regions have unequal
+                                        # series lengths); False = independent
+                                        # HalfNormal sigma per region
 
     def __post_init__(self):
         self.features = [s.resolved() for s in self.features]
@@ -116,9 +124,15 @@ class SamplerConfig:
     chains: int = 4
     target_accept: float = 0.92
     seed: int = 42
-    sampler: str = "numpyro"            # "numpyro" (JAX/GPU) | "pymc" (fallback)
+    sampler: str = "numpyro"            # "numpyro" (JAX/GPU) | "pymc" | "advi"
     nuts_kwargs: dict = field(default_factory=dict)  # e.g. {"chain_method": "vectorized"}
     prior_predictive_draws: int = 500
+    store_log_likelihood: bool = False  # keep pointwise log-lik (needed for LOO/WAIC;
+                                        # increases trace size)
+    advi_iters: int = 30000             # sampler="advi": mean-field VI iterations.
+                                        # PE-package convention: ADVI for CV /
+                                        # exploration speed, NUTS for the final fit
+                                        # (ADVI understates uncertainty).
 
 
 @dataclass
@@ -130,3 +144,23 @@ class RunConfig:
     dv_col: str = "dv"
     holdout_periods: int = 0            # last N dates held out per region for OOS metrics
     report_draws: int = 400             # posterior draws used for decomposition/plots
+    on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail:
+                                          # "fail" raises instead of silently
+                                          # persisting an unconverged fit
+
+
+@dataclass
+class CVConfig:
+    """Expanding-window (rolling-origin) cross-validation settings.
+
+    Fold k trains on everything before its test window and predicts the next
+    `horizon` periods; origins step back through the series so accuracy and
+    coefficient stability are measured across several windows, not one.
+    """
+    horizon: int = 13                  # test periods per fold
+    n_folds: int = 5
+    step: int | None = None            # spacing between origins (default: horizon)
+    min_train_periods: int = 52        # skip folds with less training data
+    draws: int | None = None           # override sampler draws for CV speed
+    tune: int | None = None
+    make_plots: bool = True

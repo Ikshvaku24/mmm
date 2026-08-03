@@ -18,6 +18,54 @@ import pandas as pd
 RHAT_WARN = 1.01
 RHAT_FAIL = 1.05
 ESS_WARN = 400
+DIVERGENCE_FRAC_FAIL = 0.01   # >1% divergent transitions = geometry problem
+
+
+def quick_convergence_checks(idata) -> dict:
+    """Cheap numeric checks (no report files) - used per CV fold and by the
+    guardrail. NaN R-hat/ESS from constant Deterministics is ignored."""
+    out = {"max_rhat": np.nan, "min_ess_bulk": np.nan,
+           "divergences": 0, "divergence_frac": 0.0, "n_chains": 0}
+    try:
+        rhat = az.rhat(idata)
+        vals = np.concatenate([np.ravel(v.values) for v in rhat.data_vars.values()])
+        if np.isfinite(vals).any():
+            out["max_rhat"] = float(np.nanmax(vals))
+        ess = az.ess(idata)
+        evals = np.concatenate([np.ravel(v.values) for v in ess.data_vars.values()])
+        if np.isfinite(evals).any():
+            out["min_ess_bulk"] = float(np.nanmin(evals))
+    except Exception:  # noqa: BLE001  (e.g. single-chain ADVI posterior)
+        pass
+    try:
+        div = idata.sample_stats["diverging"].values
+        out["divergences"] = int(div.sum())
+        out["divergence_frac"] = float(div.mean())
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        out["n_chains"] = int(idata.posterior.sizes.get("chain", 0))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def enforce_convergence(checks: dict, policy: str = "warn") -> None:
+    """PE-style guardrail: 'fail' raises instead of silently persisting an
+    unconverged fit (the PE methodology flags warn-and-continue as a
+    production risk)."""
+    problems = []
+    if np.isfinite(checks.get("max_rhat", np.nan)) and checks["max_rhat"] > RHAT_FAIL:
+        problems.append(f"max R-hat {checks['max_rhat']:.3f} > {RHAT_FAIL}")
+    if checks.get("divergence_frac", 0.0) > DIVERGENCE_FRAC_FAIL:
+        problems.append(f"{checks['divergences']} divergences "
+                        f"({checks['divergence_frac'] * 100:.1f}% of transitions)")
+    if not problems:
+        return
+    msg = "convergence guardrail: " + "; ".join(problems)
+    if policy == "fail":
+        raise RuntimeError(msg + " (on_convergence_failure='fail')")
+    print(f"[diagnostics] WARNING - {msg}")
 
 
 def convergence_report(idata, outdir: str) -> pd.DataFrame:
@@ -31,15 +79,32 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
         n_div = int(idata.sample_stats["diverging"].values.sum())
     worst_rhat = float(summ["r_hat"].max())
     min_ess = float(summ["ess_bulk"].min())
+    min_ess_tail = float(summ["ess_tail"].min()) if "ess_tail" in summ else np.nan
     lines.append(f"max R-hat        : {worst_rhat:.4f}  "
                  f"({'OK' if worst_rhat < RHAT_WARN else 'WARN' if worst_rhat < RHAT_FAIL else 'FAIL'})")
     lines.append(f"min ESS (bulk)   : {min_ess:.0f}  "
                  f"({'OK' if min_ess > ESS_WARN else 'WARN'})")
+    if np.isfinite(min_ess_tail):
+        lines.append(f"min ESS (tail)   : {min_ess_tail:.0f}  "
+                     f"({'OK' if min_ess_tail > ESS_WARN else 'WARN (interval endpoints unstable)'})")
     lines.append(f"divergences      : {n_div}  ({'OK' if n_div == 0 else 'INVESTIGATE'})")
     try:
         bfmi = az.bfmi(idata)
-        lines.append(f"min BFMI         : {float(np.min(bfmi)):.3f}  "
+        per_chain = ", ".join(f"{b:.2f}" for b in np.atleast_1d(bfmi))
+        lines.append(f"BFMI by chain    : [{per_chain}]  "
                      f"({'OK' if np.min(bfmi) > 0.3 else 'WARN (poor energy exploration)'})")
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        ss = idata.sample_stats
+        for key in ("tree_depth", "depth"):
+            if key in ss:
+                td = ss[key].values
+                lines.append(f"max tree depth   : {int(td.max())}  "
+                             f"(saturated in {float((td >= td.max()).mean()) * 100:.1f}% "
+                             "of steps)" if td.max() >= 10 else
+                             f"max tree depth   : {int(td.max())}  (OK)")
+                break
     except Exception:  # noqa: BLE001
         pass
     lines.append("")

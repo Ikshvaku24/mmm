@@ -61,10 +61,68 @@ Smoke test / parameter recovery: `python synthetic_example.py`.
 | folder | contents |
 |---|---|
 | `01_data` | panel summary, per-region scaling stats, KPI plots |
-| `02_convergence` | sampling log (backend, wall time), R-hat / ESS / divergences report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
-| `03_coefficients` | `coefficient_report.csv` (median, sd, 90% HDI, **P(effect>0)** per region + population row) and forest plots showing shrinkage toward the population mean |
-| `04_fit` | R² / MAPE / wMAPE / MAE / 90%-coverage per region, train **and holdout**, actual-vs-fitted with credible bands, residual plots |
+| `02_convergence` | `sampling_log.json` run manifest (package versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
+| `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0), **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none/weak/adequate` — a region where the feature never ran gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
+| `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); fit plots show both bands; residual plots |
 | `05_contributions` | contribution totals with HDIs and share-of-sales, bar chart, weekly portfolio decomposition |
+
+## Cross-validation (expanding window / rolling origin)
+
+The single `holdout_periods` split is a smoke test, not validation: one origin, one
+window, high variance, one slice of the seasonal cycle. For a defensible predictive
+story use the expanding-window CV (same design as the PE package's hierarchical
+temporal CV):
+
+```python
+from config import CVConfig, ModelConfig, RunConfig, SamplerConfig
+from cross_validation import run_cv
+
+cv = run_cv(df, model_cfg, RunConfig(run_name="fy26"),
+            SamplerConfig(sampler="numpyro"),
+            CVConfig(horizon=13, n_folds=5))          # 5 refits, ~13-week horizon
+```
+
+Each fold refits the full model on an expanding training window (scaling stats
+recomputed per fold — no leakage) and predicts the next `horizon` periods. Outputs in
+`06_cross_validation/`:
+
+- `cv_fold_metrics.csv` / `cv_summary.csv` — per-fold and mean±sd test metrics:
+  wMAPE, **region-weighted MAPE** (volume-weighted average of per-region MAPEs — the
+  PE package's SKU-weighted MAPE, answering a different question than wMAPE),
+  **CRPS** (proper scoring rule combining calibration and sharpness), predictive
+  90% coverage, plus per-fold convergence flags.
+- `cv_coefficient_stability.csv` + `cv_stability_ranking.csv` + `stability/*.png` —
+  **the key MMM trust check**: coefficient medians across folds. A feature that
+  swings as the origin moves has a fragile contribution story regardless of wMAPE.
+- `cv_report.md` — headline readout.
+
+Speed: fold count × one fit. For sweeps use `SamplerConfig(sampler="advi")` (PE
+convention: **ADVI for CV speed, NUTS for the final fit** — mean-field ADVI
+understates uncertainty, so use it for relative comparison only) or override
+`CVConfig(draws=..., tune=...)`.
+
+Deliberately **not** used: purged/embargoed CV (features here are exogenous and known
+in advance — no label leakage to purge), PSIS-LOO as the primary tool (exchangeability
+fails on autocorrelated panels; enable `store_log_likelihood` if you want it for
+relative comparison), and leave-region-out CV (answers a transfer question nobody
+asked and fights the hierarchy).
+
+## Convergence guardrail
+
+`RunConfig(on_convergence_failure="fail")` makes the pipeline **raise** when max
+R-hat > 1.05 or >1% of transitions diverge, instead of silently persisting a bad fit
+(the PE methodology flags warn-and-continue as a production risk; default remains
+`"warn"` for exploration).
+
+**Interpretation notes** (from the AI code review, adopted):
+- Intervals are true HDIs (shortest interval), named `hdi_low`/`hdi_high`.
+- Holdout coverage is judged against **posterior predictive** intervals (parameter
+  uncertainty + likelihood noise), not mean-response intervals.
+- Scaled coefficients pool "response in region-relative units"; equal scaled effects
+  in two regions do **not** imply equal original-unit response — use the
+  `*_orig_units` columns when comparing regions in absolute terms.
+- Region noise `sigma_g` is partially pooled on the log scale by default
+  (`ModelConfig(pool_sigma=False)` for independent sigmas).
 
 ## What changed vs `production_code.py` (talking points)
 
