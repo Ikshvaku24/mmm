@@ -156,8 +156,20 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     # ---- feature scaling ---------------------------------------------------
     X = np.zeros((len(d), len(feat_names)))
     scale_rows = []
+    dust_counts = {}
     for j, spec in enumerate(model_cfg.features):
         v = d[spec.name].to_numpy(dtype=float)
+        # pre-transformed data often carries adstock-tail "dust" (e.g. 5e-17)
+        # where true zeros belong; it corrupts the mean-of-positives scale and
+        # the activity counts, so snap it to zero when a threshold is set
+        if run_cfg.zero_threshold_rel > 0:
+            vmax = np.max(np.abs(v))
+            if vmax > 0:
+                dust = (np.abs(v) < run_cfg.zero_threshold_rel * vmax) & (v != 0)
+                if dust.any():
+                    dust_counts[spec.name] = int(dust.sum())
+                    v = v.copy()
+                    v[dust] = 0.0
         if spec.sign != "free" and (v < 0).any():
             warnings.warn(f"{spec.name}: sign-constrained features are scaled "
                           "without centering, which assumes non-negative values - "
@@ -177,6 +189,10 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                 scale_rows.append((regions[g], spec.name, "scale_only", 0.0, sc))
     x_scale_table = pd.DataFrame(
         scale_rows, columns=["region", "feature", "method", "center", "scale"])
+    if dust_counts:
+        print(f"[data] zeroed near-zero dust (|v| < {run_cfg.zero_threshold_rel:g} "
+              f"x max|v|) in {len(dust_counts)} features, e.g. "
+              f"{dict(list(dust_counts.items())[:5])}")
 
     # ---- seasonality & trend ----------------------------------------------
     Xf, f_names = fourier_features(d[dc], model_cfg.fourier_order,

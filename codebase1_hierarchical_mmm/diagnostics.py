@@ -15,6 +15,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
+from compat import get_group, has_group
+
 RHAT_WARN = 1.01
 RHAT_FAIL = 1.05
 ESS_WARN = 400
@@ -38,13 +40,15 @@ def quick_convergence_checks(idata) -> dict:
     except Exception:  # noqa: BLE001  (e.g. single-chain ADVI posterior)
         pass
     try:
-        div = idata.sample_stats["diverging"].values
-        out["divergences"] = int(div.sum())
-        out["divergence_frac"] = float(div.mean())
+        ss = get_group(idata, "sample_stats")
+        if "diverging" in ss:
+            div = ss["diverging"].values
+            out["divergences"] = int(div.sum())
+            out["divergence_frac"] = float(div.mean())
     except Exception:  # noqa: BLE001
         pass
     try:
-        out["n_chains"] = int(idata.posterior.sizes.get("chain", 0))
+        out["n_chains"] = int(get_group(idata, "posterior").sizes.get("chain", 0))
     except Exception:  # noqa: BLE001
         pass
     return out
@@ -75,8 +79,10 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
 
     lines = []
     n_div = 0
-    if hasattr(idata, "sample_stats") and "diverging" in idata.sample_stats:
-        n_div = int(idata.sample_stats["diverging"].values.sum())
+    if has_group(idata, "sample_stats"):
+        ss0 = get_group(idata, "sample_stats")
+        if "diverging" in ss0:
+            n_div = int(ss0["diverging"].values.sum())
     worst_rhat = float(summ["r_hat"].max())
     min_ess = float(summ["ess_bulk"].min())
     min_ess_tail = float(summ["ess_tail"].min()) if "ess_tail" in summ else np.nan
@@ -96,7 +102,7 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
     except Exception:  # noqa: BLE001
         pass
     try:
-        ss = idata.sample_stats
+        ss = get_group(idata, "sample_stats")
         for key in ("tree_depth", "depth"):
             if key in ss:
                 td = ss[key].values
@@ -142,16 +148,18 @@ def prior_posterior_report(idata, outdir: str,
                                          "adstock_", "hill_", "sigma_region")) -> None:
     """Contraction = 1 - posterior_var/prior_var. Near 1: data did the work.
     Near 0: the number is your prior, not a finding (report it as such)."""
-    if not hasattr(idata, "prior"):
+    if not has_group(idata, "prior"):
         return
+    prior = get_group(idata, "prior")
+    posterior = get_group(idata, "posterior")
     rows = []
-    for v in idata.prior.data_vars:
+    for v in prior.data_vars:
         if not any(v.startswith(p) for p in var_prefixes):
             continue
-        if v not in idata.posterior:
+        if v not in posterior:
             continue
-        pr = idata.prior[v].stack(s=("chain", "draw")).values
-        po = idata.posterior[v].stack(s=("chain", "draw")).values
+        pr = prior[v].stack(s=("chain", "draw")).values
+        po = posterior[v].stack(s=("chain", "draw")).values
         pr = pr.reshape(-1, pr.shape[-1]) if pr.ndim > 1 else pr.reshape(1, -1)
         po = po.reshape(-1, po.shape[-1]) if po.ndim > 1 else po.reshape(1, -1)
         for i in range(pr.shape[0]):

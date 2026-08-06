@@ -1,14 +1,21 @@
-"""Sampling with a GPU-capable backend and graceful fallback.
+"""Sampling with a GPU-capable backend and controlled fallback.
 
 Preferred: nuts_sampler="numpyro" -> the model is JIT-compiled with JAX and
 NUTS runs on GPU if one is visible to JAX (Databricks GPU cluster, Colab),
-otherwise on JIT-compiled CPU (still typically several x faster than the
-default PyMC sampler). Falls back to the default sampler if JAX/NumPyro is
-not installed.
+otherwise on JIT-compiled CPU. On a single GPU set
+SamplerConfig(chain_method="vectorized") to run all chains in one kernel -
+otherwise NumPyro warns "not enough devices to run parallel chains" and runs
+them sequentially.
+
+Fallback to the default PyMC sampler only happens when
+allow_sampler_fallback=True (off by default: a failed GPU run should raise,
+not silently burn CPU hours). The PyMC fallback uses cores=1 because
+forking worker processes after JAX has initialised can deadlock.
 
 Every run writes sampling_log.json - a run manifest with package versions,
-devices, the sampler REQUESTED vs the sampler actually USED, and timings.
-Always check it: a successful run does not by itself mean the GPU was used.
+devices, the sampler REQUESTED vs the sampler actually USED, chain method and
+timings. Always check it: a successful run does not by itself mean the GPU
+was used.
 """
 from __future__ import annotations
 
@@ -55,49 +62,65 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
         return _fit_advi(model, scfg, outdir)
     common = dict(draws=scfg.draws, tune=scfg.tune, chains=scfg.chains,
                   target_accept=scfg.target_accept, random_seed=scfg.seed,
-                  return_inferencedata=True,
-                  idata_kwargs={"log_likelihood": scfg.store_log_likelihood})
+                  return_inferencedata=True)
 
-    order = [scfg.sampler] + [s for s in ("numpyro", "pymc") if s != scfg.sampler]
+    if scfg.allow_sampler_fallback:
+        order = [scfg.sampler] + [s for s in ("numpyro", "pymc")
+                                  if s != scfg.sampler]
+    else:
+        order = [scfg.sampler]
+
     log = {
         "backend_info": describe_backend(),
         "versions": package_versions(),
         "sampler_requested": scfg.sampler,
+        "chain_method": scfg.chain_method,
         "nuts_kwargs": scfg.nuts_kwargs or {},
         "seed": scfg.seed,
         "draws": scfg.draws, "tune": scfg.tune, "chains": scfg.chains,
         "target_accept": scfg.target_accept,
         "store_log_likelihood": scfg.store_log_likelihood,
+        "allow_sampler_fallback": scfg.allow_sampler_fallback,
     }
-    idata, used, err = None, None, None
-    for s in order:
+    idata, used, last_error = None, None, None
+    for sampler in order:
         t0 = time.time()
         try:
             with model:
-                if s == "pymc":
-                    idata = pm.sample(init="adapt_diag", **common)
+                if sampler == "pymc":
+                    # cores=1: forking after JAX initialises can deadlock
+                    idata = pm.sample(init="adapt_diag", cores=1, **common)
                 else:
                     kw = dict(common)
+                    nsk = {"chain_method": scfg.chain_method}
                     if scfg.nuts_kwargs:
-                        kw["nuts_sampler_kwargs"] = scfg.nuts_kwargs
-                    idata = pm.sample(nuts_sampler=s, **kw)
-            used = s
-            log["sampler_used"] = s
+                        nsk["nuts_kwargs"] = scfg.nuts_kwargs
+                    kw["nuts_sampler_kwargs"] = nsk
+                    idata = pm.sample(nuts_sampler=sampler, **kw)
+            used = sampler
+            log["sampler_used"] = sampler
             log["wall_seconds"] = round(time.time() - t0, 1)
             break
         except Exception as e:  # noqa: BLE001
-            err = f"{s}: {e.__class__.__name__}: {e}"
-            log[f"failed_{s}"] = err
-            continue
+            last_error = f"{sampler}: {e.__class__.__name__}: {e}"
+            log[f"failed_{sampler}"] = last_error
+            print(f"[fit] WARNING: sampler '{sampler}' failed - {last_error}")
     if idata is None:
-        raise RuntimeError(f"all samplers failed; last error: {err}")
+        raise RuntimeError(f"all configured samplers failed; last error: {last_error}")
+
+    if scfg.store_log_likelihood:
+        with model:
+            result = pm.compute_log_likelihood(idata, extend_inferencedata=True)
+            if result is not None:
+                idata = result
 
     if outdir:
         os.makedirs(outdir, exist_ok=True)
-        with open(os.path.join(outdir, "sampling_log.json"), "w") as f:
+        with open(os.path.join(outdir, "sampling_log.json"), "w",
+                  encoding="utf-8") as f:
             json.dump(log, f, indent=2, default=str)
     print(f"[fit] sampled with '{used}' in {log.get('wall_seconds', '?')}s "
-          f"({log['backend_info']})")
+          f"({log['backend_info']}, chain_method={scfg.chain_method})")
     return idata
 
 

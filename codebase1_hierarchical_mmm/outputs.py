@@ -27,6 +27,7 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
+from compat import get_group, has_group
 from config import ModelConfig, RunConfig
 from data_prep import PreparedData
 
@@ -35,7 +36,7 @@ from data_prep import PreparedData
 # posterior access helpers
 # --------------------------------------------------------------------------
 def stack_posterior(idata, n_draws: int | None = None, seed: int = 0):
-    post = idata.posterior.stack(sample=("chain", "draw"))
+    post = get_group(idata, "posterior").stack(sample=("chain", "draw"))
     total = post.sizes["sample"]
     if n_draws and n_draws < total:
         rng = np.random.default_rng(seed)
@@ -454,10 +455,13 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 def prior_predictive_plot(idata, pdata: PreparedData, outdir: str) -> None:
     """Sanity check: does the model *before seeing data* generate KPI values on
     the right scale? (Meridian: prior sampling step.)"""
-    if not hasattr(idata, "prior_predictive") or "y_obs" not in idata.prior_predictive:
+    if not has_group(idata, "prior_predictive"):
+        return
+    ppd = get_group(idata, "prior_predictive")
+    if "y_obs" not in ppd:
         return
     os.makedirs(outdir, exist_ok=True)
-    pp = idata.prior_predictive["y_obs"].values.reshape(-1)
+    pp = ppd["y_obs"].values.reshape(-1)
     fig, ax = plt.subplots(figsize=(7, 3.5))
     ax.hist(pp, bins=60, density=True, alpha=0.5, label="prior predictive (scaled)")
     ax.hist(pdata.y[pdata.train_mask], bins=60, density=True, alpha=0.5,

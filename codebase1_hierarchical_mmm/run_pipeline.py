@@ -24,9 +24,9 @@ from __future__ import annotations
 
 import os
 
-import arviz as az
 import pandas as pd
 
+from compat import extend_idata, save_idata
 from config import ModelConfig, RunConfig, SamplerConfig
 from data_prep import prepare_data, write_data_stage_outputs
 from diagnostics import (convergence_report, enforce_convergence,
@@ -59,7 +59,7 @@ def run(df: pd.DataFrame,
     model = build_model(pdata, model_cfg)
     prior_idata = sample_prior(model, sampler_cfg)
     idata = fit(model, sampler_cfg, outdir=dirs["02_convergence"])
-    idata.extend(prior_idata)
+    extend_idata(idata, prior_idata)
 
     print("[3/5] convergence diagnostics")
     convergence_report(idata, dirs["02_convergence"])
@@ -78,7 +78,7 @@ def run(df: pd.DataFrame,
     contrib = contribution_report(decomp, pdata, dirs["05_contributions"])
 
     if save_trace:
-        az.to_netcdf(idata, os.path.join(root, "trace.nc"))
+        save_idata(idata, os.path.join(root, "trace.nc"))
 
     print(f"done -> {root}")
     return {"idata": idata, "pdata": pdata, "decomposition": decomp,

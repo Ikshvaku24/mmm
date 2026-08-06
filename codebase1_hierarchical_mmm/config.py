@@ -60,8 +60,12 @@ class FeatureSpec:
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
         if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
             raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
-        if not (np.isfinite(s.regional_sd) and s.regional_sd >= 0):
-            raise ValueError(f"{s.name}: regional_sd must be finite and >= 0")
+        if not np.isfinite(s.regional_sd):
+            raise ValueError(f"{s.name}: regional_sd must be finite")
+        if s.hierarchical and s.regional_sd <= 0:
+            raise ValueError(f"{s.name}: hierarchical features require regional_sd > 0")
+        if s.regional_sd < 0:
+            raise ValueError(f"{s.name}: regional_sd cannot be negative")
         return s
 
 
@@ -115,6 +119,10 @@ class ModelConfig:
         names = [s.name for s in self.features]
         if len(names) != len(set(names)):
             raise ValueError("duplicate feature names in config")
+        if self.likelihood not in {"normal", "student_t"}:
+            raise ValueError("likelihood must be 'normal' or 'student_t'")
+        if self.fourier_order < 0:
+            raise ValueError("fourier_order must be >= 0")
 
 
 @dataclass
@@ -125,14 +133,32 @@ class SamplerConfig:
     target_accept: float = 0.92
     seed: int = 42
     sampler: str = "numpyro"            # "numpyro" (JAX/GPU) | "pymc" | "advi"
-    nuts_kwargs: dict = field(default_factory=dict)  # e.g. {"chain_method": "vectorized"}
+    chain_method: str = "sequential"    # NumPyro chain execution: "sequential" |
+                                        # "parallel" (multi-device) | "vectorized"
+                                        # (recommended on a single GPU)
+    nuts_kwargs: dict = field(default_factory=dict)  # extra args for the NUTS
+                                        # kernel only (NOT chain_method)
     prior_predictive_draws: int = 500
-    store_log_likelihood: bool = False  # keep pointwise log-lik (needed for LOO/WAIC;
-                                        # increases trace size)
+    store_log_likelihood: bool = False  # compute pointwise log-lik after sampling
+                                        # (needed for LOO/WAIC; increases trace size)
     advi_iters: int = 30000             # sampler="advi": mean-field VI iterations.
                                         # PE-package convention: ADVI for CV /
                                         # exploration speed, NUTS for the final fit
                                         # (ADVI understates uncertainty).
+    allow_sampler_fallback: bool = False  # False = a failed numpyro/GPU run raises
+                                          # instead of silently switching to the
+                                          # slow default sampler
+
+    def __post_init__(self):
+        if self.sampler not in {"numpyro", "pymc", "advi"}:
+            raise ValueError("sampler must be 'numpyro', 'pymc', or 'advi'")
+        if self.chain_method not in {"sequential", "parallel", "vectorized"}:
+            raise ValueError(
+                "chain_method must be 'sequential', 'parallel', or 'vectorized'")
+        if self.draws <= 0 or self.chains <= 0 or self.tune < 0:
+            raise ValueError("draws/chains must be > 0 and tune >= 0")
+        if not 0 < self.target_accept < 1:
+            raise ValueError("target_accept must be between 0 and 1")
 
 
 @dataclass
@@ -147,6 +173,18 @@ class RunConfig:
     on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail:
                                           # "fail" raises instead of silently
                                           # persisting an unconverged fit
+    zero_threshold_rel: float = 0.0       # if > 0: feature values with
+                                          # |v| < threshold * max|v| are set to 0
+                                          # before scaling. Use ~1e-6 for
+                                          # pre-transformed data whose adstock tail
+                                          # leaves numerical dust (e.g. 5.2e-17)
+                                          # instead of exact zeros.
+
+    def __post_init__(self):
+        if self.on_convergence_failure not in {"warn", "fail"}:
+            raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
+        if self.zero_threshold_rel < 0:
+            raise ValueError("zero_threshold_rel must be >= 0")
 
 
 @dataclass
