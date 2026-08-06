@@ -177,12 +177,26 @@ class SamplerConfig:
     target_accept: float = 0.92
     seed: int = 42
     sampler: str = "numpyro"
-    nuts_kwargs: dict = field(default_factory=dict)
+    chain_method: str = "sequential"      # NumPyro chains: "sequential" |
+                                          # "parallel" | "vectorized" (1 GPU)
+    nuts_kwargs: dict = field(default_factory=dict)  # NUTS kernel args only
     prior_predictive_draws: int = 500
-    store_log_likelihood: bool = False    # keep pointwise log-lik (needed for LOO/WAIC)
+    store_log_likelihood: bool = False    # compute pointwise log-lik post-fit
     advi_iters: int = 30000               # sampler="advi": mean-field VI iterations
                                           # (PE convention: ADVI for CV speed,
                                           # NUTS for the final fit)
+    allow_sampler_fallback: bool = False  # False = failed numpyro run raises
+
+    def __post_init__(self):
+        if self.sampler not in {"numpyro", "pymc", "advi"}:
+            raise ValueError("sampler must be 'numpyro', 'pymc', or 'advi'")
+        if self.chain_method not in {"sequential", "parallel", "vectorized"}:
+            raise ValueError(
+                "chain_method must be 'sequential', 'parallel', or 'vectorized'")
+        if self.draws <= 0 or self.chains <= 0 or self.tune < 0:
+            raise ValueError("draws/chains must be > 0 and tune >= 0")
+        if not 0 < self.target_accept < 1:
+            raise ValueError("target_accept must be between 0 and 1")
 
 
 @dataclass
