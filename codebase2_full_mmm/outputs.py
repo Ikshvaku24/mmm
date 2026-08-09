@@ -24,6 +24,25 @@ from data_prep import PanelData
 from transforms import adstock_weights_np, apply_adstock_np, hill_np
 
 
+def save_fig(fig, path: str, dpi: int = 130) -> None:
+    """Robust savefig: ensure the directory exists, retry once (the Databricks
+    /Workspace filesystem can transiently fail rapid PNG writes), and on final
+    failure warn-and-continue - a plot must never kill a finished fit."""
+    import time as _time
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    for attempt in (1, 2):
+        try:
+            fig.savefig(path, dpi=dpi)
+            break
+        except OSError as e:
+            if attempt == 2:
+                print(f"[outputs] WARNING: could not save {path}: {e}")
+            else:
+                _time.sleep(0.5)
+                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    plt.close(fig)
+
+
 def stack_posterior(idata, n_draws: int | None = None, seed: int = 0):
     post = get_group(idata, "posterior").stack(sample=("chain", "draw"))
     total = post.sizes["sample"]
@@ -256,8 +275,7 @@ def coefficient_report(idata, p: PanelData, outdir: str,
             ax.set_title(f"{name} - regional coefficients, scaled axes "
                          "(median, 90% HDI)", fontsize=10)
             fig.tight_layout()
-            fig.savefig(os.path.join(fdir, f"{name}.png"), dpi=130)
-            plt.close(fig)
+            save_fig(fig, os.path.join(fdir, f"{name}.png"))
     return df
 
 
@@ -366,8 +384,7 @@ def fit_report(decomp: Decomposition, p: PanelData, outdir: str) -> pd.DataFrame
         axes[k // ncol][k % ncol].axis("off")
     fig.suptitle("Actual vs fitted (orange = holdout)")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "actual_vs_fitted.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "actual_vs_fitted.png"))
 
     resid = (p.y_orig - med).ravel()
     fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
@@ -378,8 +395,7 @@ def fit_report(decomp: Decomposition, p: PanelData, outdir: str) -> pd.DataFrame
     axes[1].hist(resid, bins=40)
     axes[1].set_title("residual distribution")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "residuals.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "residuals.png"))
     return dfm
 
 
@@ -422,8 +438,7 @@ def contribution_report(decomp: Decomposition, p: PanelData, cfg: ModelConfig,
     ax.axvline(0, color="grey", lw=0.8)
     ax.set_title("Total contribution by feature (median, 90% HDI)")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "contribution_bars.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "contribution_bars.png"))
 
     # weekly portfolio decomposition
     weekly = pd.DataFrame(index=p.dates)
@@ -444,8 +459,7 @@ def contribution_report(decomp: Decomposition, p: PanelData, cfg: ModelConfig,
     ax.legend(fontsize=7, ncol=3)
     ax.set_title("Portfolio decomposition (posterior-median contributions)")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "decomposition_area.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "decomposition_area.png"))
 
     # ROI for channels with spend
     roi_rows = []
@@ -482,8 +496,7 @@ def contribution_report(decomp: Decomposition, p: PanelData, cfg: ModelConfig,
                      + ("" if run_cfg.revenue_per_unit == 1.0
                         else f"  [revenue_per_unit={run_cfg.revenue_per_unit}]"))
         fig.tight_layout()
-        fig.savefig(os.path.join(outdir, "roi_bars.png"), dpi=130)
-        plt.close(fig)
+        save_fig(fig, os.path.join(outdir, "roi_bars.png"))
     return df
 
 
@@ -502,5 +515,4 @@ def prior_predictive_plot(idata, p: PanelData, outdir: str) -> None:
     ax.legend(fontsize=8)
     ax.set_title("Prior predictive check - KPI scale")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "prior_predictive_check.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "prior_predictive_check.png"))

@@ -40,7 +40,7 @@ from diagnostics import quick_convergence_checks
 from fit import fit
 from model import build_model
 from outputs import (beta_draws_all, compute_decomposition, compute_fit_metrics,
-                     stack_posterior)
+                     save_fig, stack_posterior)
 from transforms import half_life
 
 
@@ -161,9 +161,7 @@ def run_cv(df: pd.DataFrame,
                 ax.set_xlabel("fold (chronological)")
                 ax.legend(fontsize=7)
             fig.tight_layout()
-            fig.savefig(os.path.join(outdir, "cv_transform_stability.png"),
-                        dpi=130)
-            plt.close(fig)
+            save_fig(fig, os.path.join(outdir, "cv_transform_stability.png"))
 
     if cv_cfg.make_plots:
         sdir = os.path.join(outdir, "stability")
@@ -181,8 +179,7 @@ def run_cv(df: pd.DataFrame,
             if grp["region"].nunique() <= 10:
                 ax.legend(fontsize=7)
             fig.tight_layout()
-            fig.savefig(os.path.join(sdir, f"{name}.png"), dpi=130)
-            plt.close(fig)
+            save_fig(fig, os.path.join(sdir, f"{name}.png"))
 
     # ---- headline report ----------------------------------------------------
     t_all = test[test["region"] == "__all__"]

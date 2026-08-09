@@ -95,7 +95,7 @@ def main():
               RunConfig(run_name="synthetic_check", holdout_periods=13,
                         report_draws=400),
               SamplerConfig(draws=1000, tune=1000, chains=4, sampler="numpyro",
-                            chain_method="vectorized",
+                            chain_method="vectorized", target_accept=0.95,
                             allow_sampler_fallback=True))
 
     coef = res["coefficients"]

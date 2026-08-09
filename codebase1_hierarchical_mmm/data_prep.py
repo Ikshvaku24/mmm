@@ -230,6 +230,10 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str) -> None:
             "n_train": int((m & pdata.train_mask).sum()),
             "n_test": int((m & pdata.test_mask).sum()),
             "dv_mean": pdata.y_orig[m].mean(), "dv_sd": pdata.y_orig[m].std(),
+            # KPI scaling applied internally: y_scaled = (dv - mean) / sd,
+            # train-window stats - the reason dv must arrive UNstandardised
+            "kpi_center_used": pdata.y_mean[g],
+            "kpi_scale_used": pdata.y_scale[g],
             "date_min": str(pdata.dates[m].min().date()),
             "date_max": str(pdata.dates[m].max().date()),
         })
@@ -254,5 +258,8 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str) -> None:
         axes[k // ncol][k % ncol].axis("off")
     fig.suptitle("KPI by region (orange = holdout)")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "kpi_by_region.png"), dpi=130)
+    try:
+        fig.savefig(os.path.join(outdir, "kpi_by_region.png"), dpi=130)
+    except OSError as e:  # e.g. Databricks /Workspace FS hiccup - not fatal
+        print(f"[data] WARNING: could not save kpi_by_region.png: {e}")
     plt.close(fig)

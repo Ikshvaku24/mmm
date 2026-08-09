@@ -43,6 +43,11 @@ model_cfg = ModelConfig(
     pool_sigma=True,
 )
 
+# Databricks tip: /Workspace paths can transiently fail rapid PNG writes.
+# Prefer fast local disk, then copy the finished run folder wherever you keep
+# results, e.g.:
+#   output_dir="/local_disk0/mmm_outputs"
+#   ... after run(): shutil.copytree(result["output_dir"], "/Workspace/.../outputs", dirs_exist_ok=True)
 run_cfg = RunConfig(
     run_name="real_data_v1",
     holdout_periods=13,           # ~1 quarter OOS; needs >= 23 total periods

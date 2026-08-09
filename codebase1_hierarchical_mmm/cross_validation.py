@@ -49,7 +49,7 @@ from diagnostics import quick_convergence_checks
 from fit import fit
 from model import build_model
 from outputs import (beta_draws_by_feature, compute_decomposition,
-                     compute_fit_metrics, stack_posterior)
+                     compute_fit_metrics, save_fig, stack_posterior)
 
 
 def run_cv(df: pd.DataFrame,
@@ -156,8 +156,7 @@ def run_cv(df: pd.DataFrame,
             if grp["region"].nunique() <= 10:
                 ax.legend(fontsize=7)
             fig.tight_layout()
-            fig.savefig(os.path.join(sdir, f"{name}.png"), dpi=130)
-            plt.close(fig)
+            save_fig(fig, os.path.join(sdir, f"{name}.png"))
 
     # ---- headline report ----------------------------------------------------
     t_all = test[test["region"] == "__all__"]

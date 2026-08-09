@@ -91,12 +91,7 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
                     # cores=1: forking after JAX initialises can deadlock
                     idata = pm.sample(init="adapt_diag", cores=1, **common)
                 else:
-                    kw = dict(common)
-                    nsk = {"chain_method": scfg.chain_method}
-                    if scfg.nuts_kwargs:
-                        nsk["nuts_kwargs"] = scfg.nuts_kwargs
-                    kw["nuts_sampler_kwargs"] = nsk
-                    idata = pm.sample(nuts_sampler=sampler, **kw)
+                    idata = _sample_external(model, sampler, common, scfg, log)
             used = sampler
             log["sampler_used"] = sampler
             log["wall_seconds"] = round(time.time() - t0, 1)
@@ -122,6 +117,40 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
     print(f"[fit] sampled with '{used}' in {log.get('wall_seconds', '?')}s "
           f"({log['backend_info']}, chain_method={scfg.chain_method})")
     return idata
+
+
+def _sample_external(model, sampler: str, common: dict, scfg: SamplerConfig,
+                     log: dict):
+    """Call pm.sample for an external (JAX) sampler across PyMC API versions.
+
+    Where chain_method and NUTS-kernel kwargs go has changed between PyMC
+    releases (older: everything inside nuts_sampler_kwargs; newer: kernel args
+    via `nuts=`, chain_method as a direct kwarg, and nuts_sampler_kwargs is
+    forwarded to the kernel - which then rejects chain_method). Try newest
+    first, then the legacy form, then give up on the chain hint but still
+    sample. Only signature errors (TypeError) trigger the next attempt.
+    """
+    newest = {"chain_method": scfg.chain_method}
+    if scfg.nuts_kwargs:
+        newest["nuts"] = scfg.nuts_kwargs
+    legacy_inner = {"chain_method": scfg.chain_method}
+    if scfg.nuts_kwargs:
+        legacy_inner["nuts_kwargs"] = scfg.nuts_kwargs
+    attempts = [newest, {"nuts_sampler_kwargs": legacy_inner}, {}]
+
+    sig_error = None
+    for extra in attempts:
+        try:
+            idata = pm.sample(nuts_sampler=sampler, **common, **extra)
+            log["chain_method_applied"] = bool(extra)
+            if not extra:
+                print("[fit] NOTE: this PyMC version accepted no chain_method "
+                      "argument - chains ran with the backend default")
+            return idata
+        except TypeError as e:
+            sig_error = e
+            continue
+    raise sig_error
 
 
 def _fit_advi(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):

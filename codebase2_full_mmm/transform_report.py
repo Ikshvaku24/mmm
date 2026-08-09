@@ -26,7 +26,7 @@ import pandas as pd
 
 from config import ModelConfig
 from data_prep import PanelData
-from outputs import _hdi, stack_posterior
+from outputs import _hdi, save_fig, stack_posterior
 from transforms import adstock_weights_np, apply_adstock_np, half_life
 
 
@@ -133,8 +133,7 @@ def transform_report(idata, p: PanelData, cfg: ModelConfig, outdir: str,
         axes[k // ncol][k % ncol].axis("off")
     fig.suptitle("Learned adstock (carryover) curves - median and 90% interval")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "adstock_decay_curves.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "adstock_decay_curves.png"))
 
     # ---- saturation curve plot --------------------------------------------------
     fig, axes = plt.subplots(nrow, ncol, figsize=(4.5 * ncol, 3 * nrow),
@@ -166,8 +165,7 @@ def transform_report(idata, p: PanelData, cfg: ModelConfig, outdir: str,
         axes[k // ncol][k % ncol].axis("off")
     fig.suptitle("Learned saturation (Hill) curves with observed activity range")
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "saturation_curves.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "saturation_curves.png"))
 
     print(f"[transforms] parameter + range report -> {outdir}")
     return params

@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from config import ModelConfig, RunConfig
+from outputs import save_fig
 
 
 def _robust_z(x: np.ndarray) -> np.ndarray:
@@ -105,8 +106,7 @@ def run_eda(df: pd.DataFrame, run_cfg: RunConfig, cfg: ModelConfig,
                       else "total activity")
         plt.xticks(rotation=45, ha="right", fontsize=8)
         fig.tight_layout()
-        fig.savefig(os.path.join(outdir, "media_summary.png"), dpi=130)
-        plt.close(fig)
+        save_fig(fig, os.path.join(outdir, "media_summary.png"))
 
     # ---- 4. collinearity (on per-region standardised values) -----------------
     feats = list(ch_cols.values()) + ctl_cols
@@ -125,8 +125,7 @@ def run_eda(df: pd.DataFrame, run_cfg: RunConfig, cfg: ModelConfig,
     ax.set_yticklabels(corr.columns, fontsize=7)
     fig.colorbar(im, shrink=0.8)
     fig.tight_layout()
-    fig.savefig(os.path.join(outdir, "correlation_matrix.png"), dpi=130)
-    plt.close(fig)
+    save_fig(fig, os.path.join(outdir, "correlation_matrix.png"))
 
     hi = []
     cols = corr.columns.tolist()
