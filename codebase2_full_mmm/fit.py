@@ -114,22 +114,63 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
         with open(os.path.join(outdir, "sampling_log.json"), "w",
                   encoding="utf-8") as f:
             json.dump(log, f, indent=2, default=str)
+    if used == "pymc":
+        cm_desc = "n/a (pymc sampler)"
+    elif log.get("chain_method_applied"):
+        cm_desc = scfg.chain_method
+    else:
+        cm_desc = f"{scfg.chain_method} requested but NOT applied"
     print(f"[fit] sampled with '{used}' in {log.get('wall_seconds', '?')}s "
-          f"({log['backend_info']}, chain_method={scfg.chain_method})")
+          f"({log['backend_info']}, chain_method={cm_desc})")
     return idata
+
+
+def _sample_jax_direct(model, sampler: str, common: dict,
+                       scfg: SamplerConfig):
+    """Call PyMC's JAX sampling entry point directly.
+
+    Some PyMC versions ACCEPT chain_method through pm.sample but silently
+    drop it before it reaches NumPyro - the chains then run sequentially and
+    NumPyro warns "There are not enough devices to run parallel chains".
+    The entry point in pymc.sampling.jax takes chain_method explicitly, so
+    this route is the only one that guarantees the hint lands. Raises
+    ImportError/AttributeError/TypeError on API drift; the caller falls back
+    to pm.sample.
+    """
+    from pymc.sampling import jax as pmjax
+
+    kwargs = dict(draws=common["draws"], tune=common["tune"],
+                  chains=common["chains"],
+                  target_accept=common["target_accept"],
+                  random_seed=common["random_seed"], model=model,
+                  chain_method=scfg.chain_method)
+    if scfg.nuts_kwargs:
+        kwargs["nuts_kwargs"] = scfg.nuts_kwargs
+    if hasattr(pmjax, "sample_jax_nuts"):        # unified entry, pymc >= 5.16
+        return pmjax.sample_jax_nuts(nuts_sampler=sampler, **kwargs)
+    return getattr(pmjax, f"sample_{sampler}_nuts")(**kwargs)
 
 
 def _sample_external(model, sampler: str, common: dict, scfg: SamplerConfig,
                      log: dict):
-    """Call pm.sample for an external (JAX) sampler across PyMC API versions.
+    """Sample with an external (JAX) sampler across PyMC API versions.
 
-    Where chain_method and NUTS-kernel kwargs go has changed between PyMC
-    releases (older: everything inside nuts_sampler_kwargs; newer: kernel args
-    via `nuts=`, chain_method as a direct kwarg, and nuts_sampler_kwargs is
-    forwarded to the kernel - which then rejects chain_method). Try newest
-    first, then the legacy form, then give up on the chain hint but still
-    sample. Only signature errors (TypeError) trigger the next attempt.
+    Route 1 calls pymc.sampling.jax directly (chain_method guaranteed).
+    Routes 2-4 go through pm.sample: newest form (chain_method direct,
+    kernel args via `nuts=`), legacy form (everything inside
+    nuts_sampler_kwargs), then no chain hint at all. Only signature errors
+    (TypeError etc.) trigger the next attempt.
     """
+    try:
+        idata = _sample_jax_direct(model, sampler, common, scfg)
+        log["sampling_route"] = "pymc.sampling.jax (direct)"
+        log["chain_method_applied"] = True
+        return idata
+    except (ImportError, AttributeError, TypeError) as e:
+        log["direct_route_error"] = f"{e.__class__.__name__}: {e}"
+        print(f"[fit] NOTE: direct JAX route unavailable "
+              f"({e.__class__.__name__}) - falling back to pm.sample")
+
     newest = {"chain_method": scfg.chain_method}
     if scfg.nuts_kwargs:
         newest["nuts"] = scfg.nuts_kwargs
@@ -142,6 +183,10 @@ def _sample_external(model, sampler: str, common: dict, scfg: SamplerConfig,
     for extra in attempts:
         try:
             idata = pm.sample(nuts_sampler=sampler, **common, **extra)
+            log["sampling_route"] = "pm.sample"
+            # passed to pm.sample, but some versions drop it silently -
+            # sequential progress bars / a NumPyro "not enough devices"
+            # warning mean it did NOT take effect
             log["chain_method_applied"] = bool(extra)
             if not extra:
                 print("[fit] NOTE: this PyMC version accepted no chain_method "
