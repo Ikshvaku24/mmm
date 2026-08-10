@@ -183,11 +183,17 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
 # --------------------------------------------------------------------------
 # coefficient report
 # --------------------------------------------------------------------------
-def _support_flag(sign: str, n_active: int, sd: float) -> str:
+def _support_flag(sign: str, n_active: int, sd: float, method: str,
+                  near_constant_sd: float = 0.1) -> str:
     if sd == 0 or (sign != "free" and n_active == 0):
         return "none"
     if sign != "free" and n_active < 8:
         return "weak"
+    # Always on, but the level is already spanned by the region intercept, so
+    # only the tiny residual wiggle identifies the coefficient. n_active alone
+    # would call this "adequate" and hide a non-identified parameter.
+    if method == "scale_only" and sd < near_constant_sd:
+        return "weak (near-constant)"
     return "adequate"
 
 
@@ -199,40 +205,58 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
     popd = population_draws_by_feature(post, pdata)
 
     spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
-    x_scale = {(r.region, r.feature): r.scale
-               for r in pdata.x_scale_table.itertuples(index=False)}
+    tbl = {(r.region, r.feature): r
+           for r in pdata.x_scale_table.itertuples(index=False)}
 
     rows = []
     for name, arr in bd.items():
         sign = spec_by_name[name].sign
+        constrained = sign != "free"
         if name in popd:
-            rows.append({"feature": name, "region": "__population__",
-                         **_stats(popd[name]),
-                         "units": "scaled (population level)",
-                         "data_support": ""})
+            row = {"feature": name, "region": "__population__",
+                   **_stats(popd[name]),
+                   "units": "scaled (population level)",
+                   "sign_constrained": constrained,
+                   "data_support": ""}
+            if constrained:
+                # beta = +/-exp(.) can never cross zero, so these two columns are
+                # true BY CONSTRUCTION and say nothing about evidence - blank them
+                # rather than let them be read as significance
+                row["prob_positive"] = ""
+                row["excludes_zero"] = ""
+            rows.append(row)
         for g, r in enumerate(pdata.region_names):
-            m = (pdata.region_idx == g) & pdata.train_mask
-            col = pdata.X[m, pdata.feature_index[name]]
-            n_active = int((col != 0).sum())
-            sd = float(col.std())
+            info = tbl[(r, name)]
+            # activity counted on the RAW column: after centring every scaled
+            # value is non-zero, so counting non-zero X would report full support
+            # for a feature that ran in one week out of ninety-one
+            n_active = int(info.n_active_train)
+            sd = float(pdata.X[(pdata.region_idx == g) & pdata.train_mask,
+                               pdata.feature_index[name]].std())
             # original-unit conversion: beta_orig = beta_scaled * s_y_g / s_x_gj
-            factor = pdata.y_scale[g] / x_scale[(r, name)]
+            factor = pdata.y_scale[g] / info.scale
             orig = arr[:, g] * factor
             o_lo, o_hi = _hdi(orig)
-            rows.append({
+            row = {
                 "feature": name, "region": r, **_stats(arr[:, g]),
                 "units": "scaled (per-region axes)",
+                "sign_constrained": constrained,
                 "median_orig_units": float(np.median(orig)),
                 "hdi_low_orig_units": o_lo, "hdi_high_orig_units": o_hi,
                 "orig_units_meaning": "KPI units per raw feature unit",
                 "n_active_train": n_active,
                 "feature_sd_train": round(sd, 4),
-                "data_support": _support_flag(sign, n_active, sd),
-            })
+                "scaling_method": info.method,
+                "data_support": _support_flag(sign, n_active, sd, info.method),
+            }
+            if constrained:
+                row["prob_positive"] = ""
+                row["excludes_zero"] = ""
+            rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "coefficient_report.csv"), index=False)
 
-    weak = df[df["data_support"].isin(["none", "weak"])]
+    weak = df[df["data_support"].astype(str).str.startswith(("none", "weak"))]
     if len(weak):
         with open(os.path.join(outdir, "support_warnings.txt"), "w") as f:
             f.write("Region x feature combinations with little or no data support.\n"
@@ -334,6 +358,18 @@ def compute_fit_metrics(decomp: Decomposition, pdata: PreparedData) -> pd.DataFr
         all_row = {"region": "__all__", "dataset": which,
                    **_metrics(pdata.y_orig[m], med[m], m_lo[m], m_hi[m],
                               p_lo[m], p_hi[m], decomp.ypred_draws[:, m])}
+        # The pooled r2 above measures against ONE grand mean, so it is inflated
+        # by the (large, trivially predictable) differences in level between
+        # regions - it can sit at 0.99 while every region is fitted poorly.
+        # r2_within_region uses each region's own mean as the null model, which
+        # is the honest "does the model explain movement?" number.
+        sse = float(((pdata.y_orig[m] - med[m]) ** 2).sum())
+        sst_w = 0.0
+        for g in range(len(pdata.region_names)):
+            mg = m & (pdata.region_idx == g)
+            if mg.any():
+                sst_w += float(((pdata.y_orig[mg] - pdata.y_orig[mg].mean()) ** 2).sum())
+        all_row["r2_within_region"] = float(1 - sse / sst_w) if sst_w > 0 else np.nan
         w = np.asarray(weights, dtype=float)
         mp = np.array([rr["mape_pct"] for rr in region_rows], dtype=float)
         ok = np.isfinite(mp) & (w > 0)
@@ -408,16 +444,34 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                                  for g in range(G)])
     total_actual = actual_by_region.sum()
 
+    spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
+    method_by_feature = {r.feature: r.method
+                         for r in pdata.x_scale_table.itertuples(index=False)}
+
     rows = []
     items = list(decomp.contrib_totals.items()) + [("__baseline__", decomp.baseline_totals)]
     for name, tot in items:
+        spec = spec_by_name.get(name)
+        constrained = "" if spec is None else spec.sign != "free"
+        # A CENTRED feature contributes deviations from its own average level, not
+        # an increment over zero: a positive coefficient can still show a negative
+        # total (most weeks sit below the average). Say so, or the sign of the
+        # contribution reads as a contradiction of the sign of the coefficient.
+        vs = ("" if spec is None else
+              ("feature average" if method_by_feature.get(name) == "center_scale"
+               else "zero"))
         port = tot.sum(axis=1)  # (S,)
-        rows.append({"feature": name, "region": "__portfolio__", **_stats(port),
-                     "share_of_actual_pct": float(np.median(port) / total_actual * 100)})
-        for g, r in enumerate(pdata.region_names):
-            rows.append({"feature": name, "region": r, **_stats(tot[:, g]),
-                         "share_of_actual_pct":
-                             float(np.median(tot[:, g]) / actual_by_region[g] * 100)})
+        for region, vals, denom in (
+                [("__portfolio__", port, total_actual)]
+                + [(r, tot[:, g], actual_by_region[g])
+                   for g, r in enumerate(pdata.region_names)]):
+            row = {"feature": name, "region": region, **_stats(vals),
+                   "sign_constrained": constrained, "contribution_vs": vs,
+                   "share_of_actual_pct": float(np.median(vals) / denom * 100)}
+            if constrained is True:
+                row["prob_positive"] = ""      # vacuous under a sign constraint
+                row["excludes_zero"] = ""
+            rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_totals.csv"), index=False)
 

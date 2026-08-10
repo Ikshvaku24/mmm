@@ -16,6 +16,12 @@ Scale conventions (important for choosing priors):
   - Free-sign features are centred and scaled per region (like Meridian's controls).
   - For sign-constrained features, `prior_mean` is the typical effect MAGNITUDE on
     that scale (must be > 0); `prior_sd` is on the log scale (0.7 ~ a factor of 2).
+  - `center=True` keeps the sign constraint but scales the feature like a control
+    (centre + scale). Use it for ALWAYS-ON LEVEL variables - distribution points,
+    price indices, ACV measures. Media-style scale-only scaling leaves such a
+    variable at ~1.0 every week, which is collinear with the region intercept:
+    the sampler cannot separate its coefficient from the baseline. Meridian
+    centres its non-media treatments for exactly this reason.
 """
 from __future__ import annotations
 
@@ -39,6 +45,11 @@ class FeatureSpec:
     prior_mean: float | None = None    # population prior location (magnitude if signed)
     prior_sd: float | None = None      # population prior sd (log-scale if signed)
     regional_sd: float | None = None   # prior scale of cross-region heterogeneity
+    center: bool = False               # signed features: centre+scale instead of
+                                       # mean-of-positives. REQUIRED for always-on
+                                       # level variables (distribution, price index,
+                                       # ACV) - see the module docstring. Ignored for
+                                       # sign="free", which is always centred.
 
     def resolved(self) -> "FeatureSpec":
         s = FeatureSpec(**self.__dict__)
@@ -57,6 +68,7 @@ class FeatureSpec:
                 )
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
+        s.center = bool(s.center) or s.sign == "free"   # free is always centred
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
         if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
             raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
@@ -85,6 +97,9 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
     Expected columns (extra columns ignored):
       variable, hierarchical, sign_constraint,
       global_prior_mean, global_prior_sd, regional_sd_prior
+    Optional column:
+      center (0/1) - 1 for always-on level variables (distribution, price index,
+      ACV) so they are centred rather than only scaled; see the module docstring.
     """
     df = pd.read_csv(path)
     specs = []
@@ -96,6 +111,7 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             prior_mean=None if pd.isna(r.get("global_prior_mean")) else float(r["global_prior_mean"]),
             prior_sd=None if pd.isna(r.get("global_prior_sd")) else float(r["global_prior_sd"]),
             regional_sd=None if pd.isna(r.get("regional_sd_prior")) else float(r["regional_sd_prior"]),
+            center=False if pd.isna(r.get("center")) else bool(int(r["center"])),
         ).resolved())
     return specs
 
@@ -179,12 +195,27 @@ class RunConfig:
                                           # pre-transformed data whose adstock tail
                                           # leaves numerical dust (e.g. 5.2e-17)
                                           # instead of exact zeros.
+    min_feature_scale: float = 1e-12      # reject scale-only features whose scaling
+                                          # factor (train mean of positive values)
+                                          # is below this. zero_threshold_rel is
+                                          # RELATIVE, so it cannot catch a column
+                                          # whose own maximum is dust; dividing by
+                                          # ~1e-15 turns float noise into a
+                                          # regressor. Set 0 to disable the check.
+    near_constant_sd: float = 0.1         # warn when an always-on scale-only feature
+                                          # has scaled sd below this: it is ~constant
+                                          # at 1.0 and therefore collinear with the
+                                          # region intercept (use center=1 instead)
 
     def __post_init__(self):
         if self.on_convergence_failure not in {"warn", "fail"}:
             raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
         if self.zero_threshold_rel < 0:
             raise ValueError("zero_threshold_rel must be >= 0")
+        if self.min_feature_scale < 0:
+            raise ValueError("min_feature_scale must be >= 0")
+        if self.near_constant_sd < 0:
+            raise ValueError("near_constant_sd must be >= 0")
 
 
 @dataclass

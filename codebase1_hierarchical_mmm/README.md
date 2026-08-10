@@ -26,20 +26,39 @@ One row per **feature** (not per region×feature — the hierarchy generates reg
 variation). Via `FeatureSpec(...)` in code or a CSV loaded with `load_feature_config`:
 
 ```csv
-variable,hierarchical,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior
-tv,1,positive,0.05,1.0,0.5
-price_index,1,negative,0.3,0.7,0.4
-distribution,1,free,0.0,0.5,0.5
-dummy_covid,0,free,0.0,1.0,
+variable,hierarchical,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center
+tv,1,positive,0.05,1.0,0.5,0
+price_index,1,negative,0.30,0.7,0.4,1
+distribution,1,positive,0.20,0.7,0.4,1
+dummy_covid,0,free,0.0,1.0,,
 ```
 
 - `sign_constraint=positive/negative` → coefficient built as `±exp(normal)`: it can
   **never** cross zero (structural sign control, like the PE model / Meridian).
+  Consequence: for these features `P(effect>0)` and "HDI excludes zero" are true
+  *by construction*, so the reports leave those two columns **blank** — judge a
+  sign-constrained feature by its effect size, HDI width and data support, never
+  by "significance".
 - `hierarchical=1` → non-centred partial pooling across regions; `0` → one global
   coefficient shared by all regions.
+- `center=1` (optional column) → keep the sign constraint but centre *and* scale the
+  feature, the way controls are scaled. **Required for always-on level variables**
+  — distribution points, price indices, ACV measures. With the default scale-only
+  scaling such a variable sits at ≈1.0 every week, which is collinear with the
+  region intercept: the sampler cannot separate its coefficient from the baseline.
+  `prepare_data` now warns when it detects this. A centred feature's contribution is
+  measured **relative to its own average level**, not versus zero — the
+  `contribution_vs` column in `contribution_totals.csv` says which, and a positive
+  coefficient can legitimately show a negative total (most weeks below average).
+- Feature columns whose positive values are all numerical dust (train mean below
+  `RunConfig.min_feature_scale`, default `1e-12` — e.g. the adstock tail of activity
+  that stopped before the data window) are **rejected** at data prep. Dividing by a
+  ~1e-15 scale turns float noise into a unit-scale regressor and, under a sign
+  constraint, manufactures contribution out of nothing. Drop the column or fix its
+  units upstream.
 - Scale conventions for priors are documented at the top of `config.py`
-  (KPI standardised per region; signed features scaled by mean positive activity;
-  free features z-scored per region).
+  (KPI standardised per region; signed features scaled by mean positive activity,
+  or centred when `center=1`; free features z-scored per region).
 
 ## Run
 
@@ -62,9 +81,9 @@ Smoke test / parameter recovery: `python synthetic_example.py`.
 |---|---|
 | `01_data` | panel summary, per-region scaling stats, KPI plots |
 | `02_convergence` | `sampling_log.json` run manifest (package versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
-| `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0), **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none/weak/adequate` — a region where the feature never ran gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
-| `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); fit plots show both bands; residual plots |
-| `05_contributions` | contribution totals with HDIs and share-of-sales, bar chart, weekly portfolio decomposition |
+| `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0) *(blank for sign-constrained features — vacuous there)*, `scaling_method`, **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none` / `weak` / `weak (near-constant)` / `adequate` — a region where the feature never ran, **or where it never moves**, gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
+| `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); fit plots show both bands; residual plots. On the `__all__` row read **`r2_within_region`**, not `r2`: the pooled `r2` is inflated by the differences in level between regions and can sit at 0.99 while every region is fitted badly |
+| `05_contributions` | contribution totals with HDIs and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), bar chart, weekly portfolio decomposition |
 
 ## Cross-validation (expanding window / rolling origin)
 

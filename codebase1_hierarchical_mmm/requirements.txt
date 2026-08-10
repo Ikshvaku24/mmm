@@ -17,6 +17,8 @@ scipy
 numpyro
 # jax>=0.4.28
 jax[cuda]
+netCDF4
+openpyxl
 # On a Linux GPU machine (Databricks GPU cluster / Colab) instead install:
 #   pip install "jax[cuda12]"
 # Optional alternative fast CPU sampler:

@@ -10,6 +10,10 @@ Scaling (stats computed on the TRAINING window only, stored for reuse):
   - dv:            standardised per region                  (Meridian: KPI transformer)
   - signed feats:  / per-region mean of positive values     (Meridian: media transformer -
                    no centering, zero stays zero)
+  - signed feats with center=True: centred + scaled         (Meridian: non-media
+                   treatments transformer) - for always-on LEVEL variables such as
+                   distribution or price indices. Scale-only would leave them at
+                   ~1.0 every week, i.e. collinear with the region intercept.
   - free feats:    centred + scaled per region              (Meridian: controls transformer)
 """
 from __future__ import annotations
@@ -157,6 +161,8 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     X = np.zeros((len(d), len(feat_names)))
     scale_rows = []
     dust_counts = {}
+    degenerate = []        # (feature, region, scale) - column is pure numerical dust
+    near_constant = {}     # feature -> [regions] - collinear with the intercept
     for j, spec in enumerate(model_cfg.features):
         v = d[spec.name].to_numpy(dtype=float)
         # pre-transformed data often carries adstock-tail "dust" (e.g. 5e-17)
@@ -170,29 +176,69 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                     dust_counts[spec.name] = int(dust.sum())
                     v = v.copy()
                     v[dust] = 0.0
-        if spec.sign != "free" and (v < 0).any():
+        if spec.sign != "free" and not spec.center and (v < 0).any():
             warnings.warn(f"{spec.name}: sign-constrained features are scaled "
                           "without centering, which assumes non-negative values - "
-                          f"found {(v < 0).sum()} negative entries")
+                          f"found {(v < 0).sum()} negative entries. If this is a "
+                          "level variable (e.g. a price index), set center=1 for it "
+                          "in the feature config.")
         for g in range(G):
             m_all = region_idx == g
             m_tr = m_all & train_mask
-            if spec.sign == "free":
+            n_active = int((v[m_tr] != 0).sum())    # activity on the RAW column
+            if spec.center:
                 mu, sd = v[m_tr].mean(), v[m_tr].std()
                 sd = sd if sd > 0 else 1.0
                 X[m_all, j] = (v[m_all] - mu) / sd
-                scale_rows.append((regions[g], spec.name, "center_scale", mu, sd))
+                method = "center_scale"
+                scale_rows.append((regions[g], spec.name, method, mu, sd, n_active))
             else:
                 pos = v[m_tr][v[m_tr] > 0]
                 sc = pos.mean() if len(pos) else 1.0
+                if len(pos) and sc < run_cfg.min_feature_scale:
+                    degenerate.append((spec.name, regions[g], sc))
                 X[m_all, j] = v[m_all] / sc
-                scale_rows.append((regions[g], spec.name, "scale_only", 0.0, sc))
+                method = "scale_only"
+                scale_rows.append((regions[g], spec.name, method, 0.0, sc, n_active))
+                # always on but barely moving => x ~ 1.0 constant, which the region
+                # intercept already spans (see the near-constant guard below)
+                col_tr = X[m_tr, j]
+                if (len(col_tr) and (col_tr != 0).mean() > 0.9
+                        and col_tr.std() < run_cfg.near_constant_sd):
+                    near_constant.setdefault(spec.name, []).append(regions[g])
+
+    if degenerate:
+        feats = sorted({f for f, _, _ in degenerate})
+        ex = ", ".join(f"{f}/{r}: {s:.2e}" for f, r, s in degenerate[:6])
+        raise ValueError(
+            f"features whose scaling factor (train mean of positive values) is below "
+            f"min_feature_scale={run_cfg.min_feature_scale:g}: {feats}.\n"
+            f"  examples: {ex}\n"
+            "Every non-zero value in these columns is numerical dust (e.g. the "
+            "adstock tail of activity that ended before this window). "
+            "zero_threshold_rel is RELATIVE and cannot catch a column whose own "
+            "maximum is dust. Dividing by such a scale turns float noise into a "
+            "unit-scale regressor and, under a sign-constrained prior, manufactures "
+            "contribution out of nothing. Drop these features from the config, or "
+            "fix their units upstream. To force-include them: "
+            "RunConfig(min_feature_scale=0).")
+
     x_scale_table = pd.DataFrame(
-        scale_rows, columns=["region", "feature", "method", "center", "scale"])
+        scale_rows,
+        columns=["region", "feature", "method", "center", "scale", "n_active_train"])
     if dust_counts:
         print(f"[data] zeroed near-zero dust (|v| < {run_cfg.zero_threshold_rel:g} "
               f"x max|v|) in {len(dust_counts)} features, e.g. "
               f"{dict(list(dust_counts.items())[:5])}")
+    for name, regs in near_constant.items():
+        warnings.warn(
+            f"{name}: always on but nearly constant after scale-only scaling "
+            f"(scaled sd < {run_cfg.near_constant_sd:g}) in regions {regs}. It is "
+            "almost collinear with the region intercept, so the sampler cannot "
+            "separate its coefficient from the baseline - expect poor mixing "
+            "(high R-hat, low ESS, saturated tree depth) and a huge coefficient "
+            "that is offset by the baseline or by another level variable. "
+            "Set center=1 for this feature in the feature config.")
 
     # ---- seasonality & trend ----------------------------------------------
     Xf, f_names = fourier_features(d[dc], model_cfg.fourier_order,

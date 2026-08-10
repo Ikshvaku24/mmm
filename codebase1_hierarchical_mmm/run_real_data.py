@@ -3,6 +3,18 @@
 Databricks / notebook usage: run cells in order, or `python run_real_data.py`.
 The feature_priors.csv is the source of truth for which columns are modelled -
 its `variable` values must match the data column names EXACTLY.
+
+Two things the first real run (real_data_v1) got wrong in the CONFIG, both now
+detected by prepare_data - fix them in feature_priors.csv before re-running:
+
+  1. Always-on LEVEL variables need `center=1`: TDP, AVP, ACV_WD_Any Merch.
+     Without it they are scaled to ~1.0 every week, collinear with the region
+     intercept. That run produced coefficients of +31 / -33 on TDP / AVP and a
+     decomposition of +91% / -97% that cancelled out, with max R-hat 1.26,
+     min ESS 13 and tree depth saturated in 100% of steps.
+  2. Columns that are pure numerical dust must be dropped: Coupon-Digital,
+     Coupon-FSI and Coupon-Ibotta had every non-zero value at ~1e-15, so the
+     model was fitting float noise (and reporting 1e18 "per unit" effects).
 """
 from __future__ import annotations
 
