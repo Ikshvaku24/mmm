@@ -185,9 +185,11 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
 # --------------------------------------------------------------------------
 def _support_flag(sign: str, n_active: int, sd: float, method: str,
                   near_constant_sd: float = 0.1) -> str:
-    if sd == 0 or (sign != "free" and n_active == 0):
+    # n_active counts activity on the RAW column, so it is meaningful for free
+    # features too (a sparse event dummy is thinly supported whatever its sign).
+    if sd == 0 or n_active == 0:
         return "none"
-    if sign != "free" and n_active < 8:
+    if n_active < 8:
         return "weak"
     # Always on, but the level is already spanned by the region intercept, so
     # only the tiny residual wiggle identifies the coefficient. n_active alone
