@@ -18,6 +18,7 @@ equal scaled effects generally differ - both are exported, explicitly labelled.
 """
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass
 
@@ -85,6 +86,64 @@ def _stats(x: np.ndarray, prob: float = 0.90) -> dict:
             "excludes_zero": bool(lo > 0 or hi < 0)}
 
 
+def _two_sided_p(t: float, dof: int) -> float:
+    """Two-sided p-value for a t statistic (normal approximation without SciPy)."""
+    if not np.isfinite(t):
+        return np.nan
+    try:
+        from scipy import stats
+        return float(2.0 * stats.t.sf(abs(t), dof))
+    except Exception:  # noqa: BLE001
+        return float(math.erfc(abs(t) / math.sqrt(2.0)))
+
+
+def _signif_stats(x: np.ndarray) -> dict:
+    """Bayesian analogues of the classical t statistic and p value.
+
+    t_stat  = posterior mean / posterior SD. NOTE the denominator: the old
+              production code used mcse_mean, which shrinks as you draw more
+              samples, so "significance" inflated simply by sampling longer.
+              The posterior SD is a property of the posterior, not of how long
+              the sampler ran.
+    p_value = 2 * min(P(effect > 0), P(effect < 0)) - the posterior probability
+              of the sign being wrong, doubled for a two-sided reading. It is
+              the direct Bayesian counterpart of a two-sided p value, not a
+              frequentist test: read it as "how sure are we of the direction?".
+    """
+    sd = float(np.std(x))
+    mean = float(np.mean(x))
+    p_pos = float((x > 0).mean())
+    return {"t_stat": float(mean / sd) if sd > 0 else np.nan,
+            "p_value": float(2.0 * min(p_pos, 1.0 - p_pos))}
+
+
+def _resid_stats(resid: np.ndarray) -> dict:
+    """Residual diagnostics for the fit-metrics table.
+
+    resid_t_stat / resid_p_value  one-sample t test of H0: mean residual = 0,
+                                  i.e. "is the model biased over this window?".
+                                  A small p value means a systematic over- or
+                                  under-prediction, not a good model.
+    durbin_watson                 2 = no residual autocorrelation, < 1.5 =
+                                  positive autocorrelation (missing trend or
+                                  seasonality), > 2.5 = negative.
+    """
+    out = {"resid_t_stat": np.nan, "resid_p_value": np.nan,
+           "durbin_watson": np.nan}
+    n = len(resid)
+    if n < 2:
+        return out
+    sd = float(np.std(resid, ddof=1))
+    if sd > 0:
+        t = float(np.mean(resid) / (sd / np.sqrt(n)))
+        out["resid_t_stat"] = t
+        out["resid_p_value"] = _two_sided_p(t, n - 1)
+    denom = float(np.sum(resid ** 2))
+    if denom > 0:
+        out["durbin_watson"] = float(np.sum(np.diff(resid) ** 2) / denom)
+    return out
+
+
 def beta_draws_by_feature(post, pdata: PreparedData) -> dict[str, np.ndarray]:
     """feature name -> array (n_samples, n_regions), sign already applied."""
     out = {}
@@ -98,19 +157,27 @@ def beta_draws_by_feature(post, pdata: PreparedData) -> dict[str, np.ndarray]:
 
 
 def population_draws_by_feature(post, pdata: PreparedData) -> dict[str, np.ndarray]:
-    """feature name -> (n_samples,) population-level effect (median for signed)."""
+    """feature name -> (n_samples,) population-level effect (median for signed).
+
+    Only features that HAVE a population level appear: pooled (hierarchical)
+    features have an explicit pop_beta, global features share one coefficient
+    across regions. Features fitted with pooling="independent" have no
+    population parameter at all - reporting one region's draws as "the
+    population" would invent a level the model never estimated - so they are
+    omitted and get no __population__ row.
+    """
     out = {}
     for bname, specs in pdata.buckets.items():
         if not specs:
             continue
-        if f"pop_beta_{bname}" in post:
+        if f"pop_beta_{bname}" in post:          # hierarchical
             arr = post[f"pop_beta_{bname}"].transpose("sample", f"feat_{bname}").values
             for j, s in enumerate(specs):
                 out[s.name] = arr[:, j]
-        elif f"beta_{bname}" in post:  # global bucket: same in every region
+        elif specs[0].pooling == "global" and f"beta_{bname}" in post:
             arr = post[f"beta_{bname}"].transpose("sample", "region", f"feat_{bname}").values
             for j, s in enumerate(specs):
-                out[s.name] = arr[:, 0, j]
+                out[s.name] = arr[:, 0, j]      # identical in every region
     return out
 
 
@@ -119,12 +186,26 @@ def population_draws_by_feature(post, pdata: PreparedData) -> dict[str, np.ndarr
 # --------------------------------------------------------------------------
 @dataclass
 class Decomposition:
+    """Sales decomposition, in original KPI units.
+
+    BASELINE = core (region intercept + seasonality + trend) + every feature
+    flagged `baseline=1` (always-on business drivers such as distribution and
+    price, which are not switchable marketing levers). Those features keep their
+    own entries in contrib_* as well, so the baseline can be EXPANDED into its
+    parts without double counting:
+
+        baseline_draws  = core_draws + sum(contributions of baseline features)
+        yhat_draws      = baseline_draws + sum(contributions of the rest)
+    """
     yhat_draws: np.ndarray          # (S, n_obs) mean response, original units
     ypred_draws: np.ndarray         # (S, n_obs) posterior PREDICTIVE, original units
-    baseline_draws: np.ndarray      # (S, n_obs) original units
+    baseline_draws: np.ndarray      # (S, n_obs) full baseline (core + baseline feats)
     contrib_median: dict            # feature -> (n_obs,) original units
     contrib_totals: dict            # feature -> (S, G) totals in original units
-    baseline_totals: np.ndarray     # (S, G)
+    baseline_totals: np.ndarray     # (S, G) full baseline totals
+    core_draws: np.ndarray = None       # (S, n_obs) intercept + seasonality + trend
+    core_totals: np.ndarray = None      # (S, G)
+    baseline_features: tuple = ()       # names folded into the baseline
 
 
 def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
@@ -135,22 +216,29 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
     S = post.sizes["sample"]
 
     alpha = post["alpha_region"].transpose("sample", "region").values
-    base = alpha[:, reg]
+    core = alpha[:, reg]
     if pdata.X_fourier is not None and "beta_fourier" in post:
         bf = post["beta_fourier"].transpose("sample", "fourier").values
-        base = base + bf @ pdata.X_fourier.T
+        core = core + bf @ pdata.X_fourier.T
     if "beta_trend_region" in post:
         btr = post["beta_trend_region"].transpose("sample", "region").values
-        base = base + btr[:, reg] * pdata.t[None, :]
+        core = core + btr[:, reg] * pdata.t[None, :]
 
-    yhat = base.copy()
-    contrib_median, contrib_totals = {}, {}
+    # features flagged baseline=1 belong INSIDE the baseline, not alongside it
+    spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
+    base = core.copy()
+    yhat = core.copy()
+    contrib_median, contrib_totals, baseline_features = {}, {}, []
     sg = pdata.y_scale[reg]
 
     for name, b in beta_draws_by_feature(post, pdata).items():
         j = pdata.feature_index[name]
         c = b[:, reg] * pdata.X[:, j][None, :]
         yhat += c
+        spec = spec_by_name.get(name)
+        if spec is not None and spec.baseline:
+            base += c
+            baseline_features.append(name)
         c_o = c * sg[None, :]
         contrib_median[name] = np.median(c_o, axis=0)
         tot = np.zeros((S, G))
@@ -172,12 +260,18 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
 
     yhat_o = yhat * sg[None, :] + pdata.y_mean[reg][None, :]
     ypred_o = ypred * sg[None, :] + pdata.y_mean[reg][None, :]
+    # the intercept carries the KPI mean, so it belongs to the CORE; baseline
+    # features are added on top of it already in original units
+    core_o = core * sg[None, :] + pdata.y_mean[reg][None, :]
     base_o = base * sg[None, :] + pdata.y_mean[reg][None, :]
     base_totals = np.zeros((S, G))
+    core_totals = np.zeros((S, G))
     for g in range(G):
         base_totals[:, g] = base_o[:, reg == g].sum(axis=1)
+        core_totals[:, g] = core_o[:, reg == g].sum(axis=1)
     return Decomposition(yhat_o, ypred_o, base_o, contrib_median, contrib_totals,
-                         base_totals)
+                         base_totals, core_draws=core_o, core_totals=core_totals,
+                         baseline_features=tuple(baseline_features))
 
 
 # --------------------------------------------------------------------------
@@ -216,16 +310,17 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
         constrained = sign != "free"
         if name in popd:
             row = {"feature": name, "region": "__population__",
-                   **_stats(popd[name]),
+                   **_stats(popd[name]), **_signif_stats(popd[name]),
                    "units": "scaled (population level)",
                    "sign_constrained": constrained,
                    "data_support": ""}
             if constrained:
-                # beta = +/-exp(.) can never cross zero, so these two columns are
+                # beta = +/-exp(.) can never cross zero, so these columns are
                 # true BY CONSTRUCTION and say nothing about evidence - blank them
                 # rather than let them be read as significance
                 row["prob_positive"] = ""
                 row["excludes_zero"] = ""
+                row["p_value"] = ""
             rows.append(row)
         for g, r in enumerate(pdata.region_names):
             info = tbl[(r, name)]
@@ -241,6 +336,7 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             o_lo, o_hi = _hdi(orig)
             row = {
                 "feature": name, "region": r, **_stats(arr[:, g]),
+                **_signif_stats(arr[:, g]),
                 "units": "scaled (per-region axes)",
                 "sign_constrained": constrained,
                 "median_orig_units": float(np.median(orig)),
@@ -254,6 +350,7 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             if constrained:
                 row["prob_positive"] = ""
                 row["excludes_zero"] = ""
+                row["p_value"] = ""
             rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "coefficient_report.csv"), index=False)
@@ -326,6 +423,7 @@ def _metrics(actual, pred_med, m_lo, m_hi, p_lo, p_hi,
     }
     if pred_draws is not None:
         out["crps"] = _crps(pred_draws, actual)
+    out.update(_resid_stats(resid))
     return out
 
 
@@ -372,6 +470,12 @@ def compute_fit_metrics(decomp: Decomposition, pdata: PreparedData) -> pd.DataFr
             if mg.any():
                 sst_w += float(((pdata.y_orig[mg] - pdata.y_orig[mg].mean()) ** 2).sum())
         all_row["r2_within_region"] = float(1 - sse / sst_w) if sst_w > 0 else np.nan
+        # Durbin-Watson needs a single time series. The pooled mask concatenates
+        # regions, so successive differences would straddle region boundaries -
+        # average the honest per-region values instead.
+        dws = [rr["durbin_watson"] for rr in region_rows
+               if np.isfinite(rr.get("durbin_watson", np.nan))]
+        all_row["durbin_watson"] = float(np.mean(dws)) if dws else np.nan
         w = np.asarray(weights, dtype=float)
         mp = np.array([rr["mape_pct"] for rr in region_rows], dtype=float)
         ok = np.isfinite(mp) & (w > 0)
@@ -450,9 +554,25 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     method_by_feature = {r.feature: r.method
                          for r in pdata.x_scale_table.itertuples(index=False)}
 
+    base_feats = set(decomp.baseline_features)
+
+    # Row set, and how the parts add up:
+    #   __baseline__       = __baseline_core__ + every baseline feature
+    #   total sales        = __baseline__ + every incremental feature
+    # Baseline features therefore appear TWICE - once inside __baseline__ and
+    # once on their own row - which is what makes the baseline expandable. The
+    # `group` column says which block a row belongs to, so nothing is summed
+    # twice by accident.
+    items = [("__baseline__", decomp.baseline_totals, "baseline_total")]
+    if base_feats and decomp.core_totals is not None:
+        # only worth a row when there is something to expand: with no baseline
+        # features the core IS the baseline
+        items.append(("__baseline_core__", decomp.core_totals, "baseline_part"))
+    items += [(n, t, "baseline_part" if n in base_feats else "incremental")
+              for n, t in decomp.contrib_totals.items()]
+
     rows = []
-    items = list(decomp.contrib_totals.items()) + [("__baseline__", decomp.baseline_totals)]
-    for name, tot in items:
+    for name, tot, group in items:
         spec = spec_by_name.get(name)
         constrained = "" if spec is None else spec.sign != "free"
         # A CENTRED feature contributes deviations from its own average level, not
@@ -467,7 +587,8 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                 [("__portfolio__", port, total_actual)]
                 + [(r, tot[:, g], actual_by_region[g])
                    for g, r in enumerate(pdata.region_names)]):
-            row = {"feature": name, "region": region, **_stats(vals),
+            row = {"feature": name, "region": region, "group": group,
+                   **_stats(vals),
                    "sign_constrained": constrained, "contribution_vs": vs,
                    "share_of_actual_pct": float(np.median(vals) / denom * 100)}
             if constrained is True:
@@ -477,8 +598,9 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_totals.csv"), index=False)
 
-    # portfolio bar chart with uncertainty
-    port = df[(df["region"] == "__portfolio__") & (df["feature"] != "__baseline__")]
+    # portfolio bar chart with uncertainty: incremental drivers only, since the
+    # baseline parts are not switchable levers and dwarf everything else
+    port = df[(df["region"] == "__portfolio__") & (df["group"] == "incremental")]
     port = port.reindex(port["median"].abs().sort_values(ascending=False).index).head(top_n)
     fig, ax = plt.subplots(figsize=(8, max(3, 0.35 * len(port) + 1)))
     ypos = np.arange(len(port))
@@ -490,35 +612,74 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     ax.set_yticklabels(port["feature"], fontsize=8)
     ax.invert_yaxis()
     ax.axvline(0, color="grey", lw=0.8)
-    ax.set_title("Total contribution by feature (median, 90% HDI)")
+    ax.set_title("Incremental contribution by feature (median, 90% HDI)")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "contribution_bars.png"))
 
-    # portfolio weekly decomposition (median contributions, summed over regions)
-    dts = pd.Series(pdata.dates.values)
-    agg = pd.DataFrame({"date": dts})
-    agg["baseline"] = np.median(decomp.baseline_draws, axis=0)
-    for name, series in decomp.contrib_median.items():
-        agg[name] = series
-    weekly = agg.groupby("date").sum()
-    feats = [c for c in weekly.columns if c != "baseline"]
-    pos = [c for c in feats if weekly[c].sum() >= 0]
-    neg = [c for c in feats if weekly[c].sum() < 0]
-    actual_weekly = pd.Series(pdata.y_orig, index=dts).groupby(level=0).sum()
+    # what the baseline is made of (only when something was folded into it)
+    if base_feats:
+        bp = df[(df["region"] == "__portfolio__")
+                & (df["group"] == "baseline_part")]
+        bp = bp.reindex(bp["median"].abs().sort_values(ascending=False).index)
+        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.4 * len(bp) + 1)))
+        ypos = np.arange(len(bp))
+        ax.barh(ypos, bp["median"],
+                xerr=[bp["median"] - bp["hdi_low"],
+                      bp["hdi_high"] - bp["median"]],
+                capsize=2,
+                color=np.where(bp["median"] >= 0, "tab:green", "tab:red"))
+        ax.set_yticks(ypos)
+        ax.set_yticklabels(bp["feature"], fontsize=8)
+        ax.invert_yaxis()
+        ax.axvline(0, color="grey", lw=0.8)
+        ax.set_title("Baseline expanded: what makes up the base "
+                     "(median, 90% HDI)")
+        fig.tight_layout()
+        save_fig(fig, os.path.join(outdir, "baseline_breakdown.png"))
 
-    fig, ax = plt.subplots(figsize=(11, 5))
-    stack_cols = ["baseline"] + pos
-    ax.stackplot(weekly.index, [weekly[c].clip(lower=0) for c in stack_cols],
-                 labels=stack_cols, alpha=0.85)
-    if neg:
-        ax.stackplot(weekly.index, [weekly[c].clip(upper=0) for c in neg],
-                     labels=neg, alpha=0.85)
-    ax.plot(actual_weekly.index, actual_weekly.values, color="black", lw=1.2,
-            label="actual")
-    ax.legend(fontsize=7, ncol=3)
-    ax.set_title("Portfolio decomposition (posterior-median contributions)")
-    fig.tight_layout()
-    save_fig(fig, os.path.join(outdir, "decomposition_area.png"))
+    # ---- portfolio weekly decomposition -------------------------------------
+    # Two versions: "collapsed" shows the baseline as one block (the business
+    # view: base vs what marketing added); "expanded" opens the baseline into
+    # core + baseline features. Baseline features are excluded from the
+    # collapsed stack because they are already inside the baseline block.
+    dts = pd.Series(pdata.dates.values)
+    actual_weekly = pd.Series(pdata.y_orig, index=dts).groupby(level=0).sum()
+    incremental = [n for n in decomp.contrib_median if n not in base_feats]
+
+    def _stack(base_col: str, base_series: np.ndarray, feats: list,
+               title: str, fname: str) -> None:
+        agg = pd.DataFrame({"date": dts})
+        agg[base_col] = base_series
+        for n in feats:
+            agg[n] = decomp.contrib_median[n]
+        weekly = agg.groupby("date").sum()
+        cols = [c for c in weekly.columns if c != base_col]
+        pos = [c for c in cols if weekly[c].sum() >= 0]
+        neg = [c for c in cols if weekly[c].sum() < 0]
+
+        fig, ax = plt.subplots(figsize=(11, 5))
+        stack_cols = [base_col] + pos
+        ax.stackplot(weekly.index, [weekly[c].clip(lower=0) for c in stack_cols],
+                     labels=stack_cols, alpha=0.85)
+        if neg:
+            ax.stackplot(weekly.index, [weekly[c].clip(upper=0) for c in neg],
+                         labels=neg, alpha=0.85)
+        ax.plot(actual_weekly.index, actual_weekly.values, color="black", lw=1.2,
+                label="actual")
+        ax.legend(fontsize=7, ncol=3)
+        ax.set_title(title)
+        fig.tight_layout()
+        save_fig(fig, os.path.join(outdir, fname))
+
+    _stack("baseline", np.median(decomp.baseline_draws, axis=0), incremental,
+           "Portfolio decomposition (posterior-median contributions)",
+           "decomposition_area.png")
+    if base_feats and decomp.core_draws is not None:
+        _stack("baseline_core", np.median(decomp.core_draws, axis=0),
+               list(decomp.contrib_median),
+               "Portfolio decomposition, baseline expanded "
+               "(core = intercept + seasonality + trend)",
+               "decomposition_area_expanded.png")
     return df
 
 

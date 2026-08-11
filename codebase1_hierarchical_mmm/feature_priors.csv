@@ -1,28 +1,28 @@
-variable,hierarchical,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center
-TDP,1,positive,0.20,1,0.5,1
-AVP,1,negative,0.20,1,0.5,1
-ACV_WD_Any Merch,1,positive,0.15,1,0.5,1
-Shopper-Digital,1,positive,0.05,1,0.5,0
-Calls,1,positive,0.05,1,0.5,0
-Samples,1,positive,0.05,1,0.5,0
-Audio,1,positive,0.05,1,0.5,0
-DEI,1,free,0,0.5,0.5,0
-Direct Partnership,1,positive,0.05,1,0.5,0
-Display,1,positive,0.05,1,0.5,0
-DTV,1,positive,0.05,1,0.5,0
-Ecommerce Display,1,positive,0.05,1,0.5,0
-Ecommerce Search,1,positive,0.05,1,0.5,0
-Ecommerce Video,1,positive,0.05,1,0.5,0
-Expert Display,1,positive,0.05,1,0.5,0
-Expert Partnership,1,positive,0.05,1,0.5,0
-Expert Search,1,positive,0.05,1,0.5,0
-Expert Social,1,positive,0.05,1,0.5,0
-Expert Video,1,positive,0.05,1,0.5,0
-MSAN,1,positive,0.05,1,0.5,0
-OLV,1,positive,0.05,1,0.5,0
-Paid Search,1,positive,0.05,1,0.5,0
-PR,1,positive,0.05,1,0.5,0
-Social,1,positive,0.05,1,0.5,0
-TV_GM,1,positive,0.05,1,0.5,0
-TV_HM,1,positive,0.05,1,0.5,0
-Dummy,0,free,0,1,0.5,0
+variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center,baseline
+TDP,,hierarchical,positive,0.2,1.0,0.5,1,1
+AVP,,hierarchical,negative,0.2,1.0,0.5,1,1
+ACV_WD_Any Merch,,hierarchical,positive,0.15,1.0,0.5,1,1
+Shopper-Digital,,hierarchical,positive,0.05,1.0,0.5,0,0
+Calls,,hierarchical,positive,0.05,1.0,0.5,0,0
+Samples,,hierarchical,positive,0.05,1.0,0.5,0,0
+Audio,,hierarchical,positive,0.05,1.0,0.5,0,0
+DEI,,hierarchical,free,0.0,0.5,0.5,0,0
+Direct Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0
+Display,,hierarchical,positive,0.05,1.0,0.5,0,0
+DTV,,hierarchical,positive,0.05,1.0,0.5,0,0
+Ecommerce Display,,hierarchical,positive,0.05,1.0,0.5,0,0
+Ecommerce Search,,hierarchical,positive,0.05,1.0,0.5,0,0
+Ecommerce Video,,hierarchical,positive,0.05,1.0,0.5,0,0
+Expert Display,,hierarchical,positive,0.05,1.0,0.5,0,0
+Expert Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0
+Expert Search,,hierarchical,positive,0.05,1.0,0.5,0,0
+Expert Social,,hierarchical,positive,0.05,1.0,0.5,0,0
+Expert Video,,hierarchical,positive,0.05,1.0,0.5,0,0
+MSAN,,hierarchical,positive,0.05,1.0,0.5,0,0
+OLV,,hierarchical,positive,0.05,1.0,0.5,0,0
+Paid Search,,hierarchical,positive,0.05,1.0,0.5,0,0
+PR,,hierarchical,positive,0.05,1.0,0.5,0,0
+Social,,hierarchical,positive,0.05,1.0,0.5,0,0
+TV_GM,,hierarchical,positive,0.05,1.0,0.5,0,0
+TV_HM,,hierarchical,positive,0.05,1.0,0.5,0,0
+Dummy,,global,free,0.0,1.0,0.5,0,0

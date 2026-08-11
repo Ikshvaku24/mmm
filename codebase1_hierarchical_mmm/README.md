@@ -26,11 +26,12 @@ One row per **feature** (not per region×feature — the hierarchy generates reg
 variation). Via `FeatureSpec(...)` in code or a CSV loaded with `load_feature_config`:
 
 ```csv
-variable,hierarchical,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center
-tv,1,positive,0.05,1.0,0.5,0
-price_index,1,negative,0.30,0.7,0.4,1
-distribution,1,positive,0.20,0.7,0.4,1
-dummy_covid,0,free,0.0,1.0,,
+variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center,baseline
+tv,,hierarchical,positive,0.05,1.0,0.5,0,0
+tv,North,,,0.20,,,,          # per-region prior override (optional)
+price_index,,hierarchical,negative,0.30,0.7,0.4,1,1
+distribution,,independent,positive,0.20,0.7,0.4,1,1
+dummy_covid,,global,free,0.0,1.0,,,
 ```
 
 - `sign_constraint=positive/negative` → coefficient built as `±exp(normal)`: it can
@@ -39,8 +40,40 @@ dummy_covid,0,free,0.0,1.0,,
   *by construction*, so the reports leave those two columns **blank** — judge a
   sign-constrained feature by its effect size, HDI width and data support, never
   by "significance".
-- `hierarchical=1` → non-centred partial pooling across regions; `0` → one global
-  coefficient shared by all regions.
+- `pooling` picks how the regions share information:
+
+  | value | meaning | population row? |
+  |---|---|---|
+  | `hierarchical` *(default)* | non-centred partial pooling — regions shrink toward a learned population effect | yes |
+  | `independent` | every region gets its **own prior and its own coefficient**, no pooling (reproduces the old per-region `b0`/`B0` prior file) | no |
+  | `global` | one coefficient shared by every region | yes |
+
+  The legacy `hierarchical` column (1/0) still works and maps to
+  `hierarchical`/`global`; `pooling` wins when both are present.
+
+- **Per-region priors.** Add extra rows with the `region` column filled in to
+  override the prior for one region. A region row must follow a feature-level
+  row for the same variable, and its region name must exist in the data —
+  otherwise the run stops rather than silently ignoring your prior. What the
+  override means depends on the pooling mode:
+  - `independent` — that region's prior outright (`global_prior_mean` **and**
+    `global_prior_sd`).
+  - `hierarchical` — `global_prior_mean` shifts the centre that region shrinks
+    toward, as a fixed offset, so your region knowledge is honoured while
+    pooling is kept. A per-region `global_prior_sd` has no meaning here (the
+    pooled `regional_sd_prior` plays that role) and is ignored with a warning.
+  - `global` — rejected: there is only one coefficient, so a per-region prior
+    cannot apply.
+
+  This is the same multi-level idea the price-elasticity package uses
+  (`mu[group] + sigma[group] * offset`), with the region playing the role of
+  their group.
+
+- **`baseline=1`** folds a feature into the **baseline** instead of reporting it
+  as an incremental effect. Use it for always-on business drivers that are not
+  switchable marketing levers — distribution (TDP), price (AVP), ACV. Their
+  individual contributions are still computed, so the baseline can be expanded
+  into its parts (see `05_contributions` below).
 - `center=1` (optional column) → keep the sign constraint but centre *and* scale the
   feature, the way controls are scaled. **Required for always-on level variables**
   — distribution points, price indices, ACV measures. With the default scale-only
@@ -82,8 +115,49 @@ Smoke test / parameter recovery: `python synthetic_example.py`.
 | `01_data` | panel summary, per-region scaling stats, KPI plots |
 | `02_convergence` | `sampling_log.json` run manifest (package versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
 | `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0) *(blank for sign-constrained features — vacuous there)*, `scaling_method`, **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none` / `weak` / `weak (near-constant)` / `adequate` — a region where the feature never ran, **or where it never moves**, gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
-| `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); fit plots show both bands; residual plots. On the `__all__` row read **`r2_within_region`**, not `r2`: the pooled `r2` is inflated by the differences in level between regions and can sit at 0.99 while every region is fitted badly |
-| `05_contributions` | contribution totals with HDIs and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), bar chart, weekly portfolio decomposition |
+| `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); **`resid_t_stat` / `resid_p_value`** (bias test) and **`durbin_watson`** (residual autocorrelation) — see "Significance" below; fit plots show both bands; residual plots. On the `__all__` row read **`r2_within_region`**, not `r2`: the pooled `r2` is inflated by the differences in level between regions and can sit at 0.99 while every region is fitted badly |
+| `05_contributions` | contribution totals with HDIs and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), a **`group`** column (`baseline_total` / `baseline_part` / `incremental`), incremental bar chart, `baseline_breakdown.png`, and the weekly decomposition in both collapsed and baseline-expanded form |
+
+## Baseline vs incremental
+
+`__baseline__` is the base business: the region intercept, seasonality and trend
+(together `__baseline_core__`) **plus** every feature flagged `baseline=1`. The
+parts add up like this, per posterior draw:
+
+```
+__baseline__  = __baseline_core__ + Σ baseline features      (group = baseline_part)
+total sales   = __baseline__      + Σ incremental features   (group = incremental)
+```
+
+Baseline features therefore appear twice in `contribution_totals.csv` — once
+inside `__baseline__` and once on their own row — which is exactly what makes
+the baseline expandable. **Filter on `group` before summing**, or you will
+double count. (Medians of components only add approximately; the identity above
+is exact draw by draw.)
+
+Two decomposition charts are written: `decomposition_area.png` shows the
+baseline as a single block (the business view — base vs what marketing added),
+and `decomposition_area_expanded.png` opens it into core + baseline features.
+
+## Significance: t statistics and p values
+
+Both the coefficient report and the fit metrics carry them, computed the correct
+way rather than the way `production_code.py` did it.
+
+- `coefficient_report.csv`: **`t_stat` = posterior mean / posterior SD**. The old
+  code divided by `mcse_mean`, which shrinks as you draw more samples — so
+  "significance" inflated simply by sampling longer. The posterior SD is a
+  property of the posterior, not of how long the sampler ran.
+  **`p_value` = 2 × min(P(effect>0), P(effect<0))**: the posterior probability of
+  getting the direction wrong, doubled for a two-sided reading. It is blank for
+  sign-constrained features, where it is 0 by construction and means nothing.
+- `fit_metrics.csv`: **`resid_t_stat` / `resid_p_value`** test H₀ *mean residual
+  = 0* — a small p value means the model is systematically over- or
+  under-predicting over that window. **`durbin_watson`** ≈ 2 means no residual
+  autocorrelation; below ~1.5 indicates positive autocorrelation, usually a
+  missing trend or seasonal term. On the `__all__` row it is the average of the
+  per-region values, because differencing across concatenated regions would
+  straddle region boundaries.
 
 ## Cross-validation (expanding window / rolling origin)
 

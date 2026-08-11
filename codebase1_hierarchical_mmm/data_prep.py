@@ -25,7 +25,8 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from config import FeatureSpec, ModelConfig, RunConfig, bucket_features
+from config import (FeatureSpec, ModelConfig, RunConfig, bucket_features,
+                    validate_region_priors)
 
 
 def make_folds(n_dates: int, horizon: int, n_folds: int,
@@ -123,6 +124,9 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     regions = sorted(d[rc].unique().tolist())
     region_idx = d[rc].map({r: i for i, r in enumerate(regions)}).to_numpy()
     G = len(regions)
+    # a per-region prior naming a region that is not in the data would silently
+    # never apply - fail instead
+    validate_region_priors(model_cfg.features, regions)
 
     # ---- train / holdout split by date ------------------------------------
     all_dates = np.sort(d[dc].unique())

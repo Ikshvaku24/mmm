@@ -1,13 +1,37 @@
 """Configuration for the hierarchical MMM (Codebase 1 - pre-transformed inputs).
 
-The old prior file (one row per region x variable with b0/B0) is replaced by a
-feature-level configuration: one row per FEATURE. The hierarchy generates the
-regional variation, so you specify:
+Priors are specified per FEATURE, and optionally ALSO per (feature, region).
+For each feature you set:
 
   - a population prior (where the market-average effect sits),
   - a regional heterogeneity prior (how much regions may differ),
   - a sign constraint (positive / negative / free),
-  - whether the feature is hierarchical at all.
+  - a pooling mode (see below),
+  - optionally, per-region prior overrides.
+
+Pooling modes (`pooling`, one per feature):
+  "hierarchical"  partial pooling - one population prior, regional coefficients
+                  shrink toward it (the default; Meridian's beta_gm = beta_m +
+                  eta_m * N(0,1)).
+  "independent"   every region gets its OWN prior and its own coefficient, with
+                  no pooling. This is the mode for full per-region prior control
+                  (and reproduces the old b0/B0-per-region prior file).
+  "global"        one coefficient shared by every region.
+
+Per-region priors (a `region` column in the prior CSV) work in both region-aware
+modes, but they mean different things:
+  - under "independent": the region's prior IS its prior (mean and sd).
+  - under "hierarchical": the region's prior_mean shifts where that region's
+    coefficient is centred, as a fixed offset, while the hierarchy still pools
+    how far regions wander from their own centre. A per-region prior_sd is not
+    used here (the pooled tau plays that role) and is ignored with a warning.
+
+Baseline features (`baseline=1`):
+  Features flagged as baseline are folded into the BASELINE rather than reported
+  as incremental effects - the right treatment for always-on business drivers
+  such as distribution (TDP) and price (AVP), which are not marketing levers you
+  can switch off. Their individual contributions are still computed and reported,
+  so the baseline can be expanded into its parts (see 05_contributions).
 
 Scale conventions (important for choosing priors):
   - The KPI (dv) is standardised per region, so effects are in "region sd of dv" units.
@@ -32,15 +56,34 @@ import numpy as np
 import pandas as pd
 
 VALID_SIGNS = ("positive", "negative", "free")
+VALID_POOLING = ("hierarchical", "independent", "global")
 
 # Bucket = one vectorised block of coefficients in the model.
-BUCKET_ORDER = ["hpos", "hneg", "hfree", "gpos", "gneg", "gfree"]
+# prefix: h = hierarchical (pooled), i = independent per region, g = one global
+BUCKET_ORDER = ["hpos", "hneg", "hfree",
+                "ipos", "ineg", "ifree",
+                "gpos", "gneg", "gfree"]
+_POOL_PREFIX = {"hierarchical": "h", "independent": "i", "global": "g"}
+
+
+@dataclass
+class RegionPrior:
+    """Prior override for one (feature, region) cell.
+
+    prior_mean: magnitude for signed features (> 0), location for free ones.
+    prior_sd:   only used under pooling="independent" (under "hierarchical" the
+                pooled tau governs the spread, so a per-region sd is ignored).
+    """
+    prior_mean: float | None = None
+    prior_sd: float | None = None
 
 
 @dataclass
 class FeatureSpec:
     name: str
-    hierarchical: bool = True
+    hierarchical: bool = True          # DEPRECATED alias: True -> pooling
+                                       # "hierarchical", False -> "global".
+                                       # Ignored when `pooling` is set explicitly.
     sign: str = "free"                 # "positive" | "negative" | "free"
     prior_mean: float | None = None    # population prior location (magnitude if signed)
     prior_sd: float | None = None      # population prior sd (log-scale if signed)
@@ -50,11 +93,26 @@ class FeatureSpec:
                                        # level variables (distribution, price index,
                                        # ACV) - see the module docstring. Ignored for
                                        # sign="free", which is always centred.
+    pooling: str | None = None         # "hierarchical" | "independent" | "global"
+    baseline: bool = False             # fold into the BASELINE instead of reporting
+                                       # as an incremental effect (always-on business
+                                       # drivers: distribution, price). Its own
+                                       # contribution is still reported so the
+                                       # baseline can be expanded.
+    region_priors: dict = field(default_factory=dict)   # region name -> RegionPrior
 
     def resolved(self) -> "FeatureSpec":
-        s = FeatureSpec(**self.__dict__)
+        s = FeatureSpec(**{**self.__dict__,
+                           "region_priors": dict(self.region_priors)})
         if s.sign not in VALID_SIGNS:
             raise ValueError(f"{s.name}: sign must be one of {VALID_SIGNS}, got {s.sign!r}")
+        if s.pooling is None:
+            s.pooling = "hierarchical" if s.hierarchical else "global"
+        s.pooling = str(s.pooling).strip().lower()
+        if s.pooling not in VALID_POOLING:
+            raise ValueError(
+                f"{s.name}: pooling must be one of {VALID_POOLING}, got {s.pooling!r}")
+        s.hierarchical = s.pooling == "hierarchical"   # keep the alias consistent
         if s.sign == "free":
             s.prior_mean = 0.0 if s.prior_mean is None else float(s.prior_mean)
             s.prior_sd = 0.5 if s.prior_sd is None else float(s.prior_sd)
@@ -69,20 +127,68 @@ class FeatureSpec:
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
         s.center = bool(s.center) or s.sign == "free"   # free is always centred
+        s.baseline = bool(s.baseline)
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
         if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
             raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
         if not np.isfinite(s.regional_sd):
             raise ValueError(f"{s.name}: regional_sd must be finite")
-        if s.hierarchical and s.regional_sd <= 0:
+        if s.pooling == "hierarchical" and s.regional_sd <= 0:
             raise ValueError(f"{s.name}: hierarchical features require regional_sd > 0")
         if s.regional_sd < 0:
             raise ValueError(f"{s.name}: regional_sd cannot be negative")
+
+        # ---- per-region priors -------------------------------------------
+        if s.region_priors and s.pooling == "global":
+            raise ValueError(
+                f"{s.name}: pooling='global' fits ONE coefficient for all regions, "
+                "so per-region priors cannot apply. Use pooling='independent' "
+                "(own prior per region) or 'hierarchical' (region prior shifts the "
+                "centre it shrinks toward).")
+        clean = {}
+        for reg, rp in s.region_priors.items():
+            rp = rp if isinstance(rp, RegionPrior) else RegionPrior(**dict(rp))
+            if rp.prior_mean is not None:
+                rp.prior_mean = float(rp.prior_mean)
+                if s.sign != "free" and rp.prior_mean <= 0:
+                    warnings.warn(
+                        f"{s.name}[{reg}]: sign-constrained features need "
+                        f"prior_mean > 0 (a magnitude); got {rp.prior_mean}. "
+                        "Falling back to the feature-level prior.")
+                    rp.prior_mean = None
+            if rp.prior_sd is not None:
+                rp.prior_sd = float(rp.prior_sd)
+                if not (np.isfinite(rp.prior_sd) and rp.prior_sd > 0):
+                    raise ValueError(
+                        f"{s.name}[{reg}]: prior_sd must be finite and > 0")
+                if s.pooling == "hierarchical":
+                    warnings.warn(
+                        f"{s.name}[{reg}]: a per-region prior_sd is ignored under "
+                        "pooling='hierarchical' (the pooled regional_sd governs "
+                        "spread). Use pooling='independent' to set it per region.")
+                    rp.prior_sd = None
+            if rp.prior_mean is not None or rp.prior_sd is not None:
+                clean[str(reg)] = rp
+        s.region_priors = clean
         return s
+
+    # -- per-region prior lookup (falls back to the feature-level prior) ----
+    def prior_mean_for(self, region: str) -> float:
+        rp = self.region_priors.get(region)
+        if rp is not None and rp.prior_mean is not None:
+            return float(rp.prior_mean)
+        return float(self.prior_mean)
+
+    def prior_sd_for(self, region: str) -> float:
+        rp = self.region_priors.get(region)
+        if rp is not None and rp.prior_sd is not None:
+            return float(rp.prior_sd)
+        return float(self.prior_sd)
 
 
 def bucket_name(spec: FeatureSpec) -> str:
-    return ("h" if spec.hierarchical else "g") + {
+    pooling = spec.pooling or ("hierarchical" if spec.hierarchical else "global")
+    return _POOL_PREFIX[pooling] + {
         "positive": "pos", "negative": "neg", "free": "free"
     }[spec.sign]
 
@@ -91,29 +197,101 @@ def bucket_features(specs: list[FeatureSpec]) -> dict[str, list[FeatureSpec]]:
     return {b: [s for s in specs if bucket_name(s) == b] for b in BUCKET_ORDER}
 
 
-def load_feature_config(path: str) -> list[FeatureSpec]:
-    """Read the feature-level prior file (CSV).
+def _cell(row, key):
+    """Value of `key` in a CSV row, or None when absent/blank."""
+    v = row.get(key)
+    return None if v is None or pd.isna(v) else v
 
-    Expected columns (extra columns ignored):
+
+def load_feature_config(path: str) -> list[FeatureSpec]:
+    """Read the feature prior file (CSV).
+
+    FEATURE-LEVEL rows (one per feature, `region` blank or column absent):
       variable, hierarchical, sign_constraint,
       global_prior_mean, global_prior_sd, regional_sd_prior
-    Optional column:
-      center (0/1) - 1 for always-on level variables (distribution, price index,
-      ACV) so they are centred rather than only scaled; see the module docstring.
+    Optional columns:
+      center   (0/1) 1 for always-on level variables (distribution, price index,
+               ACV) so they are centred rather than only scaled.
+      pooling  "hierarchical" | "independent" | "global". Defaults to
+               hierarchical/global from the `hierarchical` column.
+      baseline (0/1) 1 to fold the feature into the baseline instead of
+               reporting it as an incremental effect.
+
+    PER-REGION rows (optional): same file, with `region` filled in. They override
+    the feature-level prior for that region only:
+      variable, region, global_prior_mean[, global_prior_sd]
+    A per-region row must follow a feature-level row for the same variable.
+    Under pooling="hierarchical" only the mean is used (as a fixed offset to the
+    centre that region shrinks toward); under "independent" both apply.
+
+    Example:
+        variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd
+        TV_GM,,hierarchical,positive,0.05,1.0
+        TV_GM,1-Walmart+FamilyDollar,,,0.20,
+        TV_GM,3-Target-Corp,,,0.02,
     """
     df = pd.read_csv(path)
-    specs = []
+    if "variable" not in df.columns:
+        raise ValueError(f"{path}: missing required column 'variable'")
+
+    base_rows, region_rows = [], []
     for _, r in df.iterrows():
-        specs.append(FeatureSpec(
-            name=str(r["variable"]).strip(),
-            hierarchical=bool(int(r.get("hierarchical", 1))),
+        (region_rows if _cell(r, "region") is not None else base_rows).append(r)
+
+    specs, by_name = [], {}
+    for r in base_rows:
+        name = str(r["variable"]).strip()
+        if name in by_name:
+            raise ValueError(f"{path}: duplicate feature-level row for {name!r}")
+        hier = _cell(r, "hierarchical")
+        center = _cell(r, "center")
+        baseline = _cell(r, "baseline")
+        pooling = _cell(r, "pooling")
+        spec = FeatureSpec(
+            name=name,
+            hierarchical=True if hier is None else bool(int(hier)),
             sign=str(r.get("sign_constraint", "free")).strip().lower(),
-            prior_mean=None if pd.isna(r.get("global_prior_mean")) else float(r["global_prior_mean"]),
-            prior_sd=None if pd.isna(r.get("global_prior_sd")) else float(r["global_prior_sd"]),
-            regional_sd=None if pd.isna(r.get("regional_sd_prior")) else float(r["regional_sd_prior"]),
-            center=False if pd.isna(r.get("center")) else bool(int(r["center"])),
-        ).resolved())
-    return specs
+            prior_mean=_cell(r, "global_prior_mean"),
+            prior_sd=_cell(r, "global_prior_sd"),
+            regional_sd=_cell(r, "regional_sd_prior"),
+            center=False if center is None else bool(int(center)),
+            pooling=None if pooling is None else str(pooling).strip().lower(),
+            baseline=False if baseline is None else bool(int(baseline)),
+        )
+        by_name[name] = spec
+        specs.append(spec)
+
+    for r in region_rows:
+        name = str(r["variable"]).strip()
+        if name not in by_name:
+            raise ValueError(
+                f"{path}: per-region row for {name!r} (region "
+                f"{_cell(r, 'region')!r}) has no feature-level row. Add a row for "
+                f"{name!r} with the `region` column left blank.")
+        by_name[name].region_priors[str(_cell(r, "region")).strip()] = RegionPrior(
+            prior_mean=_cell(r, "global_prior_mean"),
+            prior_sd=_cell(r, "global_prior_sd"),
+        )
+
+    return [s.resolved() for s in specs]
+
+
+def validate_region_priors(specs: list[FeatureSpec], region_names: list) -> None:
+    """Fail loudly on per-region priors whose region is not in the data.
+
+    A typo'd region name would otherwise be silently ignored and the analyst
+    would never learn their prior did not apply.
+    """
+    known = {str(r) for r in region_names}
+    problems = []
+    for s in specs:
+        for reg in s.region_priors:
+            if reg not in known:
+                problems.append(f"{s.name}[{reg}]")
+    if problems:
+        raise ValueError(
+            f"per-region priors reference regions not present in the data: "
+            f"{problems}. Regions in the data: {sorted(known)}")
 
 
 @dataclass

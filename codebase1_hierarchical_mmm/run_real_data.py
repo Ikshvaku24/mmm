@@ -15,6 +15,20 @@ detected by prepare_data - fix them in feature_priors.csv before re-running:
   2. Columns that are pure numerical dust must be dropped: Coupon-Digital,
      Coupon-FSI and Coupon-Ibotta had every non-zero value at ~1e-15, so the
      model was fitting float noise (and reporting 1e18 "per unit" effects).
+
+feature_priors.csv now also carries:
+  pooling   hierarchical (pool regions) | independent (own prior per region) |
+            global (one shared coefficient)
+  baseline  1 = fold into the BASELINE rather than report as an incremental
+            effect. TDP, AVP and ACV_WD_Any Merch are flagged, so
+            contribution_totals.csv reports __baseline__ (core + these) and
+            still lists each of them separately (group = baseline_part) so the
+            baseline can be expanded.
+  region    fill it in on an EXTRA row to override the prior for one region,
+            e.g. a stronger TV prior in Walmart:
+                TV_GM,,hierarchical,positive,0.05,1.0,0.5,0,0
+                TV_GM,1-Walmart+FamilyDollar,,,0.20,,,,
+            Region names must match the data exactly - the run stops otherwise.
 """
 from __future__ import annotations
 
