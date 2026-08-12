@@ -226,18 +226,53 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
 
     # features flagged baseline=1 belong INSIDE the baseline, not alongside it
     spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
+    scale_tbl = {(r.region, r.feature): r
+                 for r in pdata.x_scale_table.itertuples(index=False)}
     base = core.copy()
     yhat = core.copy()
+    core_shift = np.zeros_like(core)     # total re-referencing moved out of core
     contrib_median, contrib_totals, baseline_features = {}, {}, []
     sg = pdata.y_scale[reg]
 
     for name, b in beta_draws_by_feature(post, pdata).items():
         j = pdata.feature_index[name]
-        c = b[:, reg] * pdata.X[:, j][None, :]
-        yhat += c
+        Xj = pdata.X[:, j]
+        c = b[:, reg] * Xj[None, :]
+        yhat += c                       # the FIT always uses the modelled axis
+
+        # Reporting counterfactual. The model estimates beta on the scaled axis
+        # ((x-mu)/sigma for centred features), so its contribution is measured
+        # against mu. A due-to decomposition usually wants it measured against
+        # zero instead ("what if distribution were 0?"). Shifting the reference
+        # is an exact algebraic restatement of the SAME fit:
+        #     beta*(x-ref)/sigma = beta*(x-mu)/sigma + beta*(mu-ref)/sigma
+        # so whatever is added here is subtracted from the core below and the
+        # decomposition still sums to the fitted value.
+        shift = np.zeros(len(Xj))
         spec = spec_by_name.get(name)
+        if spec is not None and spec.contribution_reference != "auto":
+            for g in range(G):
+                info = scale_tbl[(pdata.region_names[g], name)]
+                mu_g, sd_g = float(info.center), float(info.scale)
+                m_all = reg == g
+                ref = spec.contribution_reference
+                if ref == "mean":
+                    ref_v = mu_g if info.method == "center_scale" else float(
+                        (Xj[m_all & pdata.train_mask] * sd_g + mu_g).mean())
+                elif ref == "zero":
+                    ref_v = 0.0
+                elif ref == "min":
+                    ref_v = float((Xj[m_all & pdata.train_mask] * sd_g + mu_g).min())
+                else:
+                    ref_v = float(ref)
+                shift[m_all] = (mu_g - ref_v) / sd_g
+        if np.any(shift):
+            adj = b[:, reg] * shift[None, :]
+            c = c + adj
+            core_shift += adj              # removed from the core after the loop
+
         if spec is not None and spec.baseline:
-            base += c
+            base = base + c
             baseline_features.append(name)
         c_o = c * sg[None, :]
         contrib_median[name] = np.median(c_o, axis=0)
@@ -246,6 +281,11 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
             tot[:, g] = c_o[:, reg == g].sum(axis=1)
         contrib_totals[name] = tot
         del c, c_o
+
+    # whatever the re-referencing added to the features comes out of the core,
+    # so core + baseline features + incremental features still equals the fit
+    core = core - core_shift
+    base = base - core_shift
 
     # posterior predictive draws: add likelihood noise (sigma_g, and nu for
     # Student-t). This is what holdout coverage must be judged against.
@@ -482,6 +522,27 @@ def compute_fit_metrics(decomp: Decomposition, pdata: PreparedData) -> pd.DataFr
         all_row["mape_region_weighted_pct"] = (
             float((mp[ok] * w[ok]).sum() / w[ok].sum()) if ok.any() else np.nan)
         rows.append(all_row)
+
+        # __aggregate__: sum regions to ONE national series per date, then score.
+        # This is the like-for-like comparison against a national total-sales
+        # model. It always looks better than the per-region rows because summing
+        # cancels the idiosyncratic noise of individual regions - quote it only
+        # next to them, never instead of them.
+        dts = pd.Series(pdata.dates.values)[m].to_numpy()
+        order = np.unique(dts)
+        pick = {d: np.where(dts == d)[0] for d in order}
+        act_agg = np.array([pdata.y_orig[m][ix].sum() for ix in pick.values()])
+        med_agg = np.array([med[m][ix].sum() for ix in pick.values()])
+        pred_agg = np.column_stack(
+            [decomp.ypred_draws[:, m][:, ix].sum(axis=1) for ix in pick.values()])
+        mean_agg = np.column_stack(
+            [decomp.yhat_draws[:, m][:, ix].sum(axis=1) for ix in pick.values()])
+        rows.append({"region": "__aggregate__", "dataset": which,
+                     **_metrics(act_agg, med_agg,
+                                np.percentile(mean_agg, 5, axis=0),
+                                np.percentile(mean_agg, 95, axis=0),
+                                np.percentile(pred_agg, 5, axis=0),
+                                np.percentile(pred_agg, 95, axis=0), pred_agg)})
         rows.extend(region_rows)
     return pd.DataFrame(rows)
 
@@ -588,6 +649,8 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                 + [(r, tot[:, g], actual_by_region[g])
                    for g, r in enumerate(pdata.region_names)]):
             row = {"feature": name, "region": region, "group": group,
+                   "pillar": ("Baseline" if spec is None or spec.baseline
+                              else (spec.pillar or "")),
                    **_stats(vals),
                    "sign_constrained": constrained, "contribution_vs": vs,
                    "share_of_actual_pct": float(np.median(vals) / denom * 100)}
@@ -597,6 +660,16 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
             rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_totals.csv"), index=False)
+
+    # ---- pillar roll-up (the format vendor decks report in) -----------------
+    # __baseline__ carries the whole base, so roll up baseline_total + the
+    # incremental features and skip baseline_part rows to avoid double counting.
+    roll = df[df["group"].isin(["baseline_total", "incremental"])].copy()
+    roll["pillar"] = roll["pillar"].replace("", "Unassigned")
+    pil = (roll.groupby(["pillar", "region"])[["median", "share_of_actual_pct"]]
+           .sum().reset_index()
+           .sort_values(["region", "share_of_actual_pct"], ascending=[True, False]))
+    pil.to_csv(os.path.join(outdir, "contribution_by_pillar.csv"), index=False)
 
     # portfolio bar chart with uncertainty: incremental drivers only, since the
     # baseline parts are not switchable levers and dwarf everything else

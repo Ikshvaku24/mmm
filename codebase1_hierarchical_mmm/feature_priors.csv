@@ -1,28 +1,28 @@
-variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center,baseline
-TDP,,hierarchical,positive,0.2,1.0,0.5,1,1
-AVP,,hierarchical,negative,0.2,1.0,0.5,1,1
-ACV_WD_Any Merch,,hierarchical,positive,0.15,1.0,0.5,1,1
-Shopper-Digital,,hierarchical,positive,0.05,1.0,0.5,0,0
-Calls,,hierarchical,positive,0.05,1.0,0.5,0,0
-Samples,,hierarchical,positive,0.05,1.0,0.5,0,0
-Audio,,hierarchical,positive,0.05,1.0,0.5,0,0
-DEI,,hierarchical,free,0.0,0.5,0.5,0,0
-Direct Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0
-Display,,hierarchical,positive,0.05,1.0,0.5,0,0
-DTV,,hierarchical,positive,0.05,1.0,0.5,0,0
-Ecommerce Display,,hierarchical,positive,0.05,1.0,0.5,0,0
-Ecommerce Search,,hierarchical,positive,0.05,1.0,0.5,0,0
-Ecommerce Video,,hierarchical,positive,0.05,1.0,0.5,0,0
-Expert Display,,hierarchical,positive,0.05,1.0,0.5,0,0
-Expert Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0
-Expert Search,,hierarchical,positive,0.05,1.0,0.5,0,0
-Expert Social,,hierarchical,positive,0.05,1.0,0.5,0,0
-Expert Video,,hierarchical,positive,0.05,1.0,0.5,0,0
-MSAN,,hierarchical,positive,0.05,1.0,0.5,0,0
-OLV,,hierarchical,positive,0.05,1.0,0.5,0,0
-Paid Search,,hierarchical,positive,0.05,1.0,0.5,0,0
-PR,,hierarchical,positive,0.05,1.0,0.5,0,0
-Social,,hierarchical,positive,0.05,1.0,0.5,0,0
-TV_GM,,hierarchical,positive,0.05,1.0,0.5,0,0
-TV_HM,,hierarchical,positive,0.05,1.0,0.5,0,0
-Dummy,,global,free,0.0,1.0,0.5,0,0
+variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center,baseline,pillar,contribution_reference
+TDP,,hierarchical,positive,0.2,1.0,0.5,1,1,Baseline,zero
+AVP,,hierarchical,negative,0.2,1.0,0.5,1,1,Baseline,zero
+ACV_WD_Any Merch,,hierarchical,positive,0.15,1.0,0.5,1,0,Trade,
+Shopper-Digital,,hierarchical,positive,0.05,1.0,0.5,0,0,Price Promotions,
+Calls,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Samples,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Audio,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+DEI,,hierarchical,free,0.0,0.5,0.5,0,0,Online Media,
+Direct Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Display,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+DTV,,hierarchical,positive,0.05,1.0,0.5,0,0,TV & Digital TV,
+Ecommerce Display,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Ecommerce Search,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Ecommerce Video,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Expert Display,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Expert Partnership,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Expert Search,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Expert Social,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+Expert Video,,hierarchical,positive,0.05,1.0,0.5,0,0,Expert,
+MSAN,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+OLV,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Paid Search,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+PR,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+Social,,hierarchical,positive,0.05,1.0,0.5,0,0,Online Media,
+TV_GM,,hierarchical,positive,0.05,1.0,0.5,0,0,TV & Digital TV,
+TV_HM,,hierarchical,positive,0.05,1.0,0.5,0,0,TV & Digital TV,
+Dummy,,global,free,0.0,1.0,0.5,0,0,Baseline,

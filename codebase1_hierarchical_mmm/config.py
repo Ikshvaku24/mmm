@@ -100,6 +100,22 @@ class FeatureSpec:
                                        # contribution is still reported so the
                                        # baseline can be expanded.
     region_priors: dict = field(default_factory=dict)   # region name -> RegionPrior
+    contribution_reference: object = "auto"  # counterfactual the CONTRIBUTION is
+                                       # measured against, in RAW feature units:
+                                       #   "auto" - matches the scaling (zero for
+                                       #            scale_only, the feature mean for
+                                       #            centred features)
+                                       #   "zero" - "what if this were 0?" - the
+                                       #            industry-standard due-to
+                                       #            decomposition for always-on
+                                       #            level drivers (distribution,
+                                       #            price)
+                                       #   "min"  - vs the lowest observed level
+                                       #   <float>- vs a fixed raw value
+                                       # Reporting only: it never changes the fit.
+    pillar: str = ""                   # reporting group ("Online Media", "TV & DTV",
+                                       # "Expert", ...) - contributions are rolled up
+                                       # by pillar in 05_contributions
 
     def resolved(self) -> "FeatureSpec":
         s = FeatureSpec(**{**self.__dict__,
@@ -128,6 +144,21 @@ class FeatureSpec:
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
         s.center = bool(s.center) or s.sign == "free"   # free is always centred
         s.baseline = bool(s.baseline)
+        s.pillar = "" if s.pillar is None else str(s.pillar).strip()
+        ref = s.contribution_reference
+        if isinstance(ref, str):
+            ref = ref.strip().lower()
+            if ref not in ("auto", "zero", "mean", "min"):
+                try:
+                    ref = float(ref)
+                except ValueError:
+                    raise ValueError(
+                        f"{s.name}: contribution_reference must be "
+                        "'auto'/'zero'/'mean'/'min' or a number, got "
+                        f"{s.contribution_reference!r}") from None
+        elif ref is not None:
+            ref = float(ref)
+        s.contribution_reference = "auto" if ref is None else ref
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
         if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
             raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
@@ -257,6 +288,8 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             center=False if center is None else bool(int(center)),
             pooling=None if pooling is None else str(pooling).strip().lower(),
             baseline=False if baseline is None else bool(int(baseline)),
+            contribution_reference=_cell(r, "contribution_reference") or "auto",
+            pillar=_cell(r, "pillar") or "",
         )
         by_name[name] = spec
         specs.append(spec)
