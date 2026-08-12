@@ -456,9 +456,13 @@ class OutputConfig:
               driver series without the roll-up rows, contribution_timeseries
               is the smaller file.
       "year"  calendar year
-      "mat"   trailing moving-annual-total blocks counted back from the LAST
-              date (MAT 1 = oldest), which is how the vendor decomposition
-              in snapshots/true_output/ is cut. Always emits "Total" as well.
+      "mat"   two moving-annual-total blocks anchored on the LAST date - the
+              cut the vendor decomposition in snapshots/true_output/ uses:
+              MAT 2 = the most recent 52 periods, MAT 1 = the 52 before those.
+              On the real panel that is MAT 1 = 2024, MAT 2 = 2025. Anything
+              older than the last 104 periods lands in a separate "Pre-MAT"
+              block; a panel shorter than 104 is split in half instead.
+    Every setting also emits a "Total" block covering the whole window.
     """
     # ---- 01_data ----------------------------------------------------------
     model_input_matrix: bool = True     # every row exactly as the model sees it

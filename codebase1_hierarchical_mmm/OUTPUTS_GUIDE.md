@@ -68,12 +68,29 @@ Two options rather than switches:
   Controls the reporting periods in `contribution_summary.csv`; a **Total**
   block is always emitted alongside.
 
-  | Value | Blocks on a 104-week panel |
+  | Value | Blocks on the real 104-week panel |
   |---|---|
-  | `"mat"` | **MAT 1** (2024) + **MAT 2** (2025) + Total — the same cut as `snapshots/true_output/contribution_summary.png` |
+  | `"mat"` | **MAT 1** = 2024-01-07…2024-12-29, **MAT 2** = 2025-01-05…2025-12-28, + Total — the same cut as `snapshots/true_output/contribution_summary.png` |
   | `"week"` | one block per date (104) + Total — **the weekly detail report** |
   | `"year"` | 2024 + 2025 + Total |
   | `"none"` | Total only |
+
+  **How `"mat"` cuts a panel that isn't exactly 104 weeks.** The two MAT
+  windows are anchored on the **last** date and are always the same length, so
+  MAT 1 and MAT 2 are always comparable:
+
+  | Panel | Result |
+  |---|---|
+  | exactly 104 weeks | MAT 1 = first 52, MAT 2 = last 52 |
+  | **more** than 104 | MAT 2 = last 52, MAT 1 = the 52 before, everything older → one **`Pre-MAT`** block. 130 weeks ⇒ Pre-MAT (26) + MAT 1 (52) + MAT 2 (52) |
+  | **fewer** than 104 | no full year to roll, so split in half: MAT 1 = older half, MAT 2 = recent half. 80 weeks ⇒ 40 + 40; an odd period goes to MAT 1 |
+
+  `Pre-MAT` is deliberately *not* folded into MAT 1 — that would make MAT 1 an
+  unequal window and a MAT-on-MAT volume comparison would be meaningless. It is
+  also not split into further year blocks; if you have several years of history
+  and want each one, use `period_split="year"`. `n_periods` always states the
+  block length, so an unequal split is never silent. A monthly panel rolls
+  12 + 12 rather than 52 + 52 — the period length is inferred from the data.
 
   `"week"` multiplies the file by roughly the number of dates — for the real
   panel (27 features × 5 regions × 104 weeks) that is ~23k rows, ~2.5 MB. Still
@@ -522,7 +539,7 @@ sales**.
 
 | Column | Meaning |
 |---|---|
-| `period` | `MAT 1` / `MAT 2` / `Total`, or an ISO date under `period_split="week"` |
+| `period` | `MAT 1` / `MAT 2` / `Total` (plus `Pre-MAT` on panels longer than 104 weeks), or an ISO date under `period_split="week"` |
 | `n_periods` | Weeks in that block — 52 / 52 / 104, or 1 for a weekly block |
 | `region` | Region or `__portfolio__` |
 | `pillar`, `feature` | Reporting group and driver |

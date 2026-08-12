@@ -146,9 +146,13 @@ OutputConfig.core_only(contribution_summary=True) # only the volume table
 ```
 
 `period_split` sets the reporting periods in `contribution_summary.csv`:
-`"mat"` (default) reproduces the vendor MAT 1 / MAT 2 cut, `"week"` gives one
-block per date for a weekly volume-and-% report, `"year"` splits by calendar
-year, `"none"` reports the window only. A `Total` block is always included.
+`"mat"` (default) reproduces the vendor cut — **MAT 2 = the most recent 52
+periods, MAT 1 = the 52 before those**, both anchored on the last date, so on
+the 104-week panel MAT 1 is 2024 and MAT 2 is 2025. Anything older than the last
+104 periods goes to a separate `Pre-MAT` block rather than distorting MAT 1; a
+panel shorter than 104 is split in half instead. `"week"` gives one block per
+date for a weekly volume-and-% report, `"year"` splits by calendar year,
+`"none"` reports the window only. A `Total` block is always included.
 Every block reconciles to exactly 100% of that block's actual sales — but a
 single week's residual is far larger relative to one week of sales than the
 window residual is, so weekly percentages swing; use them for timing and the

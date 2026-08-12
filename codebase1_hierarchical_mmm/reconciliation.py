@@ -53,11 +53,25 @@ def period_labels(dates, mode: str = "mat") -> np.ndarray:
             week-by-week volume and % report; the price is one block per date,
             so contribution_summary.csv grows by a factor of ~n_dates.
     "year"  calendar year
-    "mat"   moving-annual-total blocks counted back from the LAST date, so the
-            most recent full year is the highest-numbered MAT. This is how the
-            vendor decomposition in snapshots/true_output/ is cut (MAT 1 = the
-            older year, MAT 2 = the latest). The block length is inferred from
-            the observed date spacing, so weekly and monthly panels both work.
+    "mat"   TWO moving-annual-total blocks anchored on the LAST date, the cut
+            used by the vendor decomposition in snapshots/true_output/:
+              MAT 2  the most recent 52 periods
+              MAT 1  the 52 periods before those
+            On the real panel (104 weeks, 2024-01-07 … 2025-12-28) that is
+            MAT 1 = 2024 and MAT 2 = 2025 exactly.
+
+            Panels that are not exactly 104 periods:
+              longer   anything older than the last 104 goes to its own
+                       "Pre-MAT" block rather than being folded into MAT 1,
+                       which would make MAT 1 an unequal window
+              shorter  there is no full year to roll, so the data is split in
+                       half: MAT 1 = older half, MAT 2 = recent half. An odd
+                       period goes to MAT 1, keeping the recent block clean.
+            `n_periods` in contribution_summary.csv always states the block
+            length, so an unequal split is never silent.
+
+            The period length is inferred from the observed date spacing, so a
+            monthly panel rolls 12 + 12 rather than 52 + 52.
     """
     dts = pd.DatetimeIndex(pd.to_datetime(pd.Series(np.asarray(dates))))
     if mode == "none":
@@ -71,14 +85,24 @@ def period_labels(dates, mode: str = "mat") -> np.ndarray:
         raise ValueError(f"unknown period_split {mode!r}")
 
     uniq = pd.DatetimeIndex(np.sort(dts.unique()))
-    if len(uniq) < 2:
+    n = len(uniq)
+    if n < 2:
         return np.array(["MAT 1"] * len(dts), dtype=object)
     gap_days = float(np.median(np.diff(uniq.to_numpy()).astype("timedelta64[D]")
                                .astype(float)))
-    per_year = max(1, int(round(365.25 / gap_days))) if gap_days > 0 else len(uniq)
-    from_end = (len(uniq) - 1 - np.arange(len(uniq))) // per_year
-    n_blocks = int(from_end.max()) + 1
-    lab = np.array([f"MAT {n_blocks - b}" for b in from_end], dtype=object)
+    per_year = max(1, int(round(365.25 / gap_days))) if gap_days > 0 else n
+
+    if n >= 2 * per_year:
+        mat2 = per_year               # most recent full year
+        mat1 = per_year               # the year before it
+    else:
+        mat2 = n // 2                 # no full year to roll - split in half,
+        mat1 = n - mat2               # the odd period going to the older block
+
+    lab = np.empty(n, dtype=object)
+    lab[:] = "Pre-MAT"                # only survives when n > mat1 + mat2
+    lab[n - mat1 - mat2: n - mat2] = "MAT 1"
+    lab[n - mat2:] = "MAT 2"
     return pd.Series(lab, index=uniq).reindex(dts).to_numpy(dtype=object)
 
 
