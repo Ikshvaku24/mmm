@@ -449,6 +449,12 @@ class OutputConfig:
 
     period_split controls the reporting periods of contribution_summary.csv:
       "none"  one "Total" block
+      "week"  one block per date - the week-by-week volume and % report. This
+              multiplies the file's row count by the number of dates, so use
+              it when you need weekly detail in the vendor layout (pillar
+              subtotals, Residual, Grand Total = actual). For a plain weekly
+              driver series without the roll-up rows, contribution_timeseries
+              is the smaller file.
       "year"  calendar year
       "mat"   trailing moving-annual-total blocks counted back from the LAST
               date (MAT 1 = oldest), which is how the vendor decomposition
@@ -470,7 +476,7 @@ class OutputConfig:
     contribution_reconciliation: bool = True  # components -> fitted -> actual
     contribution_plots: bool = True
     # ---- options ----------------------------------------------------------
-    period_split: str = "mat"           # "none" | "year" | "mat"
+    period_split: str = "mat"           # "none" | "week" | "year" | "mat"
     include_raw_features: bool = True   # also dump pre-scaling feature values
 
     _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
@@ -480,8 +486,9 @@ class OutputConfig:
               "contribution_plots")
 
     def __post_init__(self):
-        if self.period_split not in {"none", "year", "mat"}:
-            raise ValueError("period_split must be 'none', 'year' or 'mat'")
+        if self.period_split not in {"none", "week", "year", "mat"}:
+            raise ValueError(
+                "period_split must be 'none', 'week', 'year' or 'mat'")
 
     @classmethod
     def core_only(cls, **overrides) -> "OutputConfig":

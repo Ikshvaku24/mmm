@@ -49,6 +49,9 @@ def period_labels(dates, mode: str = "mat") -> np.ndarray:
     """Label each observation with a reporting period.
 
     "none"  everything in one "Total" block
+    "week"  every period is its own block, labelled with its ISO date. Gives a
+            week-by-week volume and % report; the price is one block per date,
+            so contribution_summary.csv grows by a factor of ~n_dates.
     "year"  calendar year
     "mat"   moving-annual-total blocks counted back from the LAST date, so the
             most recent full year is the highest-numbered MAT. This is how the
@@ -59,6 +62,9 @@ def period_labels(dates, mode: str = "mat") -> np.ndarray:
     dts = pd.DatetimeIndex(pd.to_datetime(pd.Series(np.asarray(dates))))
     if mode == "none":
         return np.array(["Total"] * len(dts), dtype=object)
+    if mode == "week":
+        # ISO dates so the blocks sort chronologically as text
+        return dts.strftime("%Y-%m-%d").to_numpy(dtype=object)
     if mode == "year":
         return dts.year.astype(str).to_numpy(dtype=object)
     if mode != "mat":

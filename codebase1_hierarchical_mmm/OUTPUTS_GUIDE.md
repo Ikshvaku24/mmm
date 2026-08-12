@@ -64,11 +64,21 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 
 Two options rather than switches:
 
-- **`period_split`** — `"mat"` (default), `"year"` or `"none"`. Controls the
-  reporting periods in `contribution_summary.csv`. `"mat"` cuts trailing
-  moving-annual-total blocks back from the last date, so a 104-week panel gives
-  **MAT 1** (2024) and **MAT 2** (2025) plus **Total** — the same cut as
-  `snapshots/true_output/contribution_summary.png`.
+- **`period_split`** — `"mat"` (default), `"week"`, `"year"` or `"none"`.
+  Controls the reporting periods in `contribution_summary.csv`; a **Total**
+  block is always emitted alongside.
+
+  | Value | Blocks on a 104-week panel |
+  |---|---|
+  | `"mat"` | **MAT 1** (2024) + **MAT 2** (2025) + Total — the same cut as `snapshots/true_output/contribution_summary.png` |
+  | `"week"` | one block per date (104) + Total — **the weekly detail report** |
+  | `"year"` | 2024 + 2025 + Total |
+  | `"none"` | Total only |
+
+  `"week"` multiplies the file by roughly the number of dates — for the real
+  panel (27 features × 5 regions × 104 weeks) that is ~23k rows, ~2.5 MB. Still
+  a normal spreadsheet, but see the note under `contribution_summary.csv` on
+  reading weekly percentages.
 - **`include_raw_features`** — also dump the pre-scaling feature values into
   `model_input_matrix.csv`. Doubles that file's width; leave it on unless size
   matters, because without it the scaling cannot be checked.
@@ -512,8 +522,8 @@ sales**.
 
 | Column | Meaning |
 |---|---|
-| `period` | `MAT 1` / `MAT 2` / `Total` (see `period_split`) |
-| `n_periods` | Weeks in that block — 52 / 52 / 104 |
+| `period` | `MAT 1` / `MAT 2` / `Total`, or an ISO date under `period_split="week"` |
+| `n_periods` | Weeks in that block — 52 / 52 / 104, or 1 for a weekly block |
 | `region` | Region or `__portfolio__` |
 | `pillar`, `feature` | Reporting group and driver |
 | `group` | `baseline_core` / `baseline_part` / `incremental` / `residual` |
@@ -535,6 +545,24 @@ fitted sales  +  Residual                  =  actual sales
 *fitted* sales; `actual − fitted` has to appear somewhere or the column stops at
 99.x%. It also absorbs the small median gap (see "two arithmetics" above). The
 vendor sheet carries a Residual line for the same reason — theirs is −0.01%.
+
+### Weekly detail — `period_split="week"`
+
+One block per date, same layout, and each week still reconciles to exactly
+100.00%. Use it to see *when* a driver contributed rather than how much it
+contributed overall — sorting one feature's rows by `period` gives its weekly
+volume series with a percentage attached.
+
+**Read weekly percentages differently from window percentages.** Over 104 weeks
+the residual averages out to ~0.1% of sales; in a single week it is routinely
+±5%, so `__baseline_core__` can print above 100% and other rows negative in the
+same block. That is the week's residual, not a broken decomposition — the Grand
+Total is still exactly 100%. Judge drivers on the `Total` block and use weekly
+blocks for timing.
+
+If you only want the weekly driver series without the actual / pillar-total /
+Grand Total rows, `contribution_timeseries.csv` carries the same volumes in a
+narrower file (186 KB vs 440 KB on the test panel).
 
 **Why the percentages sum to a large positive number even though the features
 are centred.** They sum to 100% because `__baseline_core__` — the region

@@ -98,6 +98,9 @@ sampler_cfg = SamplerConfig(
 #   out_cfg = OutputConfig.core_only()                      # fastest
 out_cfg = OutputConfig(
     period_split="mat",           # MAT 1 / MAT 2 blocks, as the vendor deck cuts it
+                                  # "week" = one block per date (weekly detail),
+                                  # "year" = calendar year, "none" = window only.
+                                  # A Total block is always included.
 )
 
 # ---- 3. fit + full report ---------------------------------------------------
