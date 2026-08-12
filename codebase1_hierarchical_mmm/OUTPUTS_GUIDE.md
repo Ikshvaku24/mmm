@@ -1,439 +1,690 @@
-# Output guide — Codebase 1 (hierarchical MMM)
+# Reading the model outputs — `real_data_v3`
 
-Every folder, every file, every column produced by `run_pipeline.run(...)`, written
-in standard MMM/econometrics language rather than PyMC vocabulary.
+Every folder, every file, every column, and what the numbers actually mean.
+All example values are the real ones from the `real_data_v3` run
+(5 retailers × 104 weeks, 2024-01-07 … 2025-12-28, 27 features, 13-week holdout).
 
-Illustrated throughout with the **`real_data_v2`** run: 5 retailer regions × 104 weeks
-(2024-01-07 → 2025-12-28), 27 features, last 13 weeks held out.
-
-```
-outputs/<run_name>/
-├── 01_data/              what actually went into the model
-├── 02_convergence/       is the fit trustworthy?
-├── 03_coefficients/      what did each driver do?
-├── 04_fit/               how well does it track and predict?
-├── 05_contributions/     where did the volume come from?
-├── 06_cross_validation/  only if you run cross_validation.run_cv()
-└── trace.nc              full posterior (save_trace=True)
-```
-
-**Read them in that order.** Stages 3–5 are meaningless if stage 2 failed — a
-non-converged sampler produces coefficient tables that look perfectly formatted and
-are entirely fictional.
-
-> **Note on this snapshot.** The files in `snapshots/real_data_ouput_v2/` are
-> screenshots/transcriptions, so some names differ from what the code writes:
-> `pannel_summary` → `panel_summary.csv`, `features_scaling_stats` →
-> `feature_scaling_stats.csv`, `prior_posterior_contractions` →
-> `prior_posterior_contraction.csv`.
+> **Anything marked 🆕 does not exist in the v3 files** — columns and whole
+> files alike. They were added after that run and will appear next time you
+> execute the pipeline. Everything else is exactly what is sitting in your v3
+> folders. The 🆕 files are the *reconciliation* outputs: they exist so every
+> number in the core tables can be re-derived by hand from the data.
 
 ---
 
-## Conventions used everywhere
+## Folder map
 
-**Two scales.** The model fits on *scaled* axes: the KPI is standardised per region
-and each feature is scaled per region. So a coefficient of `0.20` means "one unit of
-scaled feature moves sales by 0.20 of that region's sales standard deviation". Every
-coefficient is also converted back to original units (`*_orig_units`).
+| Folder | Question it answers | Look here when |
+|---|---|---|
+| `01_data` | What actually went into the model? | Numbers look strange — check scaling first (🆕 `model_input_matrix.csv` is the row-by-row answer) |
+| `02_convergence` | Can I trust the sampler at all? | **Always read this first** |
+| `03_coefficients` | What did each driver do, per retailer? | Building the effect story |
+| `04_fit` | How well does it predict? | Judging model quality |
+| `05_contributions` | How do sales split across drivers? | Building the business deck |
+| `trace.nc` | The raw posterior (all draws) | Re-analysis without re-fitting |
 
-**Intervals are 90% HDI**, the *shortest* interval containing 90% of the posterior —
-not 5th/95th percentiles. Columns `hdi_low` / `hdi_high`.
-⚠️ The one exception is `posterior_summary_full.csv`, which is raw ArviZ output and
-uses **94%** (`hdi_3%` / `hdi_97%`). Don't compare the two files' intervals directly.
-
-**Point estimate is the posterior median**, never the mean — the signed coefficients
-are log-normal, so their mean sits above their median.
-
-**Sign-constrained features** (`sign_constraint=positive/negative`) are built as
-`±exp(·)` and can never cross zero. `prob_positive` and `excludes_zero` are therefore
-**left blank** for them — they'd be true by construction and read as false
-significance. Judge those features on effect size, HDI width and `data_support`.
-
-**Contributions cover the whole period** (train + holdout), not the training window
-only.
+**Read them in this order: 02 → 04 → 03 → 05.** If convergence failed, nothing
+downstream means anything. If the fit is poor, the contributions are a story
+about a model that doesn't describe your business.
 
 ---
 
-## `01_data/` — what actually went into the model
+## Choosing which files get written — `OutputConfig`
 
-Verify this before believing anything downstream. Most modelling disasters are
-visible here.
+The **core tables are always written**: `panel_summary.csv`,
+`feature_scaling_stats.csv`, `coefficient_report.csv`, `fit_metrics.csv`,
+`contribution_totals.csv`, `contribution_by_pillar.csv`. Everything else is a
+**reconciliation output** and is switched on or off in `config.OutputConfig`,
+passed to `run(...)` as `out_cfg=`.
 
-### `panel_summary.csv` — one row per region
+```python
+from config import OutputConfig
+run(df, model_cfg, run_cfg, sampler_cfg, out_cfg=OutputConfig(period_split="mat"))
+
+OutputConfig()                                   # everything on (the default)
+OutputConfig(contribution_timeseries=False)      # skip the one large file
+OutputConfig.tables_only()                       # every CSV, no PNGs
+OutputConfig.core_only()                         # nothing optional
+OutputConfig.core_only(contribution_summary=True)  # only the volume table
+```
+
+| Flag | File(s) | Stage |
+|---|---|---|
+| `model_input_matrix` | `model_input_matrix.csv` | 01 |
+| `model_input_summary` | `model_input_summary.csv` | 01 |
+| `data_plots` | `kpi_by_region.png` | 01 |
+| `forest_plots` | `forest/*.png` | 03 |
+| `actual_vs_predicted` | `actual_vs_predicted.csv` | 04 |
+| `fit_plots` | `actual_vs_fitted.png`, `residuals.png` | 04 |
+| `contribution_summary` | `contribution_summary.csv` | 05 |
+| `contribution_timeseries` | `contribution_timeseries.csv` | 05 |
+| `contribution_math` | `contribution_math.csv` | 05 |
+| `contribution_reconciliation` | `contribution_reconciliation.csv` | 05 |
+| `contribution_plots` | the four 05 PNGs | 05 |
+
+Two options rather than switches:
+
+- **`period_split`** — `"mat"` (default), `"year"` or `"none"`. Controls the
+  reporting periods in `contribution_summary.csv`. `"mat"` cuts trailing
+  moving-annual-total blocks back from the last date, so a 104-week panel gives
+  **MAT 1** (2024) and **MAT 2** (2025) plus **Total** — the same cut as
+  `snapshots/true_output/contribution_summary.png`.
+- **`include_raw_features`** — also dump the pre-scaling feature values into
+  `model_input_matrix.csv`. Doubles that file's width; leave it on unless size
+  matters, because without it the scaling cannot be checked.
+
+### The reconciliation chain
+
+Each optional file evidences one link between the raw data and a percentage in
+the deck:
+
+| Link | File |
+|---|---|
+| raw feature → scaled feature | `01_data/model_input_matrix.csv`, `model_input_summary.csv` |
+| scaled feature → contribution | `05_contributions/contribution_math.csv` |
+| contributions → fitted sales | `05_contributions/contribution_reconciliation.csv` |
+| fitted sales → actual sales | `04_fit/actual_vs_predicted.csv` |
+| everything → volume and % | `05_contributions/contribution_summary.csv` |
+
+### Two arithmetics — the reason numbers sometimes look 0.1% off
+
+| | What it is | Where |
+|---|---|---|
+| **median of the total** | posterior median of a feature's whole-window total, **with an HDI** | `contribution_totals.csv` |
+| **sum of the medians** | per-week posterior median, summed — these **do** add up week by week, so they reconcile exactly, but a sum of medians has no honest interval | every file listed above |
+
+Both are printed side by side in `contribution_math.csv`
+(`volume_median_of_total` vs `volume_sum_of_medians`) with the difference, so
+the size of the gap is visible rather than assumed. It is normally < 0.5%.
+Quote `contribution_totals.csv` when you need uncertainty; quote
+`contribution_summary.csv` when the numbers have to add up on a slide.
+
+---
+
+## The one thing to understand first: scaled vs original units
+
+The model does not work in dollars. Internally:
+
+- **KPI (`dv`)** is standardised per region: `y = (sales − mean_g) / sd_g`, using
+  **training-window** statistics only. So a coefficient of `0.30` means
+  *"moves that region's sales by 0.30 of its own standard deviation"*.
+- **Features** are scaled per region in one of two ways (`01_data/feature_scaling_stats.csv`):
+  - `scale_only` — divided by the mean of positive values. Zero stays zero.
+    Used for media: "0 spend" is a meaningful point.
+  - `center_scale` — centred *and* scaled (z-scored). Used for controls and for
+    always-on level variables (TDP, AVP). Zero is no longer meaningful, so
+    effects are measured against the feature's **average level**.
+
+Because of this, **every coefficient appears twice**: on the scaled axis
+(comparable across regions) and converted back to original units. Contributions
+are always reported in real KPI units.
+
+---
+
+## `01_data` — what went into the model
+
+### `panel_summary.csv`
+
+One row per region.
 
 | Column | Meaning |
 |---|---|
-| `region` | Region label (here: retailer account) |
-| `n_obs` | Total weekly rows for this region (104) |
-| `n_train` | Training periods (91) |
-| `n_test` | Holdout periods (13) |
-| `dv_mean`, `dv_sd` | Mean / sd of the KPI over **all** periods, original units |
-| `kpi_center_used` | Mean subtracted when standardising — **train window only** |
-| `kpi_scale_used` | Sd divided by when standardising — **train window only** |
-| `date_min`, `date_max` | Date coverage |
+| `region` | Retailer account |
+| `n_obs` / `n_train` / `n_test` | Total / training / holdout weeks. v3: `104 / 91 / 13` |
+| `dv_mean`, `dv_sd` | Raw sales mean and sd over **all** weeks |
+| `kpi_center_used` | The mean actually subtracted (training window only) |
+| `kpi_scale_used` | The sd actually divided by (training window only) |
+| `date_min`, `date_max` | Date span |
 
-**Why `dv_mean` ≠ `kpi_center_used`:** the first spans all 104 weeks, the second only
-the 91 training weeks. They *should* differ slightly. If they were identical, holdout
-information would be leaking into the scaling.
+**How to read it.** `dv_mean` and `kpi_center_used` differ slightly
+(1,762,267 vs 1,762,931 for Walmart) — that is correct and expected: the first
+covers all 104 weeks, the second only the 91 training weeks. If they were
+identical, the holdout would be leaking into the scaling.
 
-**This is why `dv` must arrive un-standardised.** The pipeline standardises
-internally and converts every report back to original units. Pre-standardising would
-make contributions and fit metrics meaningless.
+### `feature_scaling_stats.csv`
 
-### `feature_scaling_stats.csv` — one row per region × feature
+One row per **region × feature** — 27 × 5 = 135 rows.
 
 | Column | Meaning |
 |---|---|
 | `region`, `feature` | The cell |
-| `method` | `scale_only` (media-style) or `center_scale` (control-style) |
-| `center` | Value **subtracted**. `0.0` for `scale_only` |
-| `scale` | Value **divided by** |
-| `n_active_train` | Non-zero weeks in the training window, counted on the **raw** column |
+| `method` | `scale_only` or `center_scale` (see above) |
+| `center` | Value subtracted (`0` for `scale_only`) |
+| `scale` | Value divided by |
+| `n_active_train` | Non-zero weeks in training, counted on the **raw** column |
 
-⚠️ **`center` here is a number, not the `center` flag from `feature_priors.csv`.**
-The config flag chooses the method; this column reports the constant that was used.
+**How to read it.** `scale` is your sanity check on the data. A scale of `1e-15`
+means the column is floating-point noise, not data — the pipeline now refuses to
+run on those (this is what killed the three Coupon variables). `n_active_train`
+tells you how much evidence exists: `Dummy` has **1**, so its coefficient rests
+on a single week per region.
 
-**`method` decoding — the single most important field in stage 1:**
+### 🆕 `model_input_matrix.csv` — **the data as the model sees it**
 
-- **`scale_only`** — divided by the training mean of positive values, no centring.
-  Zero stays zero, so "no activity" is preserved. Correct for **media**.
-- **`center_scale`** — centred and standardised (mean 0, sd 1). Correct for
-  **always-on level variables** (distribution, price, ACV) and for all `free` features.
-
-A `scale_only` feature that is *always on* lands at ≈1.0 every week, which is
-collinear with the region intercept — the model then can't separate its coefficient
-from the baseline. That's what broke `real_data_v1` (TDP and AVP got coefficients of
-+31/−33 and contributions of +91%/−97% that cancelled out). `prepare_data` now warns
-when it sees this. Fix by setting `center=1` for that feature.
-
-**A `scale` near 1e-15 means the column is numerical dust** (an adstock tail of
-activity that ended before the window). The pipeline now refuses to run on these —
-`v1` fitted three coupon columns of pure float noise and reported effects of 2.3e+18
-per unit.
-
-### `kpi_by_region.png`
-KPI time series per region, holdout shaded orange. Look for level shifts, partial
-final weeks, and whether the holdout period looks like the training period.
-
----
-
-## `02_convergence/` — is the fit trustworthy?
-
-### `sampling_log.json` — the run manifest
-
-| Key | Meaning |
-|---|---|
-| `backend_info` | JAX devices seen, e.g. `['cuda:0']` = GPU was used |
-| `versions` | pymc / pytensor / arviz / numpy / pandas / xarray / jax / numpyro |
-| `sampler_requested` → `sampler_used` | **If these differ, a fallback happened** |
-| `sampling_route` | `pymc.sampling.jax (direct)` or `pm.sample` |
-| `chain_method` / `chain_method_applied` | `vectorized` runs all chains in one GPU kernel. If `applied` is `false`, the hint was silently dropped and chains ran sequentially (≈4× slower) |
-| `draws`, `tune`, `chains` | 1000 / 1000 / 4 → 4000 posterior draws |
-| `target_accept` | NUTS step-size target; raise toward 0.99 to kill divergences |
-| `seed` | Reproducibility |
-| `store_log_likelihood` | Whether pointwise log-lik was kept (needed for LOO/WAIC) |
-| `allow_sampler_fallback` | `false` = a failed GPU run raises instead of burning CPU hours |
-| `wall_seconds` | Sampling time (v2: 353.5s) |
-| `failed_*`, `direct_route_error` | Only present when a route failed — worth reading |
-
-### `convergence_report.txt` — the gate
-
-| Line | Target | v2 | v1 (broken) |
-|---|---|---|---|
-| `max R-hat` | < 1.01 OK, > 1.05 FAIL | **1.0063** | 1.2591 |
-| `min ESS (bulk)` | > 400 | **791** | 13 |
-| `min ESS (tail)` | > 400 | **922** | 11 |
-| `divergences` | 0 | 4 (0.1%) | 0 |
-| `BFMI by chain` | > 0.3 | — | — |
-| `max tree depth` | low saturation % | **0.2%** | **100%** |
-
-- **R-hat** — do the 4 chains agree? >1.05 means they explored different places; the
-  posterior is not a posterior yet.
-- **ESS** — how many *independent* draws the 4000 correlated ones are worth. ESS of
-  13 means your "4000 draws" carry the information of 13.
-- **Divergences** — the sampler hit curvature it couldn't follow. A handful out of
-  4000 (v2: 0.1%) is cosmetic; the guardrail fires above 1%.
-- **Tree depth saturation** — the giveaway for a **flat ridge** (non-identified
-  parameters). 100% saturation with *zero* divergences, as in v1, is the classic
-  signature of two variables trading off against each other. 0.2% is healthy.
-
-Then **Worst parameters by R-hat** (top 10) and a footer warning listing parameters
-with contraction < 0.2. v2 reports 28 such parameters — nearly all `tau_*`
-(cross-region spread) hyperparameters, which is expected with only 5 regions.
-
-### `posterior_summary_full.csv` — every parameter
-
-ArviZ summary: `mean`, `sd`, `hdi_3%`, `hdi_97%` (94% interval!), `mcse_mean`,
-`mcse_sd`, `ess_bulk`, `ess_tail`, `r_hat`.
-
-⚠️ **Do not compute `mean / mcse_mean` as a t-statistic.** MCSE shrinks as you sample
-longer, so "significance" inflates just by running more draws. This was the
-methodological flaw in the old `production_code.py`. Use the HDI instead.
-
-**Parameter naming scheme** (`g` = region, `j` = feature within its bucket):
-
-| Parameter | MMM meaning |
-|---|---|
-| `alpha_region[g]` | Region intercept — the baseline level |
-| `mu_alpha`, `tau_alpha`, `z_alpha[g]` | Its hierarchy: grand mean, cross-region spread, region offset |
-| `beta_fourier[sin_1, cos_1, …]` | Annual seasonality (shared across regions) |
-| `mu_trend`, `tau_trend`, `beta_trend_region[g]` | Per-region linear trend |
-| `mu_logbeta_<bucket>[j]` | Population mean effect, **log scale** (signed buckets) |
-| `tau_logbeta_<bucket>[j]` | How much regions differ, log scale |
-| `z_beta_<bucket>[g,j]` | Standardised region offset (non-centred parameterisation) |
-| `beta_<bucket>[g,j]` | **The actual regional coefficient** — what stage 3 reports |
-| `pop_beta_<bucket>[j]` | Population-level effect (median for signed buckets) |
-| `sigma_region[g]` | Residual noise per region |
-| `mu_log_sigma`, `tau_log_sigma` | Noise hierarchy (pooled on the log scale) |
-| `nu` | Student-t degrees of freedom — low = fat tails = spiky weeks tolerated |
-
-**Buckets** group features into one vectorised block: `h`/`g` = hierarchical/global,
-then `pos`/`neg`/`free`. v2 has `hpos` (24 features), `hneg` (AVP), `hfree` (DEI),
-`gfree` (Dummy).
-
-### `prior_posterior_contraction.csv` — did the data actually say anything?
+One row per region × week: the transformed matrix handed to the sampler, with
+the raw values beside it. 520 rows for the real panel.
 
 | Column | Meaning |
 |---|---|
-| `parameter` | Parameter name, **positionally indexed** (see below) |
-| `prior_sd` | Spread before seeing data |
-| `posterior_sd` | Spread after |
-| `contraction` | `1 − posterior_var/prior_var` |
+| `region`, `date`, `dataset` | The cell, and `train` / `test` |
+| `dv_raw`, `dv_scaled` | Sales before and after standardisation |
+| `dv_center_used`, `dv_scale_used` | The region's training mean and sd |
+| `trend_t` | The trend regressor, 0…1 over the training window |
+| `sin_1`, `cos_1`, `sin_2`, `cos_2` | The Fourier seasonality regressors |
+| `<feature>__raw` | The column after dust-zeroing, before scaling |
+| `<feature>__scaled` | **The number the coefficient multiplies** |
 
-**Reading `contraction`:**
-- **→ 1.0** — the data determined this. v2: `pop_beta_hpos[0]` (TDP) = **0.889**.
-- **< 0.2** — the posterior is essentially your prior. Report it as an assumption,
-  not a finding.
-- **Negative** — the posterior is *wider* than the prior. Mildly negative on `tau_*`
-  is normal. Strongly negative on a coefficient means **non-identification**: in v1,
-  TDP was **−131** and AVP **−112** (posteriors ~130× wider than their priors). After
-  centring they became +0.889 and +0.931 — the worst-informed parameters became the
-  best-informed. That single flip is the proof the v1 fix worked.
+**How to read it.** Everything is reproducible from this file plus
+`feature_scaling_stats.csv`, in a spreadsheet:
 
-⚠️ **This file uses positional indices; `posterior_summary_full.csv` uses names.**
-The same parameter is `mu_logbeta_hpos[Calls]` in one file and
-`mu_logbeta_hpos[3]` in the other. Index order = order in `feature_priors.csv`,
-filtered to that bucket. For v2's `hpos`:
+```
+<feature>__scaled = (<feature>__raw − center) / scale     (center = 0 for scale_only)
+dv_scaled         = (dv_raw − dv_center_used) / dv_scale_used
+```
 
-| Idx | Feature | Idx | Feature | Idx | Feature |
-|---|---|---|---|---|---|
-| 0 | TDP | 8 | DTV | 16 | Expert Video |
-| 1 | ACV_WD_Any Merch | 9 | Ecommerce Display | 17 | MSAN |
-| 2 | Shopper-Digital | 10 | Ecommerce Search | 18 | OLV |
-| 3 | Calls | 11 | Ecommerce Video | 19 | Paid Search |
-| 4 | Samples | 12 | Expert Display | 20 | PR |
-| 5 | Audio | 13 | Expert Partnership | 21 | Social |
-| 6 | Direct Partnership | 14 | Expert Search | 22 | TV_GM |
-| 7 | Display | 15 | Expert Social | 23 | TV_HM |
+This is where to look first when a contribution's size is surprising. Sort a
+centred feature's `__scaled` column: it will run roughly −2…+2 and average zero,
+which is why its contribution over the window is near zero however large its
+coefficient is.
 
-`hneg` = AVP, `hfree` = DEI, `gfree` = Dummy (single-element buckets carry no index).
+### 🆕 `model_input_summary.csv`
 
-### `energy_plot.png`
-Two overlaid distributions (marginal vs transition energy). Similar shapes = the
-sampler is exploring the posterior's tails properly. A narrow transition
-distribution inside a wide marginal one means poor exploration.
+One row per region × feature — the same 135 cells as
+`feature_scaling_stats.csv`, but describing the **scaled** column.
 
-### `trace_worst_rhat.png`
-Chain traces for the 3 worst-mixing parameters. Healthy = 4 overlapping "fuzzy
-caterpillars". Chains sitting at different levels = the R-hat failure, visualised.
+| Column | Meaning |
+|---|---|
+| `pillar`, `sign`, `pooling`, `baseline`, `contribution_reference` | Config as applied |
+| `scaling_method`, `center_used`, `scale_used` | The transform |
+| `n_train`, `n_obs`, `n_active_train` | Support |
+| `raw_mean_train`, `raw_sd_train`, `raw_min`, `raw_max`, `raw_sum_all` | The raw column |
+| `scaled_mean_train`, `scaled_sd_train`, `scaled_mean_all` | The scaled column |
+| `scaled_min`, `scaled_max`, `scaled_sum_all` | Range and total |
+| `pct_weeks_negative_scaled` | 0 for `scale_only`, ~50 for centred features |
+| `mean_zero_by_construction` | TRUE for every `center_scale` feature |
+| `scaled_value_reads_as` | Plain-English meaning of a value in that column |
 
-### `prior_predictive_check.png`
-Simulated KPI **before seeing data** vs actual, both on the scaled axis. The prior
-cloud should comfortably cover the actuals. Much wider = vague priors; not
-overlapping = priors contradict the data.
+**How to read it.** `scaled_mean_train` is the punchline. For a `center_scale`
+feature it is **exactly 0** and `scaled_sd_train` is **exactly 1** — that is what
+centring means, and it is why the level of that driver lives in the intercept
+rather than in its own contribution. For a `scale_only` feature the mean is
+around 1 in active weeks and never negative, so its contribution is a genuine
+"versus no activity" increment.
+
+### `kpi_by_region.png`
+
+Weekly sales per retailer, holdout shaded orange. Use it to spot level shifts,
+outlier weeks and partial final weeks before trusting anything else.
 
 ---
 
-## `03_coefficients/` — what did each driver do?
+## `02_convergence` — can I trust the sampler?
+
+### `convergence_report.txt` — **read this first, every time**
+
+v3 values:
+
+```
+max R-hat        : 1.0058  (OK)
+min ESS (bulk)   : 1052    (OK)
+min ESS (tail)   : 1345    (OK)
+divergences      : 7       (INVESTIGATE)
+max tree depth   : 8       (OK)
+```
+
+| Statistic | What it is | Pass mark |
+|---|---|---|
+| **R-hat** | Do the 4 chains agree? Ratio of between- to within-chain variance | < 1.01 good, > 1.05 **fail** |
+| **ESS (bulk)** | Independent-equivalent draws for the centre of the posterior | > 400 |
+| **ESS (tail)** | Same, for the interval endpoints — governs HDI stability | > 400 |
+| **Divergences** | Steps where the sampler hit curvature it couldn't follow | 0 ideal; < 1% of draws tolerable |
+| **Tree depth** | Sampler steps per iteration; "saturated" = it ran out of room | Not saturated |
+
+**How to read v3.** All green. The 7 divergences are 0.18% of 4,000 draws — flagged
+because it isn't zero, but far below the 1% guardrail. Tree depth 8 with no
+saturation is the important one: in v1 it was **saturated in 100% of steps**,
+which is the signature of a flat ridge in the posterior (the TDP/AVP
+collinearity). That is gone.
+
+The report ends with the 10 worst parameters by R-hat and a warning listing
+parameters whose posterior barely moved from the prior.
+
+### `posterior_summary_full.csv`
+
+ArviZ's per-parameter table: `mean`, `sd`, `hdi_3%`, `hdi_97%`, `mcse_mean`,
+`mcse_sd`, `ess_bulk`, `ess_tail`, `r_hat`.
+
+Parameter naming, so you can find things:
+
+| Name | Meaning |
+|---|---|
+| `mu_alpha`, `tau_alpha`, `z_alpha` | Region intercept hierarchy (population, spread, offsets) |
+| `alpha_region` | The intercept each region ended up with |
+| `beta_fourier` | Seasonality coefficients (`sin_1`, `cos_1`, …) |
+| `mu_trend`, `tau_trend`, `beta_trend_region` | Linear trend per region |
+| `mu_logbeta_hpos[f]` | Population **log** effect of feature `f`, positive bucket |
+| `tau_logbeta_hpos[f]` | How much regions differ on `f` |
+| `z_beta_hpos[g, f]` | Region `g`'s standardised offset for `f` |
+| `beta_hpos[g, f]` | The final coefficient for region `g`, feature `f` |
+| `pop_beta_hpos[f]` | Population-level effect (the median, for signed features) |
+| `mu_log_sigma`, `tau_log_sigma`, `sigma_region` | Residual noise per region |
+| `nu` | Student-t degrees of freedom (fat-tail control) |
+
+Bucket suffixes: `h`/`i`/`g` = hierarchical / independent / global pooling;
+`pos`/`neg`/`free` = sign constraint.
+
+> ⚠️ **Do not use `mcse_mean` for significance.** It shrinks as you draw more
+> samples, so anything divided by it becomes "significant" simply by sampling
+> longer. This was the flaw in the old `production_code.py`. Use `t_stat` and the
+> HDI in the coefficient report instead.
+
+### `prior_posterior_contraction.csv`
+
+| Column | Meaning |
+|---|---|
+| `parameter` | Which parameter |
+| `prior_sd` | Spread before seeing data |
+| `posterior_sd` | Spread after |
+| `contraction` | `1 − (posterior_var / prior_var)` |
+
+**How to read it.** Near **1** = the data determined this number. Near **0** =
+the posterior is just your prior, so report it as an assumption, not a finding.
+**Negative** = the posterior came out *wider* than the prior, which means the
+data is fighting the model — in v1 TDP scored **−131** and AVP **−112**; after
+the centring fix they became **+0.89** and **+0.93**, the best-informed
+parameters in the model. This file is the fastest way to spot a broken spec.
+
+### `energy_plot.png`, `trace_worst_rhat.png`, `prior_predictive_check.png`
+
+- **Energy** — the two histograms should overlap. A narrow marginal against a
+  wide transition distribution means the sampler is exploring badly.
+- **Trace** — the 4 chains for the worst-R-hat parameters. Want a fuzzy
+  caterpillar; want *not* to see chains sitting at different levels.
+- **Prior predictive** — sales the model generates *before seeing data*. If it
+  produces impossible values, the priors are wrong on their scale.
+
+### `sampling_log.json`
+
+The run manifest: package versions, `backend_info` (v3: `cuda:0`),
+`sampler_requested` vs `sampler_used`, `chain_method_applied`, `sampling_route`,
+seed, draws/tune/chains, `target_accept`, `wall_seconds` (v3: 348.8s).
+
+**Check `sampler_used` and `chain_method_applied` every run** — a successful run
+does not by itself prove the GPU was used.
+
+---
+
+## `03_coefficients` — what each driver does
 
 ### `coefficient_report.csv`
 
 One row per feature × region, plus a `__population__` row per feature.
 
+**Effect size and uncertainty**
+
 | Column | Meaning |
 |---|---|
-| `feature`, `region` | The cell. `__population__` = market-average effect |
-| `mean`, `sd` | Posterior mean and sd, scaled axes |
-| `median` | **The headline estimate** |
-| `hdi_low`, `hdi_high` | 90% HDI, scaled axes |
-| `prob_positive` | P(effect > 0). **Blank for sign-constrained features** |
-| `excludes_zero` | Whether the HDI clears zero. **Blank for sign-constrained** |
-| `units` | `scaled (per-region axes)` or `scaled (population level)` |
-| `sign_constrained` | `TRUE` = built as ±exp(·), so it cannot cross zero |
+| `mean`, `sd`, `median` | Posterior summary on the **scaled** axis. Use `median` |
+| `hdi_low`, `hdi_high` | True 90% highest-density interval (shortest interval, not percentiles) |
+| `t_stat` | `mean / sd` — signal-to-noise. **Not** mean/mcse |
+| `p_value` | `2 × min(P(β>0), P(β<0))` — probability the *direction* is wrong. Blank for sign-constrained features |
+| `prob_positive`, `excludes_zero` | Blank for sign-constrained features — true by construction there |
+| `sign_constrained` | TRUE if built as ±exp(·), so it can never cross zero |
+
+**Original units**
+
+| Column | Meaning |
+|---|---|
+| `median_orig_units` | KPI units per raw feature unit |
+| `hdi_low_orig_units`, `hdi_high_orig_units` | Same, as an interval |
+| `orig_units_meaning` | Label for the above |
+
+**Evidence quality**
+
+| Column | Meaning |
+|---|---|
+| `n_active_train` | Non-zero training weeks (raw column) |
+| `feature_sd_train` | Sd of the scaled feature. `1.0` = centred; small = barely moves |
+| `scaling_method` | `scale_only` / `center_scale` |
 | `data_support` | `adequate` / `weak` / `weak (near-constant)` / `none` |
-| `median_orig_units` | **KPI units per raw feature unit** — the business number |
-| `hdi_low_orig_units`, `hdi_high_orig_units` | Same interval, original units |
-| `orig_units_meaning` | Fixed label describing the conversion |
-| `n_active_train` | Non-zero training weeks (raw column) for this region |
-| `feature_sd_train` | Sd of the **scaled** feature. `1` ⇒ `center_scale` by construction |
-| `scaling_method` | `scale_only` or `center_scale` — carried from stage 1 |
 
-**Conversion:** `median_orig_units = median × kpi_scale_used / scale`. Two regions
-with the same scaled coefficient will differ in original units because their KPI and
-feature scales differ.
+**How to read it.** Start with `data_support`. Anything not `adequate` is
+essentially the prior wearing a coefficient's clothes — the hierarchy supplied it
+by shrinkage, that region's data did not. Then compare `median` against
+`hdi_low`/`hdi_high`: a wide interval spanning an order of magnitude means "we
+can't tell", regardless of what `t_stat` says.
 
-**`data_support` decoding:**
-- `adequate` — genuinely estimated from this region's data.
-- `weak` — fewer than 8 active weeks. Mostly shrinkage toward the population mean.
-- `weak (near-constant)` — always on but barely moving under `scale_only`; the level
-  is absorbed by the intercept, so only a tiny wiggle identifies the coefficient.
-  **Set `center=1` for this feature.**
-- `none` — never ran here, or no variation. This is the prior, not an estimate.
-
-**Scaled vs original units — which to quote?** Scaled coefficients are comparable
-*across regions* ("relative responsiveness"). Original units are the ones to put in a
-business deck ("+1 TDP → +X units"). Both are exported deliberately.
+For sign-constrained features, **ignore significance entirely** — `p_value` is
+blank because it is 0 by construction. Judge those on effect size and interval
+width.
 
 ### `support_warnings.txt`
-The `weak`/`none` rows, extracted. Anything listed here must **not** be presented as
-a regionally estimated effect. In v2 this catches `Dummy`, which has one active week
-per region.
+
+Plain-language list of every region × feature with `none` or `weak` support.
+Anything appearing here must not be presented as a regionally estimated effect.
 
 ### `forest/<feature>.png`
-One plot per feature: regional medians with 90% HDIs, red dashed line at the
-population median. This is where **partial pooling** becomes visible — regions with
-thin data get pulled toward the population line and show wide intervals.
+
+Per feature: each region's coefficient with its 90% HDI, and a dashed line at the
+population median. Shows shrinkage directly — regions with thin data sit close to
+the dashed line because the hierarchy pulled them there.
 
 ---
 
-## `04_fit/` — how well does it track and predict?
+## `04_fit` — how well does it predict?
 
 ### `fit_metrics.csv`
 
-One row per region × dataset (`train`, `test`), plus an `__all__` row per dataset.
+Rows: `__all__` (pooled), 🆕 `__aggregate__`, then one per region — each for
+`train` and `test`.
+
+| Column | Meaning | v3 (`__all__`, train / test) |
+|---|---|---|
+| `r2` | Pooled across regions — **inflated**, see below | 0.994 / 0.977 |
+| `r2_within_region` | R² against each region's **own** mean — the honest one | **0.596 / −0.662** |
+| `mape_pct` | Mean absolute % error | 2.62 / 5.73 |
+| `wmape_pct` | Volume-weighted % error | 2.35 / 5.01 |
+| `mape_region_weighted_pct` | Volume-weighted average of per-region MAPEs | 2.34 / 4.94 |
+| `mae` | Mean absolute error, KPI units | 24,028 |
+| `coverage_90_mean_pct` | % of actuals inside the **mean-response** band — expected well below 90 | 43.7 |
+| `coverage_90_pred_pct` | % inside the **posterior predictive** band — **judge holdout by this**, target ~90 | 91.2 / 73.8 |
+| `crps` | Proper score combining calibration and sharpness; lower better | 17,690 |
+| `resid_t_stat` | t test of H₀: mean residual = 0 | 0.843 |
+| `resid_p_value` | p for that test — small = systematic bias | 0.400 |
+| `durbin_watson` | Residual autocorrelation: 2 = none, < 1.5 = positive | 1.63 |
+| `n` | Observations | 455 / 65 |
+
+**How to read v3 — this is the important part.**
+
+- **`r2` 0.994 is not a good number, it is a misleading one.** It pools five
+  retailers whose sales levels differ by 3×, so most of the "explained variance"
+  is just the trivially predictable gap between Walmart and Sam's Club. Always
+  quote **`r2_within_region` = 0.596** instead.
+- **Test `r2_within_region` = −0.662 is a genuine failure.** Negative means the
+  model predicts the holdout *worse than each region's own holdout average*.
+  With `coverage_90_pred_pct` falling from 91% to 74%, the model is both biased
+  and overconfident out of sample.
+- `resid_p_value` 0.400 on training means no significant in-sample bias — good.
+  Check the **test** rows: bias there is what the holdout drift shows.
+- `durbin_watson` 1.63 signals mild positive autocorrelation, typically a missing
+  trend or seasonal term.
+- 🆕 The `__aggregate__` row sums all regions to one national series per date and
+  scores that. It is the only like-for-like comparison against a national
+  total-sales model. It will always look better than the per-region rows because
+  aggregation cancels idiosyncratic noise — quote it *beside* them, never
+  instead of them.
+
+### `actual_vs_fitted.png`
+
+Per region: actual (black), fitted (blue), a dark band (mean response) and a pale
+band (posterior predictive), holdout shaded orange. **Judge holdout coverage
+against the pale band.** In v3 every region's fitted line drifts downward through
+the orange window while actuals recover — that is the predictive weakness the
+metrics report.
+
+### 🆕 `actual_vs_predicted.csv`
+
+`actual_vs_fitted.png` as data — one row per region × week, so any metric in
+`fit_metrics.csv` can be checked against the observations that produced it.
 
 | Column | Meaning |
 |---|---|
-| `region` | Region, or `__all__` = all regions pooled |
-| `dataset` | `train` (91 weeks) or `test` (13-week holdout) |
-| `r2` | Variance explained vs a single grand mean |
-| `mape_pct` | Mean absolute % error |
-| `wmape_pct` | Volume-weighted: total error ÷ total actual. Robust to small weeks |
-| `mae` | Mean absolute error, KPI units |
-| `coverage_90_mean_pct` | % of actuals inside the **mean-response** band. Expected to be **well below 90** — ignore for scoring |
-| `coverage_90_pred_pct` | % inside the **posterior predictive** band. **Target ≈ 90.** This is the calibration number |
-| `n` | Observations |
-| `crps` | Continuous Ranked Probability Score — scores the whole predictive distribution (accuracy *and* sharpness). Lower better; KPI units |
-| `r2_within_region` | `__all__` rows only — variance explained vs **each region's own mean** |
-| `mape_region_weighted_pct` | `__all__` rows only — volume-weighted average of per-region MAPEs |
+| `region`, `date`, `dataset`, `period` | The cell, `train`/`test`, and the MAT block |
+| `actual`, `fitted` | Sales, and the posterior **median** prediction |
+| `residual` | `actual − fitted` — what the decomposition can never explain |
+| `abs_pct_error` | Per-week APE; average it to get `mape_pct` |
+| `fitted_lo90_mean`, `fitted_hi90_mean` | Mean-response band (the dark band) |
+| `pred_lo90`, `pred_hi90` | Posterior predictive band (the pale band) |
+| `inside_pred_90` | TRUE/FALSE; the mean of this column **is** `coverage_90_pred_pct` |
+| `baseline`, `baseline_core` | Baseline level that week, and its core |
+| `incremental` | `fitted − baseline` — everything attributed to switchable drivers |
+| `baseline_pct_of_actual` | Baseline as a share of that week's sales |
 
-⚠️ **Read `r2_within_region`, not `r2`, on the `__all__` row.** Pooled `r2` measures
-against one grand mean, so it is inflated by the (trivially predictable) differences
-in level between retailers. v2 shows `r2 = 0.994` on train while
-`r2_within_region = 0.595` and individual regions range 0.33–0.82. The 0.994 is an
-artefact; 0.595 is the truth.
-
-**Negative R² is legitimate**, not a bug: it means the model predicts that window
-worse than that window's own mean would. On a holdout it signals a level or trend
-shift the model didn't anticipate.
-
-**v2 holdout readout:** `r2_within_region = −0.65`, `wmape = 5.01%`,
-`coverage_90_pred = 73.8%` against a target of 90 — the model is both biased and
-overconfident out of sample. Worst region is Target-Corp (MAPE 13.5%, coverage 38%).
-This is a *specification* issue (linear trend extrapolating downward + only two
-Fourier harmonics for a Q4 holdout with one observed Q4 in the data), separate from
-the v1 collinearity problem, which is fixed.
-
-### `actual_vs_fitted.png`
-Per region: actual (black), fitted median (blue), 90% mean-response band (dark) and
-90% predictive band (light), holdout shaded orange. In v2 every region's fitted line
-drifts **down** through the holdout while actuals recover — the visual form of the
-negative test R².
+**How to read it.** Filter `dataset == "test"` and sort by date: the holdout
+drift shows up as a run of same-signed `residual`. `inside_pred_90` tells you
+exactly which weeks fell outside the band rather than just how many.
 
 ### `residuals.png`
-Left: residuals vs fitted — should be a shapeless cloud around zero. Funnelling means
-non-constant variance; curvature means a missing non-linearity. Right: residual
-histogram — should be roughly symmetric around zero.
+
+Residual vs fitted, and a residual histogram. Want a shapeless cloud centred on
+zero; funnel shapes mean non-constant variance, curvature means a missing term.
 
 ---
 
-## `05_contributions/` — where did the volume come from?
+## `05_contributions` — how sales split across drivers
 
 ### `contribution_totals.csv`
 
-One row per feature × region, plus `__portfolio__` (all regions summed) per feature,
-plus a `__baseline__` feature. **Totals span the whole period**, in original KPI units.
+Contributions in **real KPI units**, per feature per region, plus a
+`__portfolio__` row (all regions).
 
 | Column | Meaning |
 |---|---|
-| `feature` | Driver, or `__baseline__` = intercept + seasonality + trend |
-| `region` | Region, or `__portfolio__` = summed across regions |
-| `mean`, `sd`, `median` | Total contribution over all periods, KPI units |
-| `hdi_low`, `hdi_high` | 90% HDI of that total |
-| `prob_positive`, `excludes_zero` | Blank for sign-constrained features |
-| `sign_constrained` | `TRUE`/`FALSE`; blank on `__baseline__` |
-| `contribution_vs` | **`zero`** or **`feature average`** — see below |
-| `share_of_actual_pct` | `median ÷ actual sales for that region (or total)` × 100 |
+| `feature` | Driver, or `__baseline__` / `__baseline_core__` |
+| `region` | Region or `__portfolio__` |
+| `group` | `baseline_total` / `baseline_part` / `incremental` |
+| 🆕 `pillar` | Reporting group (Online Media, TV & Digital TV, Expert, …) |
+| `mean`, `sd`, `median`, `hdi_low`, `hdi_high` | Posterior summary of the total |
+| `sign_constrained` | TRUE if the coefficient can't cross zero |
+| `contribution_vs` | `zero` or `feature average` — **the counterfactual** |
+| 🆕 `volume` | **The volume contribution** — identical to `median`, named for what it is |
+| 🆕 `volume_hdi_low`, `volume_hdi_high` | Same as `hdi_low`/`hdi_high` |
+| 🆕 `volume_units` | `KPI units, summed over the window` |
+| 🆕 `avg_volume_per_period` | `volume ÷ number of weeks` — the per-week rate |
+| 🆕 `actual_volume` | That region's actual sales, i.e. the denominator |
+| `share_of_actual_pct` | `volume ÷ actual_volume × 100` |
 
-⚠️ **`contribution_vs` changes the question being answered.**
+**How the parts add up** (exactly, per posterior draw):
 
-- **`zero`** (media, all `scale_only` features) — "how much volume did this activity
-  add versus not running it?" The familiar MMM contribution.
-- **`feature average`** (all `center_scale` features: TDP, AVP, ACV, DEI, Dummy) —
-  "how much did this driver's *movement around its own average* add or remove?"
-  A region whose distribution ran below its own average shows a **negative**
-  contribution even though its coefficient is positive. That is not a contradiction.
+```
+__baseline__  =  __baseline_core__  +  Σ baseline features    (group = baseline_part)
+total sales   =  __baseline__       +  Σ incremental features (group = incremental)
+```
 
-**Why centred features can't be measured versus zero:** the counterfactual "zero
-distribution" never occurs in the data, and its level is inseparable from the region
-intercept — that level sits in `__baseline__`. Attempting to measure it is exactly
-what produced v1's fictional +91% TDP. Meridian treats its non-media treatments the
-same way.
+`__baseline_core__` is region intercept + seasonality + trend. Baseline features
+deliberately appear **twice** — inside `__baseline__` and on their own row — which
+is what makes the baseline expandable. **Filter on `group` before summing, or you
+will double count.**
 
-**v2 sanity check** — `share_of_actual_pct` on `__portfolio__`:
-baseline 91.5% + media ≈7% + AVP −0.38% + TDP +0.16% ≈ **98% of actual sales**.
-The ~2% gap is normal (medians don't sum exactly, and the model slightly
-under-predicts). If your columns sum to something far from 100%, something is wrong.
-For contrast, v1 read: baseline 94% + TDP **+91%** + AVP **−97%**.
+**`contribution_vs` is the column people misread.** For a centred feature it says
+`feature average`, meaning the contribution answers *"what did this driver's
+movement add relative to its own typical level?"* — not *"what would we lose if it
+went to zero?"*. That is why a **positive** coefficient can show a **negative**
+contribution: most weeks sat below average. This is why v3 shows TDP at +0.16%
+while the vendor decomposition shows Distribution at +25.5% — different questions,
+both correct. Setting `contribution_reference=zero` in `feature_priors.csv`
+switches TDP/AVP to the vendor's convention without changing the fit at all.
 
-### `contribution_bars.png`
-Top 20 features by absolute portfolio contribution, with 90% HDIs. Blue = positive,
-red = negative. Bars whose interval spans a wide range are not yet pinned down.
+v3 portfolio values: `__baseline__` **91.13%**, `__baseline_core__` 91.35%,
+TDP +0.16%, ACV −0.004%, Samples 1.65%, Display 1.32%.
 
-### `decomposition_area.png`
-Weekly stacked decomposition across the portfolio, positive contributions above zero
-and negative below, actual sales as the black line. Use it to see *when* each driver
-worked, and whether negative drivers (price) move against volume as expected.
+> Medians of components only add *approximately* — the identity above is exact
+> draw by draw, but the median of a sum isn't the sum of medians. Small
+> reconciliation gaps in the median column are expected, not a bug.
 
----
+### 🆕 `contribution_summary.csv` — **volume and % that add up to 100**
 
-## `06_cross_validation/` — only if you run `run_cv()`
+The vendor deck's layout, as data:
+`snapshots/true_output/contribution_summary.png` reproduced from our own model.
+Rows per (`period`, `region`): the actual sales line, every driver inside its
+pillar with a subtotal, a Residual line, and a Grand Total **equal to actual
+sales**.
 
-Not in this snapshot. The single 13-week holdout is one origin and one slice of the
-seasonal cycle — a smoke test, not validation. `cross_validation.run_cv()` refits on
-expanding windows and writes `cv_fold_metrics.csv`, `cv_summary.csv`,
-`cv_coefficient_stability.csv`, `cv_stability_ranking.csv`, `cv_report.md` and
-per-feature stability plots. **`cv_coefficient_stability.csv` is the one that matters
-for business use:** a coefficient that swings across folds cannot support a budget
-decision, however tight its HDI looks in a single fit.
+| Column | Meaning |
+|---|---|
+| `period` | `MAT 1` / `MAT 2` / `Total` (see `period_split`) |
+| `n_periods` | Weeks in that block — 52 / 52 / 104 |
+| `region` | Region or `__portfolio__` |
+| `pillar`, `feature` | Reporting group and driver |
+| `group` | `baseline_core` / `baseline_part` / `incremental` / `residual` |
+| `row_type` | `actual` / `component` / `pillar_total` / `grand_total` |
+| `volume` | **Volume contribution in KPI units** |
+| `contribution_pct` | `volume ÷ actual sales × 100` |
+| `avg_volume_per_period` | `volume ÷ n_periods` |
+
+**How to read it.** Filter `region == "__portfolio__"`, `period == "Total"` and
+you have the vendor table. Sum `contribution_pct` over `row_type == "component"`
+and you get **exactly 100.00%**, because:
+
+```
+components (baseline core + every driver)  =  fitted sales
+fitted sales  +  Residual                  =  actual sales
+```
+
+**The Residual line is what makes the percentages close.** Drivers explain
+*fitted* sales; `actual − fitted` has to appear somewhere or the column stops at
+99.x%. It also absorbs the small median gap (see "two arithmetics" above). The
+vendor sheet carries a Residual line for the same reason — theirs is −0.01%.
+
+**Why the percentages sum to a large positive number even though the features
+are centred.** They sum to 100% because `__baseline_core__` — the region
+intercept plus seasonality plus trend — carries essentially the whole level of
+sales (v3: 91%). The centred features contribute only their *deviations* from
+their own average, which nearly cancel over the window, so they sit near 0%.
+Nothing sums to more than 100%: the intercept is doing the work. Set
+`contribution_reference=zero` on TDP/AVP and the level moves out of the
+intercept and into those two rows, which is the vendor convention — the total
+stays exactly 100% either way, because it is an algebraic restatement of the
+same fit, not a refit.
+
+### 🆕 `contribution_reconciliation.csv` — **does it add up?**
+
+One row per `scope` (`all` / `train` / `test`) × region, plus `__portfolio__`.
+This is the file to open when a number looks wrong.
+
+| Column | Meaning |
+|---|---|
+| `actual_volume`, `fitted_volume` | Actual sales, and the median prediction |
+| `baseline_core_volume` | Intercept + seasonality + trend |
+| `baseline_features_volume` | Features flagged `baseline=1` (TDP, AVP) |
+| `baseline_total_volume` | The two above combined |
+| `incremental_volume` | Every non-baseline driver |
+| `sum_components_volume` | Core + all features |
+| `median_gap_volume` | `fitted − sum_components` — the sum-of-medians gap, should be tiny |
+| `residual_volume` | `actual − fitted` — genuine unexplained sales |
+| `*_pct` | Each of the above as % of actual |
+| `reconciles_to_actual_pct` | **Always exactly 100** — if not, something is broken |
+
+```
+sum_components + median_gap = fitted
+fitted         + residual   = actual
+```
+
+### 🆕 `contribution_timeseries.csv` — the weekly decomposition as data
+
+`decomposition_area.png` in a form you can pivot. One row per region × week ×
+component: `region, date, dataset, period, pillar, feature, group, volume`.
+
+`feature` also carries four reference rows per week — `__median_gap__`,
+`__fitted__`, `__actual__`, `__residual__` — so a pivot reconciles exactly:
+
+```
+sum(volume where group in baseline_core/baseline_part/incremental/median_gap)
+    = __fitted__
+__fitted__ + __residual__ = __actual__
+```
+
+This is the largest file in the run (~16k rows for the real panel). Turn it off
+with `OutputConfig(contribution_timeseries=False)` if you don't need it.
+
+### 🆕 `contribution_math.csv` — the arithmetic behind every number
+
+One row per region × feature. Every contribution in this codebase is
+
+```
+volume = beta_scaled × SUM(x_scaled + reference_shift) × dv_scale_used
+```
+
+and this file prints each factor so it can be recomputed in a spreadsheet.
+
+| Column | Meaning |
+|---|---|
+| `scaling_method`, `center_used`, `scale_used` | The transform applied |
+| `contribution_reference`, `reference_raw_value` | The counterfactual, in raw units |
+| `reference_shift_scaled` | The per-week shift re-referencing adds. **0 when `auto`** |
+| `raw_sum`, `raw_mean_train` | The raw column |
+| `scaled_sum`, `scaled_mean_train` | The scaled column — **~0 for centred features** |
+| `effective_scaled_sum` | `scaled_sum + shift × n_obs` |
+| `beta_scaled_median`, `dv_scale_used` | The other two factors |
+| `volume_recomputed` | The product of the three — do this in Excel and match it |
+| `volume_sum_of_medians` | What `contribution_summary.csv` reports |
+| `volume_median_of_total` | What `contribution_totals.csv` reports |
+| `recomputed_diff_pct`, `median_basis_diff_pct` | The two gaps, as % |
+
+**How to read it.** This is the direct answer to "how can a centred feature
+contribute anything?". For TDP with `contribution_reference=auto`,
+`beta_scaled_median` is large (≈0.3) but `scaled_sum` is ≈0, so the product is
+≈0. Switch to `zero` and `reference_shift_scaled` becomes `center ÷ scale` per
+week — a large positive number × 104 weeks — and the same coefficient now
+produces the level contribution the vendor reports. The coefficient never
+changed; only the question did.
+
+### 🆕 `contribution_by_pillar.csv`
+
+The same numbers rolled up by `pillar` (Baseline / Trade / Expert / Online Media /
+Price Promotions / TV & Digital TV), which is the format vendor decks use — so the
+two can be placed side by side. It sums `baseline_total` + `incremental` only, so
+it is already double-count safe. Carries `median`, 🆕 `volume` (the same figure)
+and `share_of_actual_pct`.
+
+For the full vendor layout — pillar subtotals, a Residual line and a Grand Total
+that ties to actual sales — use `contribution_summary.csv` instead.
+
+### The three charts
+
+| File | Shows |
+|---|---|
+| `contribution_bars.png` | Incremental drivers ranked, with 90% HDIs. Baseline parts excluded — they are not switchable levers and would dwarf everything |
+| `baseline_breakdown.png` | What the baseline is made of (core + each baseline feature) |
+| `decomposition_area.png` | Weekly stacked decomposition, baseline as **one block** — the business view |
+| `decomposition_area_expanded.png` | Same, with the baseline opened into core + baseline features |
 
 ---
 
 ## `trace.nc`
 
-Full posterior in NetCDF (ArviZ `InferenceData`): posterior draws, sample statistics,
-prior and prior-predictive groups. Reload with `arviz.from_netcdf("trace.nc")` to
-compute anything not in the standard reports without refitting. Large — this is the
-raw material, not a report.
+The full posterior in NetCDF. Reload with
+`arviz.from_netcdf("trace.nc")` to compute anything not in the reports without
+re-running the 6-minute fit.
 
 ---
 
-## Health checklist for any run
+## Triage checklist
 
-| # | Check | File | Pass |
-|---|---|---|---|
-| 1 | Sampler and device as intended; `chain_method_applied` true | `sampling_log.json` | — |
-| 2 | max R-hat < 1.01; min ESS > 400; tree-depth saturation low | `convergence_report.txt` | v2 ✅ |
-| 3 | No strongly negative contraction on any `pop_beta_*` | `prior_posterior_contraction.csv` | v2 ✅ |
-| 4 | No `scale` ≈ 1e-15; level variables show `center_scale` | `feature_scaling_stats.csv` | v2 ✅ |
-| 5 | No unexpected `weak`/`none` support flags | `support_warnings.txt` | v2 ✅ |
-| 6 | Contributions sum to ≈100% of actual; no huge offsetting pairs | `contribution_totals.csv` | v2 ✅ |
-| 7 | `coverage_90_pred_pct` ≈ 90 on the holdout | `fit_metrics.csv` | v2 ❌ (74%) |
-| 8 | `r2_within_region` positive on the holdout | `fit_metrics.csv` | v2 ❌ (−0.65) |
-| 9 | Coefficients stable across CV folds | `cv_coefficient_stability.csv` | not yet run |
+1. **`02_convergence/convergence_report.txt`** — R-hat < 1.01, ESS > 400, tree
+   depth not saturated. If not, stop; nothing else is meaningful.
+2. **`prior_posterior_contraction.csv`** — any negative contraction means a
+   broken specification, not a weak prior.
+3. **`04_fit/fit_metrics.csv`** — read `r2_within_region`, not `r2`. Check
+   `coverage_90_pred_pct` on the test rows.
+4. **`03_coefficients/support_warnings.txt`** — remove anything listed from your
+   narrative.
+5. **`05_contributions/contribution_totals.csv`** — filter on `group`, and check
+   `contribution_vs` before quoting any share.
+6. **`05_contributions/contribution_reconciliation.csv`** — `reconciles_to_actual_pct`
+   must be 100 and `median_gap_pct` near 0. Then read `residual_pct`: that is how
+   much of actual sales the decomposition simply does not explain.
 
-**v2 status:** the model is now trustworthy for *inference* (checks 1–6 pass — you can
-read and defend the coefficients and the decomposition), but not yet for *forecasting*
-(checks 7–8 fail). Fixing the collinearity fixed the inference; the holdout miss is a
-separate specification question. Next step is check 9 — expanding-window CV — rather
-than tuning against this one holdout.
+## "That contribution can't be right" — where to look
+
+| Symptom | File | What to check |
+|---|---|---|
+| A share looks far too small | `contribution_math.csv` | `scaled_sum` ≈ 0 means the feature is **centred**; the level is in the intercept. Set `contribution_reference=zero` if you want the vs-nothing number |
+| A positive coefficient shows a negative contribution | `model_input_summary.csv` | Centred feature: most weeks sat below its average. `contribution_vs` says `feature average` |
+| Percentages don't sum to 100 | `contribution_summary.csv` | You dropped the Residual line, or summed `baseline_part` rows alongside `__baseline__` |
+| Two files disagree by ~0.1% | `contribution_math.csv` | `volume_median_of_total` vs `volume_sum_of_medians` — see "two arithmetics" |
+| A scaling factor looks wrong | `model_input_matrix.csv` | Recompute `(raw − center) / scale` and compare with `__scaled` |
+
+## Known gaps in this run
+
+- **No Category or Competition variable.** The reference vendor models carry
+  Category at ~55% and Competition at ~−5%. Without them, that variation is
+  absorbed by the latent trend and seasonality, which inflates the baseline and
+  suppresses measured media effects.
+- **Coupon-Digital / Coupon-FSI / Coupon-Ibotta are excluded** because every
+  non-zero value in the datacube is ~1e-15. The vendors report real contributions
+  for these, so this is a broken data extract, not three dead channels.
+- **Holdout prediction is weak** (`r2_within_region` −0.66, coverage 74%). The
+  single 13-week holdout lands entirely in Q4, and with two years of data there is
+  only one prior Q4 to learn holiday seasonality from. Use the expanding-window CV
+  in `cross_validation.py` before drawing conclusions from this one split.

@@ -1,2 +1,4 @@
 snapshots
 __pycache__/
+tests
+CLAUDE.md

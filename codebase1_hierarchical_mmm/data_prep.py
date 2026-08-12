@@ -88,6 +88,10 @@ class PreparedData:
     train_mask: np.ndarray          # (n_obs,) bool
     test_mask: np.ndarray
     x_scale_table: pd.DataFrame = field(default=None)   # region x feature scaling stats
+    X_raw: np.ndarray = None        # (n_obs, k) the SAME columns before scaling
+                                    # (after dust-zeroing) - kept so the model
+                                    # input can be exported raw next to scaled
+                                    # and the scaling audited row by row
 
     def sel(self, which: str) -> np.ndarray:
         return {"train": self.train_mask, "test": self.test_mask,
@@ -163,6 +167,7 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
 
     # ---- feature scaling ---------------------------------------------------
     X = np.zeros((len(d), len(feat_names)))
+    X_raw = np.zeros((len(d), len(feat_names)))   # post-dust, pre-scaling
     scale_rows = []
     dust_counts = {}
     degenerate = []        # (feature, region, scale) - column is pure numerical dust
@@ -186,6 +191,7 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                           f"found {(v < 0).sum()} negative entries. If this is a "
                           "level variable (e.g. a price index), set center=1 for it "
                           "in the feature config.")
+        X_raw[:, j] = v
         for g in range(G):
             m_all = region_idx == g
             m_tr = m_all & train_mask
@@ -259,15 +265,24 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         buckets=bucket_features(model_cfg.features),
         X_fourier=Xf, fourier_names=f_names, t=t,
         train_mask=train_mask, test_mask=test_mask,
-        x_scale_table=x_scale_table,
+        x_scale_table=x_scale_table, X_raw=X_raw,
     )
 
 
-def write_data_stage_outputs(pdata: PreparedData, outdir: str) -> None:
-    """Stage 01 outputs: what went into the model, per region."""
+def write_data_stage_outputs(pdata: PreparedData, outdir: str,
+                             out_cfg=None) -> None:
+    """Stage 01 outputs: what went into the model, per region.
+
+    The two core tables (panel_summary, feature_scaling_stats) are always
+    written. `out_cfg` (an OutputConfig) toggles the KPI plot and adds the
+    model-input dump - the transformed matrix the model actually receives.
+    """
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
+
+    from config import OutputConfig
+    out_cfg = out_cfg or OutputConfig()
 
     os.makedirs(outdir, exist_ok=True)
     G = len(pdata.region_names)
@@ -289,6 +304,14 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str) -> None:
         })
     pd.DataFrame(rows).to_csv(os.path.join(outdir, "panel_summary.csv"), index=False)
     pdata.x_scale_table.to_csv(os.path.join(outdir, "feature_scaling_stats.csv"), index=False)
+
+    # the transformed matrix handed to the sampler, plus its column stats -
+    # imported here for the same circular-import reason as save_fig below
+    from reconciliation import write_model_input
+    write_model_input(pdata, outdir, out_cfg)
+
+    if not out_cfg.data_plots:
+        return
 
     ncol = min(4, G)
     nrow = int(np.ceil(G / ncol))

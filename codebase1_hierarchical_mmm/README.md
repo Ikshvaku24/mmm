@@ -96,14 +96,16 @@ dummy_covid,,global,free,0.0,1.0,,,
 ## Run
 
 ```python
-from config import ModelConfig, RunConfig, SamplerConfig, load_feature_config
+from config import (ModelConfig, OutputConfig, RunConfig, SamplerConfig,
+                    load_feature_config)
 from run_pipeline import run
 
 result = run(df, ModelConfig(features=load_feature_config("feature_priors.csv"),
                              fourier_order=2, include_trend=True,
                              likelihood="student_t"),
              RunConfig(run_name="fy26", holdout_periods=13),
-             SamplerConfig(sampler="numpyro", chains=4))
+             SamplerConfig(sampler="numpyro", chains=4),
+             out_cfg=OutputConfig(period_split="mat"))
 ```
 
 Smoke test / parameter recovery: `python synthetic_example.py`.
@@ -116,7 +118,37 @@ Smoke test / parameter recovery: `python synthetic_example.py`.
 | `02_convergence` | `sampling_log.json` run manifest (package versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
 | `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0) *(blank for sign-constrained features — vacuous there)*, `scaling_method`, **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none` / `weak` / `weak (near-constant)` / `adequate` — a region where the feature never ran, **or where it never moves**, gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
 | `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); **`resid_t_stat` / `resid_p_value`** (bias test) and **`durbin_watson`** (residual autocorrelation) — see "Significance" below; fit plots show both bands; residual plots. On the `__all__` row read **`r2_within_region`**, not `r2`: the pooled `r2` is inflated by the differences in level between regions and can sit at 0.99 while every region is fitted badly |
-| `05_contributions` | contribution totals with HDIs and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), a **`group`** column (`baseline_total` / `baseline_part` / `incremental`), incremental bar chart, `baseline_breakdown.png`, and the weekly decomposition in both collapsed and baseline-expanded form |
+| `05_contributions` | contribution totals with HDIs, **volume** and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), a **`group`** column (`baseline_total` / `baseline_part` / `incremental`), incremental bar chart, `baseline_breakdown.png`, and the weekly decomposition in both collapsed and baseline-expanded form |
+
+## Reconciliation outputs (`OutputConfig`)
+
+The core tables above are always written. Everything below is optional, lives in
+`reconciliation.py`, and is switched on or off in `config.OutputConfig` — passed
+to `run(..., out_cfg=...)`. They exist so every reported number can be
+re-derived by hand from the data.
+
+| File | Answers |
+|---|---|
+| `01_data/model_input_matrix.csv` | What exactly did the model receive? Raw and scaled side by side, per region × week |
+| `01_data/model_input_summary.csv` | What does a scaled column look like? (`scaled_mean_train` is 0 for every centred feature — that is the whole story of centring) |
+| `04_fit/actual_vs_predicted.csv` | Row-level actual, fitted, both bands, residual, baseline, incremental |
+| `05_contributions/contribution_summary.csv` | **Volume and % contribution** in the vendor deck's layout, with pillar subtotals, a Residual line and a Grand Total equal to actual sales — so the percentages sum to exactly 100 |
+| `05_contributions/contribution_reconciliation.csv` | Do the components add to fitted, and fitted plus residual to actual? |
+| `05_contributions/contribution_math.csv` | `beta × Σ(x_scaled + shift) × sd_dv` per region × feature — recompute any contribution in a spreadsheet |
+| `05_contributions/contribution_timeseries.csv` | The weekly decomposition as data, self-reconciling under a pivot |
+
+```python
+OutputConfig()                                    # everything on (default)
+OutputConfig(contribution_timeseries=False)       # skip the one large file
+OutputConfig.tables_only()                        # all CSVs, no PNGs
+OutputConfig.core_only()                          # nothing optional
+OutputConfig.core_only(contribution_summary=True) # only the volume table
+```
+
+`period_split` (`"mat"` / `"year"` / `"none"`) sets the reporting periods in
+`contribution_summary.csv`; `"mat"` reproduces the vendor MAT 1 / MAT 2 cut.
+
+Full column-by-column documentation is in `OUTPUTS_GUIDE.md`.
 
 ## Baseline vs incremental
 

@@ -29,8 +29,10 @@ import numpy as np
 import pandas as pd
 
 from compat import get_group, has_group
-from config import ModelConfig, RunConfig
+from config import ModelConfig, OutputConfig, RunConfig
 from data_prep import PreparedData
+from reconciliation import (write_actual_vs_predicted,
+                            write_contribution_diagnostics)
 
 
 def save_fig(fig, path: str, dpi: int = 130) -> None:
@@ -206,6 +208,10 @@ class Decomposition:
     core_draws: np.ndarray = None       # (S, n_obs) intercept + seasonality + trend
     core_totals: np.ndarray = None      # (S, G)
     baseline_features: tuple = ()       # names folded into the baseline
+    contrib_shift: dict = None          # feature -> (n_obs,) scaled-axis shift
+                                        # applied by contribution_reference.
+                                        # Kept so contribution_math.csv can show
+                                        # the exact arithmetic behind each number.
 
 
 def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
@@ -232,6 +238,7 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
     yhat = core.copy()
     core_shift = np.zeros_like(core)     # total re-referencing moved out of core
     contrib_median, contrib_totals, baseline_features = {}, {}, []
+    contrib_shift = {}
     sg = pdata.y_scale[reg]
 
     for name, b in beta_draws_by_feature(post, pdata).items():
@@ -266,6 +273,7 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
                 else:
                     ref_v = float(ref)
                 shift[m_all] = (mu_g - ref_v) / sd_g
+        contrib_shift[name] = shift
         if np.any(shift):
             adj = b[:, reg] * shift[None, :]
             c = c + adj
@@ -311,7 +319,8 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
         core_totals[:, g] = core_o[:, reg == g].sum(axis=1)
     return Decomposition(yhat_o, ypred_o, base_o, contrib_median, contrib_totals,
                          base_totals, core_draws=core_o, core_totals=core_totals,
-                         baseline_features=tuple(baseline_features))
+                         baseline_features=tuple(baseline_features),
+                         contrib_shift=contrib_shift)
 
 
 # --------------------------------------------------------------------------
@@ -334,7 +343,8 @@ def _support_flag(sign: str, n_active: int, sd: float, method: str,
 
 
 def coefficient_report(idata, pdata: PreparedData, outdir: str,
-                       make_forest_plots: bool = True) -> pd.DataFrame:
+                       make_forest_plots: bool = True,
+                       out_cfg: OutputConfig | None = None) -> pd.DataFrame:
     os.makedirs(outdir, exist_ok=True)
     post = stack_posterior(idata)
     bd = beta_draws_by_feature(post, pdata)
@@ -405,7 +415,7 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             f.write(weak[["feature", "region", "n_active_train",
                           "data_support"]].to_string(index=False))
 
-    if make_forest_plots:
+    if make_forest_plots and (out_cfg or OutputConfig()).forest_plots:
         fdir = os.path.join(outdir, "forest")
         os.makedirs(fdir, exist_ok=True)
         for name, arr in bd.items():
@@ -547,7 +557,9 @@ def compute_fit_metrics(decomp: Decomposition, pdata: PreparedData) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str) -> pd.DataFrame:
+def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
+               out_cfg: OutputConfig | None = None) -> pd.DataFrame:
+    out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
     med = np.median(decomp.yhat_draws, axis=0)
     m_lo = np.percentile(decomp.yhat_draws, 5, axis=0)
@@ -559,6 +571,13 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str) -> pd.Da
     dfm.to_csv(os.path.join(outdir, "fit_metrics.csv"), index=False)
     # judge holdout by coverage_90_pred_pct (predictive). coverage_90_mean_pct
     # is the mean-response interval and is EXPECTED to be well below 90%.
+
+    # the same comparison one row at a time, so any metric above can be checked
+    # against the observations that produced it
+    if out_cfg.actual_vs_predicted:
+        write_actual_vs_predicted(decomp, pdata, outdir, out_cfg)
+    if not out_cfg.fit_plots:
+        return dfm
 
     G = len(pdata.region_names)
     ncol = min(3, G)
@@ -604,12 +623,18 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str) -> pd.Da
 # contributions
 # --------------------------------------------------------------------------
 def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
-                        top_n: int = 20) -> pd.DataFrame:
+                        top_n: int = 20, out_cfg: OutputConfig | None = None,
+                        coef: pd.DataFrame | None = None) -> pd.DataFrame:
+    out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
     G = len(pdata.region_names)
     actual_by_region = np.array([pdata.y_orig[pdata.region_idx == g].sum()
                                  for g in range(G)])
     total_actual = actual_by_region.sum()
+    n_periods_by_region = np.array(
+        [pd.Series(pdata.dates.values[pdata.region_idx == g]).nunique()
+         for g in range(G)])
+    n_periods_total = int(pd.Series(pdata.dates.values).nunique())
 
     spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
     method_by_feature = {r.feature: r.method
@@ -644,15 +669,26 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
               ("feature average" if method_by_feature.get(name) == "center_scale"
                else "zero"))
         port = tot.sum(axis=1)  # (S,)
-        for region, vals, denom in (
-                [("__portfolio__", port, total_actual)]
-                + [(r, tot[:, g], actual_by_region[g])
+        for region, vals, denom, n_per in (
+                [("__portfolio__", port, total_actual, n_periods_total)]
+                + [(r, tot[:, g], actual_by_region[g], n_periods_by_region[g])
                    for g, r in enumerate(pdata.region_names)]):
+            st = _stats(vals)
             row = {"feature": name, "region": region, "group": group,
                    "pillar": ("Baseline" if spec is None or spec.baseline
                               else (spec.pillar or "")),
-                   **_stats(vals),
+                   **st,
                    "sign_constrained": constrained, "contribution_vs": vs,
+                   # the same numbers as median/hdi_*, named for what they are:
+                   # a VOLUME in KPI units over the whole window. Everything in
+                   # this file is a volume; the percentage is derived from it.
+                   "volume": st["median"],
+                   "volume_hdi_low": st["hdi_low"],
+                   "volume_hdi_high": st["hdi_high"],
+                   "volume_units": "KPI units, summed over the window",
+                   "avg_volume_per_period": (float(st["median"]) / n_per
+                                             if n_per else np.nan),
+                   "actual_volume": float(denom),
                    "share_of_actual_pct": float(np.median(vals) / denom * 100)}
             if constrained is True:
                 row["prob_positive"] = ""      # vacuous under a sign constraint
@@ -666,10 +702,16 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     # incremental features and skip baseline_part rows to avoid double counting.
     roll = df[df["group"].isin(["baseline_total", "incremental"])].copy()
     roll["pillar"] = roll["pillar"].replace("", "Unassigned")
-    pil = (roll.groupby(["pillar", "region"])[["median", "share_of_actual_pct"]]
+    pil = (roll.groupby(["pillar", "region"])
+           [["median", "volume", "share_of_actual_pct"]]
            .sum().reset_index()
            .sort_values(["region", "share_of_actual_pct"], ascending=[True, False]))
     pil.to_csv(os.path.join(outdir, "contribution_by_pillar.csv"), index=False)
+
+    # ---- reconciliation outputs (volume table, weekly series, arithmetic) ----
+    write_contribution_diagnostics(decomp, pdata, outdir, out_cfg, coef)
+    if not out_cfg.contribution_plots:
+        return df
 
     # portfolio bar chart with uncertainty: incremental drivers only, since the
     # baseline parts are not switchable levers and dwarf everything else

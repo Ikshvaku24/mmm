@@ -430,6 +430,76 @@ class RunConfig:
 
 
 @dataclass
+class OutputConfig:
+    """Which optional files each stage writes.
+
+    The CORE tables are always written (panel_summary, feature_scaling_stats,
+    coefficient_report, fit_metrics, contribution_totals) - they are the reason
+    the pipeline exists. Everything below is a RECONCILIATION / DIAGNOSTIC
+    output: it exists so the reported numbers can be re-derived by hand from the
+    data, and each one can be switched off to keep a run light.
+
+    The reconciliation chain, and the file that evidences each link:
+
+        raw feature      -> scaled feature      model_input_matrix.csv
+        scaled feature   -> contribution        contribution_math.csv
+        contributions    -> fitted sales        contribution_reconciliation.csv
+        fitted sales     -> actual sales        actual_vs_predicted.csv
+        everything       -> volume + % table    contribution_summary.csv
+
+    period_split controls the reporting periods of contribution_summary.csv:
+      "none"  one "Total" block
+      "year"  calendar year
+      "mat"   trailing moving-annual-total blocks counted back from the LAST
+              date (MAT 1 = oldest), which is how the vendor decomposition
+              in snapshots/true_output/ is cut. Always emits "Total" as well.
+    """
+    # ---- 01_data ----------------------------------------------------------
+    model_input_matrix: bool = True     # every row exactly as the model sees it
+    model_input_summary: bool = True    # per region x feature scaled-column stats
+    data_plots: bool = True             # kpi_by_region.png
+    # ---- 03_coefficients --------------------------------------------------
+    forest_plots: bool = True
+    # ---- 04_fit -----------------------------------------------------------
+    actual_vs_predicted: bool = True    # row-level actual / fitted / residual
+    fit_plots: bool = True
+    # ---- 05_contributions -------------------------------------------------
+    contribution_summary: bool = True        # vendor-style volume + % table
+    contribution_timeseries: bool = True     # volume per region x date x driver
+    contribution_math: bool = True           # beta x sum(x) x sd_y audit trail
+    contribution_reconciliation: bool = True  # components -> fitted -> actual
+    contribution_plots: bool = True
+    # ---- options ----------------------------------------------------------
+    period_split: str = "mat"           # "none" | "year" | "mat"
+    include_raw_features: bool = True   # also dump pre-scaling feature values
+
+    _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
+              "forest_plots", "actual_vs_predicted", "fit_plots",
+              "contribution_summary", "contribution_timeseries",
+              "contribution_math", "contribution_reconciliation",
+              "contribution_plots")
+
+    def __post_init__(self):
+        if self.period_split not in {"none", "year", "mat"}:
+            raise ValueError("period_split must be 'none', 'year' or 'mat'")
+
+    @classmethod
+    def core_only(cls, **overrides) -> "OutputConfig":
+        """Every optional output off - fastest run, core tables only."""
+        return cls(**{**{f: False for f in cls._FLAGS}, **overrides})
+
+    @classmethod
+    def tables_only(cls, **overrides) -> "OutputConfig":
+        """All CSVs, no PNGs (Databricks /Workspace hates rapid image writes)."""
+        off = {"data_plots": False, "forest_plots": False,
+               "fit_plots": False, "contribution_plots": False}
+        return cls(**{**off, **overrides})
+
+    def enabled(self) -> list[str]:
+        return [f for f in self._FLAGS if getattr(self, f)]
+
+
+@dataclass
 class CVConfig:
     """Expanding-window (rolling-origin) cross-validation settings.
 

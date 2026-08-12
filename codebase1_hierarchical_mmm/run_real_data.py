@@ -34,8 +34,8 @@ from __future__ import annotations
 
 import pandas as pd
 
-from config import (CVConfig, ModelConfig, RunConfig, SamplerConfig,
-                    load_feature_config)
+from config import (CVConfig, ModelConfig, OutputConfig, RunConfig,
+                    SamplerConfig, load_feature_config)
 from run_pipeline import run
 
 INPUT_PATH = "input_datacube.xlsx"
@@ -89,10 +89,26 @@ sampler_cfg = SamplerConfig(
     allow_sampler_fallback=False, # fail loudly instead of burning CPU hours
 )
 
+# Which optional files get written. Defaults are the full transparency set:
+# the transformed model input, row-level actual vs predicted, contribution
+# volume + %, the weekly decomposition as data, and the arithmetic behind each
+# contribution. Turn individual ones off here rather than editing code, e.g.
+#   out_cfg = OutputConfig(contribution_timeseries=False)   # skip the big file
+#   out_cfg = OutputConfig.tables_only()                    # CSVs, no PNGs
+#   out_cfg = OutputConfig.core_only()                      # fastest
+out_cfg = OutputConfig(
+    period_split="mat",           # MAT 1 / MAT 2 blocks, as the vendor deck cuts it
+)
+
 # ---- 3. fit + full report ---------------------------------------------------
-result = run(df, model_cfg, run_cfg, sampler_cfg, save_trace=True)
+result = run(df, model_cfg, run_cfg, sampler_cfg, save_trace=True, out_cfg=out_cfg)
 print("outputs ->", result["output_dir"])
 print(result["metrics"][result["metrics"]["region"] == "__all__"])
+
+# the one-line reconciliation: do the reported drivers add up to actual sales?
+recon = pd.read_csv(f"{result['output_dir']}/05_contributions/"
+                    "contribution_reconciliation.csv")
+print(recon[(recon.scope == "all") & (recon.region == "__portfolio__")].T)
 
 # ---- 4. (after the single run looks sane) expanding-window CV ---------------
 # from cross_validation import run_cv
