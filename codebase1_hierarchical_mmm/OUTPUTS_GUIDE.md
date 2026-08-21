@@ -148,6 +148,56 @@ are always reported in real KPI units.
 
 ---
 
+## Scaling — and why it silently rescales your priors
+
+Every column, features and KPI alike, goes through one helper:
+
+```
+scaled = (raw − centre) / scale        # both from the TRAINING window only
+```
+
+| Knob | Where | Values |
+|---|---|---|
+| feature `center_mode` | `feature_priors.csv` | `none`, `mean` |
+| feature `scale_mode` | `feature_priors.csv` | `none`, `sd`, `mean`, `mean_positive`, `max` |
+| `dv_center` | `RunConfig` | `none`, `mean` |
+| `dv_scale` | `RunConfig` | `none`, `sd`, `mean`, `mean_positive`, `max` |
+| `dv_scale_scope` | `RunConfig` | `region` (default), `global` |
+
+Leave the feature columns blank for the legacy behaviour (`center=1` →
+`mean`/`sd`, otherwise `none`/`mean_positive`). `none`/`none` passes a column
+through **completely untouched** — use it when the data already arrives on the
+scale your priors were derived on.
+
+> ⚠️ **The scale is the unit of your priors.** A coefficient means *"moves the
+> KPI by `beta × dv_scale` per `feature_scale` of input"*. Change either scale
+> and **every prior mean must be divided by the same factor**. If you don't,
+> the decomposition will still reconcile to exactly 100% — and be wrong by a
+> constant multiple. `contribution_reconciliation.csv` **cannot** catch this;
+> only comparing `contribution_math.csv` against a known contribution can.
+>
+> **`dv_scale_scope`** is the one to watch. `region` gives each region its own
+> scale, so coefficients are comparable across regions in relative terms.
+> `global` divides every region by one number, so a small region's scaled KPI
+> collapses and its coefficients must shrink to match. If your priors were
+> derived per region (`contribution ÷ Σx ÷ mean_dv_region`) then `global` scope
+> inflates every contribution by `global_scale / mean_dv_region` — on the BMC
+> panel that was 1.2×, 8.3× and 14.9× for the three sub-brands.
+>
+> **Never edit one side of the transform.** The inverse is
+> `fitted = y_scaled × y_scale + y_mean`, and both halves come from the same
+> place. Setting `dv_center="none"` sets `y_mean` to 0 so the inverse stays
+> correct; deleting the centring from the forward pass alone inflates every
+> fitted value by the region mean (MAPE ≈ 100%, `r2_within_region` ≈ −116).
+
+**`prior_sd` is on the log scale for sign-constrained features** — `0.7` ≈ a
+factor of 2, `0.2` ≈ ±20%, `0.01` ≈ ±1%. Setting it as a *fraction of the mean*
+(`0.2 × prior_mean`) pins the coefficient so tightly the data cannot move it;
+the posterior comes back as the prior and the contributions are simply whatever
+the priors implied. The run now warns when `prior_sd < 0.05`.
+
+---
+
 ## `01_data` — what went into the model
 
 ### `panel_summary.csv`
@@ -354,9 +404,32 @@ One row per feature × region, plus a `__population__` row per feature.
 | `mean`, `sd`, `median` | Posterior summary on the **scaled** axis. Use `median` |
 | `hdi_low`, `hdi_high` | True 90% highest-density interval (shortest interval, not percentiles) |
 | `t_stat` | `mean / sd` — signal-to-noise. **Not** mean/mcse |
-| `p_value` | `2 × min(P(β>0), P(β<0))` — probability the *direction* is wrong. Blank for sign-constrained features |
-| `prob_positive`, `excludes_zero` | Blank for sign-constrained features — true by construction there |
+| `p_value` | `2 × min(P(β>0), P(β<0))` — probability the *direction* is wrong |
+| 🆕 `p_value_basis` | `posterior sign` or `sign-constrained (vacuous)` — **read this before the p_value** |
+| `prob_positive`, `excludes_zero` | P(β>0) and whether the HDI clears zero |
+| 🆕 `rope_scaled` | The practical-equivalence threshold used (`OutputConfig.rope_scaled`, default 0.01) |
+| 🆕 `prob_negligible` | **P(\|β\| ≤ rope)** — the meaningful significance number for a sign-constrained feature |
 | `sign_constrained` | TRUE if built as ±exp(·), so it can never cross zero |
+
+> 🆕 **These columns used to be blank for sign-constrained features. They are
+> now always populated.** The blanks were correct in spirit and useless in
+> practice: with 26 of 27 features sign-constrained, the report had a `p_value`
+> column that was empty almost everywhere.
+>
+> **But read `p_value_basis` first.** For a sign-constrained feature `β = ±exp(·)`
+> cannot cross zero, so `p_value` is **exactly 0** and `prob_positive` is
+> **exactly 1** — for every such feature, in every region, always. Those numbers
+> are properties of the model's construction, not evidence from your data, and
+> quoting them as significance would be wrong.
+>
+> **`prob_negligible` is the honest replacement.** For a sign-constrained
+> coefficient the question was never "is the effect non-zero?" (guaranteed) but
+> **"could the effect be so small it doesn't matter?"** `prob_negligible` is the
+> share of the posterior inside a region of practical equivalence — near **0**
+> means the effect is materially bigger than nothing, near **1** means the model
+> cannot rule out that the driver does essentially nothing. Set the threshold
+> with `OutputConfig(rope_scaled=…)` on the scaled axis (0.01 ≈ "moves sales by
+> under 1% of a region's standard deviation").
 
 **Original units**
 
@@ -558,10 +631,25 @@ components (baseline core + every driver)  =  fitted sales
 fitted sales  +  Residual                  =  actual sales
 ```
 
-**The Residual line is what makes the percentages close.** Drivers explain
-*fitted* sales; `actual − fitted` has to appear somewhere or the column stops at
-99.x%. It also absorbs the small median gap (see "two arithmetics" above). The
-vendor sheet carries a Residual line for the same reason — theirs is −0.01%.
+**Two lines close the gap to 100%, and they mean different things:**
+
+| Row | Is | v4 portfolio |
+|---|---|---|
+| `__residual__` | `actual − fitted` — sales the **model** cannot explain | **0.51%** |
+| 🆕 `__median_gap__` | `fitted − Σ(component medians)` — a **reporting** artefact, see "two arithmetics" above | **1.71%** |
+
+Drivers explain *fitted* sales, so `actual − fitted` has to appear somewhere or
+the column stops at 99.x%. The vendor sheet carries a Residual line for the same
+reason — theirs is −0.01%.
+
+> 🆕 **These were one combined row until v5.** On the real panel that row read
+> **2.23%**, of which only 0.51% is genuine model error — the other 1.71% is the
+> sum-of-medians artefact, which grows with the number of components (~30 here,
+> nearly all log-normal and therefore right-skewed, so each median sits a little
+> below its mean and the shortfalls accumulate one way). Reporting them together
+> overstated the model's error roughly fourfold. Judge the fit on `__residual__`
+> alone, and cross-check it against `residual_pct` in
+> `contribution_reconciliation.csv`.
 
 ### Weekly detail — `period_split="week"`
 
@@ -649,6 +737,7 @@ and this file prints each factor so it can be recomputed in a spreadsheet.
 | `reference_shift_scaled` | The per-week shift re-referencing adds. **0 when `auto`** |
 | `raw_sum`, `raw_mean_train` | The raw column |
 | `scaled_sum`, `scaled_mean_train` | The scaled column — **~0 for centred features** |
+| 🆕 `scaled_sum_train`, `scaled_sum_test` | The same sum split by window. **For a centred feature `scaled_sum_train` is 0 to machine precision**, so `scaled_sum` = `scaled_sum_test`: the whole reported contribution comes from the holdout weeks |
 | `effective_scaled_sum` | `scaled_sum + shift × n_obs` |
 | `beta_scaled_median`, `dv_scale_used` | The other two factors |
 | `volume_recomputed` | The product of the three — do this in Excel and match it |

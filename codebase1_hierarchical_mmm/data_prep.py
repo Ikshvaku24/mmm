@@ -6,15 +6,31 @@ one row per region x period. Features arrive ALREADY transformed
 (adstock / saturation / lag done in preprocessing) - this codebase does not
 transform them further, it only scales for sampler geometry.
 
-Scaling (stats computed on the TRAINING window only, stored for reuse):
-  - dv:            standardised per region                  (Meridian: KPI transformer)
-  - signed feats:  / per-region mean of positive values     (Meridian: media transformer -
+Scaling (stats computed on the TRAINING window only, stored for reuse). Every
+column - features and KPI alike - goes through `resolve_scaling`, which returns
+a (centre, scale) pair and applies `(v - centre) / scale`:
+
+  DEFAULTS (unchanged from earlier versions)
+  - dv:            centre=mean, scale=sd, per region        (Meridian: KPI transformer)
+  - signed feats:  centre=none, scale=mean_positive         (Meridian: media transformer -
                    no centering, zero stays zero)
-  - signed feats with center=True: centred + scaled         (Meridian: non-media
+  - signed feats with center=1: centre=mean, scale=sd       (Meridian: non-media
                    treatments transformer) - for always-on LEVEL variables such as
                    distribution or price indices. Scale-only would leave them at
                    ~1.0 every week, i.e. collinear with the region intercept.
-  - free feats:    centred + scaled per region              (Meridian: controls transformer)
+  - free feats:    centre=mean, scale=sd, per region        (Meridian: controls transformer)
+
+  OVERRIDES
+  - per feature: `center_mode` / `scale_mode` columns in the prior CSV
+  - for the KPI: `RunConfig.dv_center` / `dv_scale` / `dv_scale_scope`
+  - `center_mode=none, scale_mode=none` passes a column through UNCHANGED, for
+    data that arrives already on the scale your priors were derived on.
+
+THE SCALE IS THE UNIT OF YOUR PRIORS. A coefficient means "moves the KPI by
+beta x dv_scale per feature_scale of input". Change either scale and every
+prior mean must be divided by the same factor, or the model is being told to
+believe an effect it was never shown. This is the single easiest way to get a
+decomposition that reconciles perfectly and is wrong by a constant multiple.
 """
 from __future__ import annotations
 
@@ -27,6 +43,51 @@ import pandas as pd
 
 from config import (FeatureSpec, ModelConfig, RunConfig, bucket_features,
                     validate_region_priors)
+
+
+def resolve_scaling(v_train: np.ndarray, center_mode: str, scale_mode: str,
+                    label: str = "") -> tuple[float, float]:
+    """The (centre, scale) a column is transformed by: (v - centre) / scale.
+
+    Both are computed on the TRAINING window only and then applied to every row,
+    so the holdout never leaks into the transform. One helper serves the
+    features and the KPI, which is what keeps the two consistent - a coefficient
+    means 'moves the KPI by beta x dv_scale per feature_scale of input', and
+    that identity only holds if both sides use the same convention.
+
+    centre: 'none' -> 0.0            'mean' -> mean of the train window
+    scale : 'none' -> 1.0            'sd'   -> sd of the centred column
+            'mean' -> mean of the raw column (level variables)
+            'mean_positive' -> mean of the POSITIVE raw values (media: zero
+                               activity must stay zero)
+            'max'  -> max|centred column|, mapping it into [-1, 1]
+
+    A non-positive or non-finite scale falls back to 1.0 with a warning rather
+    than dividing by ~0 and turning a dead column into a unit-scale regressor.
+    """
+    centre = float(np.mean(v_train)) if center_mode == "mean" else 0.0
+    d = v_train - centre
+    if scale_mode == "none":
+        return centre, 1.0
+    if scale_mode == "sd":
+        sc = float(np.std(d))
+    elif scale_mode == "mean":
+        sc = float(np.mean(v_train))
+    elif scale_mode == "mean_positive":
+        pos = v_train[v_train > 0]
+        sc = float(np.mean(pos)) if len(pos) else 0.0
+    elif scale_mode == "max":
+        sc = float(np.max(np.abs(d))) if len(d) else 0.0
+    else:
+        raise ValueError(f"unknown scale_mode {scale_mode!r}")
+    if not np.isfinite(sc) or sc <= 0:
+        if label:
+            warnings.warn(
+                f"{label}: scale_mode={scale_mode!r} produced {sc!r}; using 1.0. "
+                "The column is constant, empty or non-positive over the training "
+                "window - check it is the column you meant to model.")
+        return centre, 1.0
+    return centre, sc
 
 
 def make_folds(n_dates: int, horizon: int, n_folds: int,
@@ -154,15 +215,26 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                           f"{n_dates_tr} training periods - risk of overfitting "
                           "the seasonal cycle")
 
-    # ---- dv scaling: standardise per region (train stats) -----------------
+    # ---- dv scaling (train stats; see RunConfig.dv_center / dv_scale) ------
+    # y = (y_orig - y_mean[g]) / y_scale[g], and every inverse transform in
+    # outputs.py is exactly y_scaled * y_scale[g] + y_mean[g]. Both halves come
+    # from here, so turning centring off sets y_mean to 0 and the inverse stays
+    # correct. Never strip the centring from one side only.
     y_orig = d[yc].to_numpy(dtype=float)
     y_mean = np.zeros(G)
     y_scale = np.ones(G)
+    if run_cfg.dv_scale_scope == "global":
+        # ONE scale for every region. The scaled KPI is then proportional to
+        # region size, so each region needs its own coefficient magnitude -
+        # only use this when the priors were derived on that same single scale.
+        _, sc_all = resolve_scaling(y_orig[train_mask], "none",
+                                    run_cfg.dv_scale, f"{yc} (global)")
     for g in range(G):
         m = (region_idx == g) & train_mask
-        y_mean[g] = y_orig[m].mean()
-        sd = y_orig[m].std()
-        y_scale[g] = sd if sd > 0 else 1.0
+        c_g, s_g = resolve_scaling(y_orig[m], run_cfg.dv_center,
+                                   run_cfg.dv_scale, f"{yc} [{regions[g]}]")
+        y_mean[g] = c_g
+        y_scale[g] = sc_all if run_cfg.dv_scale_scope == "global" else s_g
     y = (y_orig - y_mean[region_idx]) / y_scale[region_idx]
 
     # ---- feature scaling ---------------------------------------------------
@@ -196,21 +268,18 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
             m_all = region_idx == g
             m_tr = m_all & train_mask
             n_active = int((v[m_tr] != 0).sum())    # activity on the RAW column
-            if spec.center:
-                mu, sd = v[m_tr].mean(), v[m_tr].std()
-                sd = sd if sd > 0 else 1.0
-                X[m_all, j] = (v[m_all] - mu) / sd
-                method = "center_scale"
-                scale_rows.append((regions[g], spec.name, method, mu, sd, n_active))
-            else:
-                pos = v[m_tr][v[m_tr] > 0]
-                sc = pos.mean() if len(pos) else 1.0
-                if len(pos) and sc < run_cfg.min_feature_scale:
-                    degenerate.append((spec.name, regions[g], sc))
-                X[m_all, j] = v[m_all] / sc
-                method = "scale_only"
-                scale_rows.append((regions[g], spec.name, method, 0.0, sc, n_active))
-                # always on but barely moving => x ~ 1.0 constant, which the region
+            mu, sc = resolve_scaling(v[m_tr], spec.center_mode, spec.scale_mode,
+                                     f"{spec.name} [{regions[g]}]")
+            # `method` stays the two-valued label the reporting code keys off:
+            # what it really asks is "is zero still meaningful for this column?"
+            method = "center_scale" if spec.center_mode == "mean" else "scale_only"
+            if method == "scale_only" and spec.scale_mode != "none"                     and (v[m_tr] > 0).any() and sc < run_cfg.min_feature_scale:
+                degenerate.append((spec.name, regions[g], sc))
+            X[m_all, j] = (v[m_all] - mu) / sc
+            scale_rows.append((regions[g], spec.name, method, mu, sc, n_active,
+                               spec.center_mode, spec.scale_mode))
+            if method == "scale_only":
+                # always on but barely moving => x ~ constant, which the region
                 # intercept already spans (see the near-constant guard below)
                 col_tr = X[m_tr, j]
                 if (len(col_tr) and (col_tr != 0).mean() > 0.9
@@ -221,7 +290,7 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         feats = sorted({f for f, _, _ in degenerate})
         ex = ", ".join(f"{f}/{r}: {s:.2e}" for f, r, s in degenerate[:6])
         raise ValueError(
-            f"features whose scaling factor (train mean of positive values) is below "
+            f"features whose scaling factor is below "
             f"min_feature_scale={run_cfg.min_feature_scale:g}: {feats}.\n"
             f"  examples: {ex}\n"
             "Every non-zero value in these columns is numerical dust (e.g. the "
@@ -235,20 +304,25 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
 
     x_scale_table = pd.DataFrame(
         scale_rows,
-        columns=["region", "feature", "method", "center", "scale", "n_active_train"])
+        columns=["region", "feature", "method", "center", "scale", "n_active_train",
+                 "center_mode", "scale_mode"])
     if dust_counts:
         print(f"[data] zeroed near-zero dust (|v| < {run_cfg.zero_threshold_rel:g} "
               f"x max|v|) in {len(dust_counts)} features, e.g. "
               f"{dict(list(dust_counts.items())[:5])}")
     for name, regs in near_constant.items():
         warnings.warn(
-            f"{name}: always on but nearly constant after scale-only scaling "
-            f"(scaled sd < {run_cfg.near_constant_sd:g}) in regions {regs}. It is "
+            f"{name}: always on but nearly constant after scaling without "
+            f"centring (scaled sd < {run_cfg.near_constant_sd:g}) in regions "
+            f"{regs}. It is "
             "almost collinear with the region intercept, so the sampler cannot "
             "separate its coefficient from the baseline - expect poor mixing "
             "(high R-hat, low ESS, saturated tree depth) and a huge coefficient "
             "that is offset by the baseline or by another level variable. "
-            "Set center=1 for this feature in the feature config.")
+            "Set center=1 (or center_mode=mean) for this feature in the feature "
+            "config. If the column must stay untransformed, this warning is the "
+            "price: the intercept and this coefficient are trading off, so read "
+            "neither on its own.")
 
     # ---- seasonality & trend ----------------------------------------------
     Xf, f_names = fourier_features(d[dc], model_cfg.fourier_order,

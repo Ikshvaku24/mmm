@@ -142,7 +142,9 @@ def _model_input_matrix(pdata, out_cfg: OutputConfig) -> pd.DataFrame:
     `<feature>__scaled` IS the number multiplied by the coefficient. Together
     with `<feature>__raw` and the centre/scale in feature_scaling_stats.csv the
     whole transformation is reproducible in a spreadsheet:
-        scaled = (raw - center) / scale     (center = 0 for scale_only features)
+        scaled = (raw - center) / scale     (center = 0 unless center_mode=mean)
+    With center_mode=none and scale_mode=none the two columns are identical -
+    which is the point: it proves the pass-through actually happened.
     """
     reg = pdata.region_idx
     df = pd.DataFrame({
@@ -155,14 +157,19 @@ def _model_input_matrix(pdata, out_cfg: OutputConfig) -> pd.DataFrame:
         "dv_scale_used": pdata.y_scale[reg],
         "trend_t": pdata.t,
     })
+    # Build the wide block in one go and concat once. Assigning ~60 columns one
+    # at a time triggers pandas' fragmentation warning and is O(n_cols^2).
+    extra: dict = {}
     if pdata.X_fourier is not None:
         for k, name in enumerate(pdata.fourier_names):
-            df[name] = pdata.X_fourier[:, k]
+            extra[name] = pdata.X_fourier[:, k]
     have_raw = out_cfg.include_raw_features and pdata.X_raw is not None
     for j, name in enumerate(pdata.feature_names):
         if have_raw:
-            df[f"{name}__raw"] = pdata.X_raw[:, j]
-        df[f"{name}__scaled"] = pdata.X[:, j]
+            extra[f"{name}__raw"] = pdata.X_raw[:, j]
+        extra[f"{name}__scaled"] = pdata.X[:, j]
+    if extra:
+        df = pd.concat([df, pd.DataFrame(extra, index=df.index)], axis=1)
     return df.sort_values(["region", "date"]).reset_index(drop=True)
 
 
@@ -199,6 +206,8 @@ def _model_input_summary(pdata) -> pd.DataFrame:
                 "contribution_reference": ("" if spec is None
                                            else spec.contribution_reference),
                 "scaling_method": info.method,
+                "center_mode": getattr(info, "center_mode", ""),
+                "scale_mode": getattr(info, "scale_mode", ""),
                 "center_used": float(info.center),
                 "scale_used": float(info.scale),
                 "n_train": int(m_tr.sum()), "n_obs": int(m_all.sum()),
@@ -364,6 +373,18 @@ def write_contribution_summary(comp: pd.DataFrame, decomp, pdata, outdir: str,
     `snapshots/true_output/contribution_summary.png`. The Residual line is what
     makes them close: the drivers sum to FITTED sales, and actual - fitted has
     to appear somewhere or the column stops at 99.x%.
+
+    That closing amount is reported as TWO rows, because they mean different
+    things and lumping them puts a reporting artefact inside a model result:
+
+      __residual__    actual - fitted. Sales the MODEL cannot explain.
+      __median_gap__  fitted - sum(component medians). A REPORTING artefact:
+                      the median of a sum is not the sum of medians, and with
+                      ~30 skewed (log-normal) components the per-component
+                      differences accumulate in one direction. On the real
+                      panel this is ~1.7% of sales against a true residual of
+                      ~0.5%, so reporting one combined "Residual" of 2.2% would
+                      overstate the model's error by a factor of four.
     """
     med = np.median(decomp.yhat_draws, axis=0)
     obs = pd.DataFrame({
@@ -387,13 +408,19 @@ def write_contribution_summary(comp: pd.DataFrame, decomp, pdata, outdir: str,
             if not len(o):
                 continue
             actual = float(o["actual"].sum())
+            fitted = float(o["fitted"].sum())
             npd = _n_periods(o["date"])
             agg = (c.groupby(["pillar", "feature", "group"], as_index=False)["volume"]
                    .sum())
-            residual = actual - float(agg["volume"].sum())
-            agg = pd.concat([agg, pd.DataFrame([{
-                "pillar": "Baseline", "feature": "__residual__",
-                "group": "residual", "volume": residual}])], ignore_index=True)
+            # split what closes the gap to actual: the model's error, and the
+            # sum-of-medians artefact. Together they are exactly actual - sum(c)
+            agg = pd.concat([agg, pd.DataFrame([
+                {"pillar": "Baseline", "feature": "__median_gap__",
+                 "group": "median_gap",
+                 "volume": fitted - float(agg["volume"].sum())},
+                {"pillar": "Baseline", "feature": "__residual__",
+                 "group": "residual", "volume": actual - fitted},
+            ])], ignore_index=True)
 
             def add(pillar, feature, group, row_type, volume):
                 rows.append({
@@ -542,6 +569,8 @@ def write_contribution_math(decomp, pdata, outdir: str,
                 "group": ("baseline_part" if fname in set(decomp.baseline_features or ())
                           else "incremental"),
                 "scaling_method": info.method,
+                "center_mode": getattr(info, "center_mode", ""),
+                "scale_mode": getattr(info, "scale_mode", ""),
                 "center_used": centre, "scale_used": scale,
                 "contribution_reference": ("" if spec is None
                                            else spec.contribution_reference),
@@ -553,6 +582,12 @@ def write_contribution_math(decomp, pdata, outdir: str,
                 "raw_mean_train": (float(pdata.X_raw[m_tr, j].mean())
                                    if pdata.X_raw is not None else np.nan),
                 "scaled_sum": scaled_sum,
+                # A centred feature is centred on its TRAIN mean, so
+                # scaled_sum_train is 0 to machine precision and the whole
+                # reported contribution comes from the holdout weeks. Splitting
+                # the sum is the only way to see that from the output.
+                "scaled_sum_train": float(pdata.X[m_tr, j].sum()),
+                "scaled_sum_test": float(pdata.X[m & pdata.test_mask, j].sum()),
                 "scaled_mean_train": float(pdata.X[m_tr, j].mean()),
                 "effective_scaled_sum": eff_sum,
                 "beta_scaled_median": beta,

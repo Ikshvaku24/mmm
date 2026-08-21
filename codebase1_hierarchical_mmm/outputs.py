@@ -99,7 +99,8 @@ def _two_sided_p(t: float, dof: int) -> float:
         return float(math.erfc(abs(t) / math.sqrt(2.0)))
 
 
-def _signif_stats(x: np.ndarray) -> dict:
+def _signif_stats(x: np.ndarray, constrained: bool = False,
+                  rope: float = 0.0) -> dict:
     """Bayesian analogues of the classical t statistic and p value.
 
     t_stat  = posterior mean / posterior SD. NOTE the denominator: the old
@@ -111,12 +112,38 @@ def _signif_stats(x: np.ndarray) -> dict:
               of the sign being wrong, doubled for a two-sided reading. It is
               the direct Bayesian counterpart of a two-sided p value, not a
               frequentist test: read it as "how sure are we of the direction?".
+
+    It is reported for EVERY feature, but it does not mean the same thing for
+    all of them, so `p_value_basis` says which reading applies:
+
+      "posterior sign"            free-sign feature. p_value is evidence: the
+                                  posterior genuinely could have come out the
+                                  other way and did not.
+      "sign-constrained (vacuous)" the coefficient is built as +/-exp(.) and
+                                  cannot cross zero, so p_value is 0 and
+                                  prob_positive is 1 BY CONSTRUCTION. They are
+                                  filled in for completeness; they carry no
+                                  information about the data. Judge these on
+                                  `prob_negligible`, `t_stat` and the HDI.
+
+    prob_negligible = P(|effect| <= rope) - the share of the posterior inside a
+              region of practical equivalence. THIS is the meaningful
+              "is it significant?" number for a sign-constrained feature: the
+              question is never "is the effect non-zero?" (guaranteed) but
+              "could the effect be so small it does not matter?". Near 0 = the
+              effect is materially different from nothing; near 1 = the model
+              cannot rule out that this driver does essentially nothing.
     """
     sd = float(np.std(x))
     mean = float(np.mean(x))
     p_pos = float((x > 0).mean())
     return {"t_stat": float(mean / sd) if sd > 0 else np.nan,
-            "p_value": float(2.0 * min(p_pos, 1.0 - p_pos))}
+            "p_value": float(2.0 * min(p_pos, 1.0 - p_pos)),
+            "p_value_basis": ("sign-constrained (vacuous)" if constrained
+                              else "posterior sign"),
+            "rope_scaled": float(rope),
+            "prob_negligible": (float((np.abs(x) <= rope).mean())
+                                if rope > 0 else np.nan)}
 
 
 def _resid_stats(resid: np.ndarray) -> dict:
@@ -354,24 +381,21 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
     tbl = {(r.region, r.feature): r
            for r in pdata.x_scale_table.itertuples(index=False)}
 
+    rope = (out_cfg or OutputConfig()).rope_scaled
     rows = []
     for name, arr in bd.items():
         sign = spec_by_name[name].sign
         constrained = sign != "free"
+        # Every feature gets a p_value. For sign-constrained ones it is 0 by
+        # construction (beta = +/-exp(.) cannot cross zero), so `p_value_basis`
+        # labels it vacuous and `prob_negligible` carries the real evidence.
         if name in popd:
-            row = {"feature": name, "region": "__population__",
-                   **_stats(popd[name]), **_signif_stats(popd[name]),
-                   "units": "scaled (population level)",
-                   "sign_constrained": constrained,
-                   "data_support": ""}
-            if constrained:
-                # beta = +/-exp(.) can never cross zero, so these columns are
-                # true BY CONSTRUCTION and say nothing about evidence - blank them
-                # rather than let them be read as significance
-                row["prob_positive"] = ""
-                row["excludes_zero"] = ""
-                row["p_value"] = ""
-            rows.append(row)
+            rows.append({"feature": name, "region": "__population__",
+                         **_stats(popd[name]),
+                         **_signif_stats(popd[name], constrained, rope),
+                         "units": "scaled (population level)",
+                         "sign_constrained": constrained,
+                         "data_support": ""})
         for g, r in enumerate(pdata.region_names):
             info = tbl[(r, name)]
             # activity counted on the RAW column: after centring every scaled
@@ -386,7 +410,7 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             o_lo, o_hi = _hdi(orig)
             row = {
                 "feature": name, "region": r, **_stats(arr[:, g]),
-                **_signif_stats(arr[:, g]),
+                **_signif_stats(arr[:, g], constrained, rope),
                 "units": "scaled (per-region axes)",
                 "sign_constrained": constrained,
                 "median_orig_units": float(np.median(orig)),
@@ -397,10 +421,6 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
                 "scaling_method": info.method,
                 "data_support": _support_flag(sign, n_active, sd, info.method),
             }
-            if constrained:
-                row["prob_positive"] = ""
-                row["excludes_zero"] = ""
-                row["p_value"] = ""
             rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "coefficient_report.csv"), index=False)
@@ -690,9 +710,14 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                                              if n_per else np.nan),
                    "actual_volume": float(denom),
                    "share_of_actual_pct": float(np.median(vals) / denom * 100)}
-            if constrained is True:
-                row["prob_positive"] = ""      # vacuous under a sign constraint
-                row["excludes_zero"] = ""
+            # Reported for every row. A sign-constrained COEFFICIENT cannot
+            # cross zero, but its CONTRIBUTION can (a centred feature sitting
+            # below its average contributes negatively), so unlike the
+            # coefficient report these are not vacuous even when constrained.
+            row["evidence_basis"] = ("contribution sign (the coefficient is "
+                                     "sign-constrained, the contribution is not)"
+                                     if constrained is True else
+                                     "contribution sign")
             rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_totals.csv"), index=False)

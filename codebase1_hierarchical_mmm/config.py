@@ -40,6 +40,24 @@ Scale conventions (important for choosing priors):
   - Free-sign features are centred and scaled per region (like Meridian's controls).
   - For sign-constrained features, `prior_mean` is the typical effect MAGNITUDE on
     that scale (must be > 0); `prior_sd` is on the log scale (0.7 ~ a factor of 2).
+
+    WHY ONE IS LOGGED AND THE OTHER IS NOT. The coefficient is built as
+    beta = +/-exp(eta) with eta ~ Normal(mu, prior_sd), i.e. log(beta) is
+    normal. mu and prior_sd are the mean and sd OF LOG BETA:
+      - mu carries the units of log(beta), so a prior stated in beta units must
+        be converted: mu = log(prior_mean). exp(mu) is then the MEDIAN of beta.
+      - prior_sd is dimensionless. It is a MULTIPLICATIVE spread: exp(prior_sd)
+        is a factor, not an amount. There is nothing to convert, and "the log of
+        an sd" is not a meaningful quantity. 0.2 ~ +/-20%, 0.7 ~ a factor of 2,
+        1.0 ~ a factor of e.
+
+    CONVERTING A (mean, sd) PRIOR STATED IN COEFFICIENT UNITS. If you derived
+    m and s in beta units (e.g. m = contribution / sum(x) / dv_scale, s = 0.2*m):
+        prior_sd   = sqrt(log(1 + (s/m)**2))     ~ s/m when s/m is small
+        prior_mean = m                            (m read as the MEDIAN)
+    So "20% uncertainty" is prior_sd ~ 0.2, NOT 0.2 * m. Passing 0.2*m makes
+    prior_sd tiny, which pins the coefficient and leaves the data no say - see
+    the warning raised below when prior_sd < 0.05.
   - `center=True` keeps the sign constraint but scales the feature like a control
     (centre + scale). Use it for ALWAYS-ON LEVEL variables - distribution points,
     price indices, ACV measures. Media-style scale-only scaling leaves such a
@@ -57,6 +75,19 @@ import pandas as pd
 
 VALID_SIGNS = ("positive", "negative", "free")
 VALID_POOLING = ("hierarchical", "independent", "global")
+
+# Scaling vocabulary, shared by the features and the KPI.
+#   centre: what is subtracted before scaling
+#   scale : what the result is divided by (all computed on the TRAIN window)
+VALID_CENTER = ("none", "mean")
+VALID_SCALE = ("none", "sd", "mean", "mean_positive", "max")
+
+SCALE_HELP = """  none           divide by 1 - pass the column through unchanged
+  sd             divide by the standard deviation of the centred column
+  mean           divide by the mean of the raw column (level variables)
+  mean_positive  divide by the mean of the POSITIVE values (Meridian's media
+                 scaler; zero activity stays zero)
+  max            divide by max|centred column|, so the result lands in [-1, 1]"""
 
 # Bucket = one vectorised block of coefficients in the model.
 # prefix: h = hierarchical (pooled), i = independent per region, g = one global
@@ -116,6 +147,18 @@ class FeatureSpec:
     pillar: str = ""                   # reporting group ("Online Media", "TV & DTV",
                                        # "Expert", ...) - contributions are rolled up
                                        # by pillar in 05_contributions
+    center_mode: str | None = None     # "none" | "mean". Explicit override of the
+                                       # `center` flag. None = derive from `center`
+                                       # (and from sign="free", always centred).
+    scale_mode: str | None = None      # "none" | "sd" | "mean" | "mean_positive" |
+                                       # "max". None = the legacy default for this
+                                       # feature: "sd" when centred, else
+                                       # "mean_positive".
+                                       # USE "none"/"none" when the feature arrives
+                                       # already transformed AND already on the
+                                       # scale your priors were derived on - any
+                                       # further scaling silently rescales every
+                                       # prior by the same factor.
 
     def resolved(self) -> "FeatureSpec":
         s = FeatureSpec(**{**self.__dict__,
@@ -143,6 +186,24 @@ class FeatureSpec:
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
         s.center = bool(s.center) or s.sign == "free"   # free is always centred
+        # explicit centre/scale modes win; otherwise fall back to the legacy
+        # behaviour driven by `center`, so existing prior files are unchanged
+        s.center_mode = ("mean" if s.center else "none") if s.center_mode is None             else str(s.center_mode).strip().lower()
+        if s.center_mode not in VALID_CENTER:
+            raise ValueError(
+                f"{s.name}: center_mode must be one of {VALID_CENTER}, "
+                f"got {s.center_mode!r}")
+        if s.scale_mode is None:
+            s.scale_mode = "sd" if s.center_mode == "mean" else "mean_positive"
+        else:
+            s.scale_mode = str(s.scale_mode).strip().lower()
+        if s.scale_mode not in VALID_SCALE:
+            raise ValueError(
+                f"{s.name}: scale_mode must be one of {VALID_SCALE}, "
+                f"got {s.scale_mode!r}. " + SCALE_HELP)
+        # keep the legacy flag consistent with the explicit mode - everything
+        # downstream (contribution reference, support flags) keys off it
+        s.center = s.center_mode == "mean"
         s.baseline = bool(s.baseline)
         s.pillar = "" if s.pillar is None else str(s.pillar).strip()
         ref = s.contribution_reference
@@ -162,6 +223,27 @@ class FeatureSpec:
         s.regional_sd = 0.5 if s.regional_sd is None else float(s.regional_sd)
         if not (np.isfinite(s.prior_sd) and s.prior_sd > 0):
             raise ValueError(f"{s.name}: prior_sd must be finite and > 0")
+        # For a SIGNED feature beta = +/-exp(Normal(log(prior_mean), prior_sd)),
+        # so prior_sd lives on the LOG scale: 0.7 ~ a factor of 2, 0.2 ~ +/-20%,
+        # 0.01 ~ +/-1%. A common mistake is to set it as a FRACTION OF THE MEAN
+        # ("20% of 0.015" -> 0.003), which pins the coefficient to three decimal
+        # places and leaves the data no say at all: the posterior comes back as
+        # the prior, the fit degrades, and the contributions are whatever the
+        # priors implied. Warn rather than raise - a deliberately fixed
+        # coefficient is a legitimate (if unusual) choice.
+        if s.sign != "free" and s.prior_sd < 0.05:
+            warnings.warn(
+                f"{s.name}: prior_sd={s.prior_sd:.4g} is on the LOG scale, so "
+                f"this pins the coefficient to about +/-{s.prior_sd:.1%} of "
+                f"{s.prior_mean:.4g} - the data cannot move it. If you meant "
+                "'20% uncertainty', use prior_sd=0.2, not 0.2*prior_mean.")
+        if s.pooling == "hierarchical" and 0 < s.regional_sd < 0.02:
+            warnings.warn(
+                f"{s.name}: regional_sd={s.regional_sd:.4g} allows essentially "
+                "no cross-region variation, so hierarchical pooling collapses to "
+                "one shared coefficient. That is only right if every region truly "
+                "responds identically on the SCALED axis - which it cannot, if "
+                "the regions were scaled by one global number.")
         if not np.isfinite(s.regional_sd):
             raise ValueError(f"{s.name}: regional_sd must be finite")
         if s.pooling == "hierarchical" and s.regional_sd <= 0:
@@ -290,6 +372,8 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             baseline=False if baseline is None else bool(int(baseline)),
             contribution_reference=_cell(r, "contribution_reference") or "auto",
             pillar=_cell(r, "pillar") or "",
+            center_mode=_cell(r, "center_mode"),
+            scale_mode=_cell(r, "scale_mode"),
         )
         by_name[name] = spec
         specs.append(spec)
@@ -395,6 +479,28 @@ class RunConfig:
     date_col: str = "date"
     region_col: str = "region"
     dv_col: str = "dv"
+    dv_center: str = "mean"     # "mean" | "none" - what is subtracted from the KPI.
+                                # "none" leaves the level in the data, so the
+                                # region intercept must carry it. When it is
+                                # "none" the stored centre is 0, which keeps the
+                                # inverse transform (fitted = y_scaled * scale +
+                                # centre) exactly right - do NOT strip the
+                                # centring by editing the transform alone, or
+                                # every fitted value is inflated by the mean.
+    dv_scale: str = "sd"        # "none" | "sd" | "mean" | "mean_positive" | "max"
+                                # See SCALE_HELP. The KPI scale is the unit your
+                                # coefficients (and therefore your PRIORS) live
+                                # in: a coefficient means "moves the KPI by beta
+                                # x dv_scale". Change it and every prior mean
+                                # must be rescaled by the same factor.
+    dv_scale_scope: str = "region"   # "region" | "global". "region" gives each
+                                # region its own scale (coefficients are then
+                                # comparable across regions in relative terms).
+                                # "global" divides every region by ONE number, so
+                                # a small region's scaled KPI is small and its
+                                # coefficients must shrink to match - only use it
+                                # when your priors were derived on that same
+                                # single scale.
     holdout_periods: int = 0            # last N dates held out per region for OOS metrics
     report_draws: int = 400             # posterior draws used for decomposition/plots
     on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail:
@@ -419,6 +525,12 @@ class RunConfig:
                                           # region intercept (use center=1 instead)
 
     def __post_init__(self):
+        if self.dv_center not in VALID_CENTER:
+            raise ValueError(f"dv_center must be one of {VALID_CENTER}")
+        if self.dv_scale not in VALID_SCALE:
+            raise ValueError(f"dv_scale must be one of {VALID_SCALE}. " + SCALE_HELP)
+        if self.dv_scale_scope not in {"region", "global"}:
+            raise ValueError("dv_scale_scope must be 'region' or 'global'")
         if self.on_convergence_failure not in {"warn", "fail"}:
             raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
         if self.zero_threshold_rel < 0:
@@ -482,6 +594,16 @@ class OutputConfig:
     # ---- options ----------------------------------------------------------
     period_split: str = "mat"           # "none" | "week" | "year" | "mat"
     include_raw_features: bool = True   # also dump pre-scaling feature values
+    rope_scaled: float = 0.01           # region of practical equivalence, on the
+                                        # SCALED coefficient axis (KPI sd per
+                                        # feature unit). coefficient_report gets
+                                        # prob_negligible = P(|beta| <= this),
+                                        # which is the only non-vacuous
+                                        # "significance" for a sign-constrained
+                                        # feature, whose p_value is 0 by
+                                        # construction. 0.01 = "moves sales by
+                                        # less than 1% of a region's sd".
+                                        # Set 0 to skip the calculation.
 
     _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
               "forest_plots", "actual_vs_predicted", "fit_plots",
@@ -493,6 +615,8 @@ class OutputConfig:
         if self.period_split not in {"none", "week", "year", "mat"}:
             raise ValueError(
                 "period_split must be 'none', 'week', 'year' or 'mat'")
+        if self.rope_scaled < 0:
+            raise ValueError("rope_scaled must be >= 0")
 
     @classmethod
     def core_only(cls, **overrides) -> "OutputConfig":
