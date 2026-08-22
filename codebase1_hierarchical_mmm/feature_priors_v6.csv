@@ -1,0 +1,66 @@
+variable,region,pooling,sign_constraint,global_prior_mean,global_prior_sd,regional_sd_prior,center,baseline,pillar,contribution_reference,center_mode,scale_mode
+btl_price-promotions_all-btl_sub-brand-unattr_invest_Effervescent,,hierarchical,positive,0.049795891,0.198,0.2,0,0,Trade,,none,none
+btl_price-promotions_all-btl_sub-brand-unattr_invest_Liquid,,hierarchical,positive,0.23558372,0.198,0.2,0,0,Trade,,none,none
+btl_price-promotions_all-btl_sub-brand-unattr_invest_Tabs,,hierarchical,positive,0.032394973,0.198,0.2,0,0,Trade,,none,none
+btl_shopper_all-btl_sub-brand-unattr_invest_Effervescent,,hierarchical,positive,0.078941071,0.198,0.2,0,0,Trade,,none,none
+btl_shopper_all-btl_sub-brand-unattr_invest_Liquid,,hierarchical,positive,0.181360274,0.198,0.2,0,0,Trade,,none,none
+btl_shopper_all-btl_sub-brand-unattr_invest_Tabs,,hierarchical,positive,0.092784379,0.198,0.2,0,0,Trade,,none,none
+dummy_dec23_effervescent,,global,free,0.087762939,0.017552588,0.2,0,0,Baseline,,none,none
+dummy_dec24_effervescent,,global,free,0.242166642,0.048433328,0.2,0,0,Baseline,,none,none
+dummy_dec24_liquid,,global,free,0.340017948,0.06800359,0.2,0,0,Baseline,,none,none
+dummy_dec24_tabs,,global,free,0.220353516,0.044070703,0.2,0,0,Baseline,,none,none
+dummy_janmar24,,global,free,0.095520587,0.019104117,0.2,0,0,Baseline,,none,none
+dummy_market_recovery_Liquid,,global,free,-0.089996117,0.017999223,0.2,0,0,Baseline,,none,none
+dummy_market_recovery_Tabs,,global,free,-0.156806335,0.031361267,0.2,0,0,Baseline,,none,none
+dummy_may_Effervescent,,global,free,0.068436345,0.013687269,0.2,0,0,Baseline,,none,none
+dummy_October_Effervescent,,global,free,0.020617418,0.004123484,0.2,0,0,Baseline,,none,none
+dummy_October_Liquid,,global,free,0.029839012,0.005967802,0.2,0,0,Baseline,,none,none
+dummy_tpr_Effervescent_Nov_2023,,global,free,0.123809508,0.024761902,0.2,0,0,Baseline,,none,none
+dummy_aprjun_Tabs,,global,free,0.105262716,0.021052543,0.2,0,0,Baseline,,none,none
+dummy_distribution_mat1,,global,free,0.024214358,0.004842872,0.2,0,0,Baseline,,none,none
+dummy_feb25_Liquid,,global,free,0.150484332,0.030096866,0.2,0,0,Baseline,,none,none
+dummy_jan24_Tabs,,global,free,0.199439469,0.039887894,0.2,0,0,Baseline,,none,none
+dummy_junaug24,,global,free,0.052921264,0.010584253,0.2,0,0,Baseline,,none,none
+dummy_March_Liquid,,global,free,-0.180092353,0.036018471,0.2,0,0,Baseline,,none,none
+dummy_March_Tabs,,global,free,-0.165108416,0.033021683,0.2,0,0,Baseline,,none,none
+dummy_nov_tabs,,global,free,-0.095518557,0.019103711,0.2,0,0,Baseline,,none,none
+dummy_winter_Liquid_2024,,global,free,0.095580961,0.019116192,0.2,0,0,Baseline,,none,none
+dummy_winter_Tabs,,global,free,0.108698356,0.021739671,0.2,0,0,Baseline,,none,none
+media_competitor-tv_all-plac_all-plat_all-camp_sub-brand-unattr_grps,,hierarchical,negative,0.07091377,0.198,0.2,0,0,Competitor TV,,none,none
+media_digital-audio_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.015071354,0.198,0.2,0,0,Online Media,,none,none
+media_digital-display_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions,,hierarchical,positive,0.004573261,0.198,0.2,0,0,Online Media,,none,none
+media_digital-display_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.011079883,0.198,0.2,0,0,Online Media,,none,none
+media_digital-search_all-plac_all-plat_all-camp_sub-brand-unattr_clicks,,hierarchical,positive,0.009870309,0.198,0.2,0,0,Online Media,,none,none
+media_digital-social_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions,,hierarchical,positive,0.008665946,0.198,0.2,0,0,Online Media,,none,none
+media_digital-social_all-plac_all-plat_all-camp_sub-brand-liquid_hero_impressions,,hierarchical,positive,0.093212831,0.198,0.2,0,0,Online Media,,none,none
+media_digital-social_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.018040305,0.198,0.2,0,0,Online Media,,none,none
+media_digital-video_all-plac_all-plat_all-camp_sub-brand-effervescent_halo_impressions,,hierarchical,positive,0.117610475,0.198,0.2,0,0,Online Media,,none,none
+media_digital-video_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions,,hierarchical,positive,0.102274157,0.198,0.2,0,0,Online Media,,none,none
+media_digital-video_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.021161841,0.198,0.2,0,0,Online Media,,none,none
+media_ecommerce-display_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions,,hierarchical,positive,0.009352331,0.198,0.2,0,0,Online Media,,none,none
+media_ecommerce-display_all-plac_all-plat_all-camp_sub-brand-liquid_hero_impressions,,hierarchical,positive,0.069305543,0.198,0.2,0,0,Online Media,,none,none
+media_ecommerce-display_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.010747139,0.198,0.2,0,0,Online Media,,none,none
+media_influencers_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions,,hierarchical,positive,0.002802155,0.198,0.2,0,0,Online Media,,none,none
+media_influencers_all-plac_all-plat_all-camp_sub-brand-unattr_impressions,,hierarchical,positive,0.016993026,0.198,0.2,0,0,Online Media,,none,none
+media_ooh_all-plac_all-plat_all-camp_sub-brand-unattr_invest_2024,,hierarchical,positive,0.007607202,0.198,0.2,0,0,Online Media,,none,none
+media_ooh_all-plac_all-plat_all-camp_sub-brand-unattr_invest_2025,,hierarchical,positive,0.023484955,0.198,0.2,0,0,Online Media,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-effervescent_halo_grps_Liquid,,hierarchical,positive,0.0110588,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-effervescent_halo_grps_Tabs,,hierarchical,positive,0.019620144,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-effervescent_hero_grps,,hierarchical,positive,0.006570042,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-unattr_grps_Effervescent,,hierarchical,positive,0.04682474,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-unattr_grps_Liquid,,hierarchical,positive,0.054186182,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_otv_all-camp_sub-brand-unattr_grps_Tabs,,hierarchical,positive,0.050377952,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_ptv_all-camp_sub-brand-unattr_grps_Effervescent,,hierarchical,positive,0.027627354,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_ptv_all-camp_sub-brand-unattr_grps_Liquid,,hierarchical,positive,0.03837434,0.198,0.2,0,0,TV,,none,none
+media_tv_all-plac_ptv_all-camp_sub-brand-unattr_grps_Tabs,,hierarchical,positive,0.035166812,0.198,0.2,0,0,TV,,none,none
+sales_brand_all-benefit_distribution_tdp_Effervescent,,hierarchical,positive,0.241705076,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_distribution_tdp_Liquid,,hierarchical,positive,1.284369728,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_distribution_tdp_Tabs,,hierarchical,positive,0.448633881,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_price_base-price_Effervescent,,hierarchical,negative,0.168326003,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_price_base-price_Liquid,,hierarchical,negative,1.290508189,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_price_base-price_Tabs,,hierarchical,negative,1.714868294,0.198,0.2,0,1,Baseline,,none,none
+sales_brand_all-benefit_trade_tpr_Effervescent,,hierarchical,positive,1.160814286,0.198,0.2,0,0,Trade,,none,none
+sales_brand_all-benefit_trade_tpr_Liquid,,hierarchical,positive,5.952191786,0.198,0.2,0,0,Trade,,none,none
+sales_brand_all-benefit_trade_tpr_Tabs,,hierarchical,positive,5.925077221,0.198,0.2,0,0,Trade,,none,none
+sales_market_all-benefit_base_sales-volume,,hierarchical,positive,0.75619131,0.198,0.2,0,0,Competitor Sales,,none,none
+sales_market_all-benefit_price_base-price_Tabs,,hierarchical,positive,1.427540093,0.198,0.2,0,0,Competitor Price,,none,none
