@@ -2,4 +2,4 @@ snapshots
 __pycache__/
 tests
 CLAUDE.md
-outputs
+codebase1_hierarchical_mmm/outputs

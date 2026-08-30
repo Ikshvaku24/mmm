@@ -94,6 +94,194 @@ SCALE_HELP = """  none           divide by 1 - pass the column through unchanged
 BUCKET_ORDER = ["hpos", "hneg", "hfree",
                 "ipos", "ineg", "ifree",
                 "gpos", "gneg", "gfree"]
+# ---------------------------------------------------------------------------
+# Period cadence: one knob for every "how many periods?" number in the pipeline
+# ---------------------------------------------------------------------------
+VALID_CADENCE = ("auto", "weekly", "monthly")
+
+
+@dataclass(frozen=True)
+class PeriodPlan:
+    """Every period-count the pipeline needs, derived from the data cadence.
+
+    The same model is run on two shapes of panel and each one has its own idea
+    of "a year", "a sensible holdout" and "a CV fold":
+
+        weekly    104 periods = 2 years   91 train / 13 test   MAT = 52 + 52
+        monthly    24 periods = 2 years   21 train /  3 test   MAT = 12 + 12
+
+    Hard-coding 13 and 52 works for the retailer panel and silently produces
+    nonsense on the monthly one - a 13-MONTH holdout out of 24 is over half the
+    data, and a 52-month MAT window does not exist. Set `cadence` once and every
+    downstream number follows.
+    """
+    cadence: str                  # "weekly" | "monthly"
+    periods_per_year: int         # 52 | 12
+    unit: str                     # "weeks" | "months"
+    holdout_periods: int          # RunConfig  - 13 | 3  (one quarter)
+    mat_periods: int              # OutputConfig - the MAT block length
+    cv_horizon: int               # CVConfig   - 13 | 3
+    cv_min_train_periods: int     # CVConfig   - one year = 50% of a 2-yr panel
+    cv_n_folds: int               # CVConfig   - fewer folds when periods are scarce
+    cv_draws: int | None          # CVConfig   - None = leave the sampler alone
+    cv_tune: int | None
+
+
+PERIOD_PRESETS = {
+    "weekly": PeriodPlan(
+        cadence="weekly", periods_per_year=52, unit="weeks",
+        holdout_periods=13,          # one quarter
+        mat_periods=52,
+        cv_horizon=13, cv_min_train_periods=52, cv_n_folds=5,
+        cv_draws=None, cv_tune=None),   # matches the historic defaults exactly
+    "monthly": PeriodPlan(
+        cadence="monthly", periods_per_year=12, unit="months",
+        holdout_periods=3,           # one quarter
+        mat_periods=12,
+        cv_horizon=3, cv_min_train_periods=12, cv_n_folds=3,
+        # 24 months with horizon=3 and min_train=12 admits at most 4 folds, and
+        # each fold is a full refit on 21 rows per region - cheap to sample but
+        # there is little for NUTS to learn, so shorter chains are plenty.
+        cv_draws=500, cv_tune=500),
+}
+
+
+def infer_cadence(dates) -> str:
+    """'weekly' or 'monthly' from the median spacing of the observed dates."""
+    uniq = pd.DatetimeIndex(np.sort(pd.DatetimeIndex(
+        pd.to_datetime(pd.Series(np.asarray(dates)))).unique()))
+    if len(uniq) < 2:
+        return "weekly"
+    gap = float(np.median(np.diff(uniq.to_numpy())
+                          .astype("timedelta64[D]").astype(float)))
+    if gap <= 0:
+        return "weekly"
+    per_year = 365.25 / gap
+    if per_year >= 26:
+        return "weekly"
+    if per_year < 3:
+        warnings.warn(
+            f"date spacing of {gap:.0f} days implies {per_year:.1f} periods per "
+            "year, which is neither weekly nor monthly. Treating it as monthly; "
+            "set cadence= explicitly if that is wrong.")
+    return "monthly"
+
+
+def resolve_period_plan(cadence: str = "auto", dates=None) -> PeriodPlan:
+    """cadence + (optionally) the data -> the full set of period counts."""
+    c = str(cadence or "auto").strip().lower()
+    if c not in VALID_CADENCE:
+        raise ValueError(f"cadence must be one of {VALID_CADENCE}, got {cadence!r}")
+    if c == "auto":
+        if dates is None:
+            raise ValueError(
+                "cadence='auto' needs the dates to infer from. Pass dates=, or "
+                "set cadence='weekly'/'monthly' explicitly.")
+        c = infer_cadence(dates)
+    return PERIOD_PRESETS[c]
+
+
+VALID_SD_BASIS = ("log", "relative", "absolute")
+VALID_MEAN_BASIS = ("median", "mean")
+
+SD_BASIS_HELP = """  log        the number IS the sd parameter the model samples with. For a
+             signed feature that is the LOG-scale sigma (0.7 ~ a factor of 2);
+             for a free feature it is a plain sd in coefficient units.
+  relative   the number is a FRACTION: 0.2 = "+/-20%". Converted for you --
+             signed: sigma = sqrt(log(1 + rel^2));  free: sd = rel * |mean|.
+  absolute   the number is in COEFFICIENT units. Converted for you --
+             signed: sigma = sqrt(log(1 + (sd/mean)^2));  free: used as-is."""
+
+MEAN_BASIS_HELP = """  median     prior_mean is the MEDIAN coefficient  -> mu = log(m)
+  mean       prior_mean is the MEAN coefficient    -> mu = log(m) - sigma^2/2"""
+
+
+def lognormal_sigma(rel_sd: float) -> float:
+    """Log-scale sigma that gives a coefficient of variation of `rel_sd`.
+
+        sigma = sqrt(log(1 + (s/m)^2))
+
+    This is the exact conversion, not the sigma ~ s/m approximation: they agree
+    to 2% at rel_sd=0.2 but diverge fast (at 1.0 the approximation is 20% off).
+    """
+    r = float(rel_sd)
+    if not np.isfinite(r) or r <= 0:
+        raise ValueError(f"relative sd must be finite and > 0, got {rel_sd!r}")
+    return float(np.sqrt(np.log(1.0 + r * r)))
+
+
+def resolve_prior_params(prior_mean: float, prior_sd: float, sign: str,
+                         sd_basis: str = "log", mean_basis: str = "median",
+                         label: str = "") -> tuple[float, float]:
+    """(prior_mean, prior_sd) as WRITTEN -> (mu, sigma) as SAMPLED.
+
+    A signed feature is built as beta = +/-exp(Normal(mu, sigma)), so both
+    numbers change meaning on the way in. A free feature is Normal(mu, sigma)
+    directly, so mu passes through untouched and only the sd basis applies.
+
+    THE MEDIAN/MEAN CHOICE. exp(Normal(mu, sigma)) is right-skewed:
+
+        median = exp(mu)              mean = exp(mu + sigma^2/2)
+
+    so "prior_mean = 0.05" is ambiguous until you say which one you meant, and
+    the two differ by exp(-sigma^2/2): 2% at sigma=0.2, 12% at 0.5, 33% at 0.9.
+    Neither reading is wrong; `mean_basis` makes the choice explicit. Default is
+    "median" because that is what this codebase has always done and what the
+    contribution reconciliation was validated against.
+    """
+    m, s = float(prior_mean), float(prior_sd)
+    sd_basis = str(sd_basis).strip().lower()
+    mean_basis = str(mean_basis).strip().lower()
+    tag = f"{label}: " if label else ""
+    if sd_basis not in VALID_SD_BASIS:
+        raise ValueError(f"{tag}prior_sd_basis must be one of {VALID_SD_BASIS}, "
+                         f"got {sd_basis!r}. " + SD_BASIS_HELP)
+    if mean_basis not in VALID_MEAN_BASIS:
+        raise ValueError(f"{tag}prior_mean_basis must be one of "
+                         f"{VALID_MEAN_BASIS}, got {mean_basis!r}. "
+                         + MEAN_BASIS_HELP)
+
+    if sign == "free":
+        # Normal(mu, sigma): no exponential, so mean == median and there is no
+        # log scale. "relative" still means something useful (a sd expressed as
+        # a fraction of the location), "absolute" is the identity.
+        if sd_basis == "relative":
+            sigma = s * abs(m)
+            if sigma <= 0:
+                raise ValueError(
+                    f"{tag}prior_sd_basis='relative' needs a non-zero "
+                    f"prior_mean to be a fraction OF (got {m}). Use "
+                    "prior_sd_basis='absolute' for a free feature centred on 0.")
+        else:
+            sigma = s
+        return m, float(sigma)
+
+    if m <= 0:
+        raise ValueError(f"{tag}sign-constrained features need prior_mean > 0")
+    if sd_basis == "log":
+        sigma = s
+    elif sd_basis == "relative":
+        sigma = lognormal_sigma(s)
+    else:                                    # absolute, in coefficient units
+        sigma = lognormal_sigma(s / m)
+    mu = np.log(m)
+    if mean_basis == "mean":
+        mu = mu - 0.5 * sigma * sigma
+    return float(mu), float(sigma)
+
+
+def lognormal_moments(mu: float, sigma: float, sgn: float = 1.0) -> dict:
+    """Back-transform (mu, sigma) to what the COEFFICIENT prior actually says."""
+    med = np.exp(mu)
+    mean = np.exp(mu + 0.5 * sigma * sigma)
+    sd = mean * np.sqrt(max(np.exp(sigma * sigma) - 1.0, 0.0))
+    lo, hi = np.exp(mu - 1.6448536 * sigma), np.exp(mu + 1.6448536 * sigma)
+    if sgn < 0:
+        med, mean, lo, hi = -med, -mean, -hi, -lo
+    return {"median": float(med), "mean": float(mean), "sd": float(sd),
+            "q05": float(lo), "q95": float(hi)}
+
+
 _POOL_PREFIX = {"hierarchical": "h", "independent": "i", "global": "g"}
 
 
@@ -150,6 +338,17 @@ class FeatureSpec:
     center_mode: str | None = None     # "none" | "mean". Explicit override of the
                                        # `center` flag. None = derive from `center`
                                        # (and from sign="free", always centred).
+    prior_sd_basis: str = "log"        # how to READ prior_sd / regional_sd:
+                                       # "log" (as-is), "relative" (a fraction,
+                                       # 0.2 = +/-20%), "absolute" (coefficient
+                                       # units). See SD_BASIS_HELP.
+    prior_mean_basis: str = "median"   # is prior_mean the MEDIAN or the MEAN of
+                                       # the coefficient? Only bites for signed
+                                       # features. See MEAN_BASIS_HELP.
+    # ---- derived, filled in by resolved(); never set these by hand --------
+    mu_log: float | None = None        # the location the model actually samples
+    sigma_log: float | None = None     # the sd the model actually samples
+    regional_sd_log: float | None = None   # ditto for the cross-region tau
     scale_mode: str | None = None      # "none" | "sd" | "mean" | "mean_positive" |
                                        # "max". None = the legacy default for this
                                        # feature: "sd" when centred, else
@@ -283,6 +482,32 @@ class FeatureSpec:
             if rp.prior_mean is not None or rp.prior_sd is not None:
                 clean[str(reg)] = rp
         s.region_priors = clean
+
+        # ---- convert the written prior into what the model samples --------
+        # Done HERE, once, rather than in model.py, so the numbers can be
+        # reported and tested without PyMC installed.
+        s.prior_sd_basis = str(s.prior_sd_basis).strip().lower()
+        s.prior_mean_basis = str(s.prior_mean_basis).strip().lower()
+        s.mu_log, s.sigma_log = resolve_prior_params(
+            s.prior_mean, s.prior_sd, s.sign,
+            s.prior_sd_basis, s.prior_mean_basis, label=s.name)
+        # tau lives on the same axis as sigma, so it takes the same basis. Its
+        # "mean" has no meaning (it is a spread, not a location), so the
+        # mean_basis never applies to it.
+        if s.regional_sd > 0:
+            _, s.regional_sd_log = resolve_prior_params(
+                s.prior_mean, s.regional_sd, s.sign,
+                s.prior_sd_basis, "median", label=f"{s.name} regional_sd")
+        else:
+            s.regional_sd_log = float(s.regional_sd)
+        # the < 0.05 warning above tests the WRITTEN number; under a converted
+        # basis the sampled sigma is what matters, so re-check it
+        if s.sign != "free" and s.prior_sd_basis != "log" and s.sigma_log < 0.05:
+            warnings.warn(
+                f"{s.name}: prior_sd={s.prior_sd:.4g} with "
+                f"prior_sd_basis={s.prior_sd_basis!r} converts to a log-scale "
+                f"sigma of {s.sigma_log:.4g}, which pins the coefficient to "
+                f"about +/-{s.sigma_log:.1%}. The data cannot move it.")
         return s
 
     # -- per-region prior lookup (falls back to the feature-level prior) ----
@@ -297,6 +522,22 @@ class FeatureSpec:
         if rp is not None and rp.prior_sd is not None:
             return float(rp.prior_sd)
         return float(self.prior_sd)
+
+    # -- the SAMPLED parameters (post basis conversion) --------------------
+    # model.py uses these, never the raw prior_mean/prior_sd, so the median-vs-
+    # mean and percentage conversions happen in exactly one place.
+    def sampled_params_for(self, region: str) -> tuple[float, float]:
+        """(mu, sigma) for this region, honouring any per-region override."""
+        return resolve_prior_params(
+            self.prior_mean_for(region), self.prior_sd_for(region), self.sign,
+            self.prior_sd_basis, self.prior_mean_basis,
+            label=f"{self.name}[{region}]")
+
+    def mu_log_for(self, region: str) -> float:
+        return self.sampled_params_for(region)[0]
+
+    def sigma_log_for(self, region: str) -> float:
+        return self.sampled_params_for(region)[1]
 
 
 def bucket_name(spec: FeatureSpec) -> str:
@@ -329,6 +570,13 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
                hierarchical/global from the `hierarchical` column.
       baseline (0/1) 1 to fold the feature into the baseline instead of
                reporting it as an incremental effect.
+      prior_sd_basis    "log" (default) | "relative" | "absolute". How to read
+               global_prior_sd AND regional_sd_prior. Set "relative" and write
+               0.2 to mean "+/-20%" - the sqrt(log(1+r^2)) conversion is then
+               done for you. See SD_BASIS_HELP.
+      prior_mean_basis  "median" (default) | "mean". Whether global_prior_mean
+               is the median or the mean of the coefficient; "mean" subtracts
+               sigma^2/2 from mu. Signed features only. See MEAN_BASIS_HELP.
 
     PER-REGION rows (optional): same file, with `region` filled in. They override
     the feature-level prior for that region only:
@@ -374,6 +622,8 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             pillar=_cell(r, "pillar") or "",
             center_mode=_cell(r, "center_mode"),
             scale_mode=_cell(r, "scale_mode"),
+            prior_sd_basis=(_cell(r, "prior_sd_basis") or "log"),
+            prior_mean_basis=(_cell(r, "prior_mean_basis") or "median"),
         )
         by_name[name] = spec
         specs.append(spec)
@@ -501,7 +751,14 @@ class RunConfig:
                                 # coefficients must shrink to match - only use it
                                 # when your priors were derived on that same
                                 # single scale.
-    holdout_periods: int = 0            # last N dates held out per region for OOS metrics
+    cadence: str = "auto"       # "auto" | "weekly" | "monthly". Sets every
+                                # period count downstream. "auto" infers it from
+                                # the observed date spacing in prepare_data.
+    holdout_periods: int | None = 0     # last N dates held out per region for OOS
+                                # metrics. None = take it from the cadence preset
+                                # (13 weeks / 3 months - one quarter either way).
+                                # The default stays 0 so existing callers are
+                                # untouched.
     report_draws: int = 400             # posterior draws used for decomposition/plots
     on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail:
                                           # "fail" raises instead of silently
@@ -531,6 +788,13 @@ class RunConfig:
             raise ValueError(f"dv_scale must be one of {VALID_SCALE}. " + SCALE_HELP)
         if self.dv_scale_scope not in {"region", "global"}:
             raise ValueError("dv_scale_scope must be 'region' or 'global'")
+        self.cadence = str(self.cadence or "auto").strip().lower()
+        if self.cadence not in VALID_CADENCE:
+            raise ValueError(f"cadence must be one of {VALID_CADENCE}, "
+                             f"got {self.cadence!r}")
+        if self.holdout_periods is not None and self.holdout_periods < 0:
+            raise ValueError("holdout_periods must be >= 0 (or None for the "
+                             "cadence preset)")
         if self.on_convergence_failure not in {"warn", "fail"}:
             raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
         if self.zero_threshold_rel < 0:
@@ -580,6 +844,12 @@ class OutputConfig:
     model_input_matrix: bool = True     # every row exactly as the model sees it
     model_input_summary: bool = True    # per region x feature scaled-column stats
     data_plots: bool = True             # kpi_by_region.png
+    prior_summary: bool = True          # what each written prior means as a
+                                        # coefficient distribution (mu/sigma
+                                        # actually sampled + implied median,
+                                        # mean, sd and 90% interval)
+    # ---- 02_convergence ---------------------------------------------------
+    contraction_plot: bool = True       # prior_posterior_contraction.png
     # ---- 03_coefficients --------------------------------------------------
     forest_plots: bool = True
     # ---- 04_fit -----------------------------------------------------------
@@ -593,6 +863,10 @@ class OutputConfig:
     contribution_plots: bool = True
     # ---- options ----------------------------------------------------------
     period_split: str = "mat"           # "none" | "week" | "year" | "mat"
+    cadence: str = "auto"               # "auto" | "weekly" | "monthly". Sets the
+                                        # MAT block length: 52 periods weekly,
+                                        # 12 monthly. "auto" infers it from the
+                                        # observed date spacing.
     include_raw_features: bool = True   # also dump pre-scaling feature values
     rope_scaled: float = 0.01           # region of practical equivalence, on the
                                         # SCALED coefficient axis (KPI sd per
@@ -604,10 +878,15 @@ class OutputConfig:
                                         # construction. 0.01 = "moves sales by
                                         # less than 1% of a region's sd".
                                         # Set 0 to skip the calculation.
+    # ---- figures ----------------------------------------------------------
+    # Applied to EVERY chart the run writes, via plotting.set_figure_defaults.
+    fig_dpi: int = 160                  # 160 stays legible pasted into a deck
+    fig_scale: float = 1.4              # multiplies every figsize; raise for
+                                        # projection, lower to fit more on a page
 
     _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
-              "forest_plots", "actual_vs_predicted", "fit_plots",
-              "contribution_summary", "contribution_timeseries",
+              "prior_summary", "contraction_plot", "forest_plots", "actual_vs_predicted",
+              "fit_plots", "contribution_summary", "contribution_timeseries",
               "contribution_math", "contribution_reconciliation",
               "contribution_plots")
 
@@ -615,8 +894,16 @@ class OutputConfig:
         if self.period_split not in {"none", "week", "year", "mat"}:
             raise ValueError(
                 "period_split must be 'none', 'week', 'year' or 'mat'")
+        self.cadence = str(self.cadence or "auto").strip().lower()
+        if self.cadence not in VALID_CADENCE:
+            raise ValueError(f"cadence must be one of {VALID_CADENCE}, "
+                             f"got {self.cadence!r}")
         if self.rope_scaled < 0:
             raise ValueError("rope_scaled must be >= 0")
+        if self.fig_dpi < 50:
+            raise ValueError("fig_dpi must be >= 50")
+        if self.fig_scale <= 0:
+            raise ValueError("fig_scale must be > 0")
 
     @classmethod
     def core_only(cls, **overrides) -> "OutputConfig":
@@ -641,11 +928,39 @@ class CVConfig:
     Fold k trains on everything before its test window and predicts the next
     `horizon` periods; origins step back through the series so accuracy and
     coefficient stability are measured across several windows, not one.
+
+    Every count defaults to None, meaning "take it from the cadence preset".
+    For a WEEKLY panel the preset reproduces the historic hard-coded defaults
+    exactly (13 / 5 / 52), so nothing moves; a MONTHLY panel gets 3 / 3 / 12
+    plus shorter chains, because 24 months cannot support a 13-period horizon
+    or a 52-period minimum training window.
     """
-    horizon: int = 13                  # test periods per fold
-    n_folds: int = 5
+    cadence: str = "auto"              # "auto" | "weekly" | "monthly"
+    horizon: int | None = None         # test periods per fold  (13 wk / 3 mo)
+    n_folds: int | None = None         # (5 wk / 3 mo)
     step: int | None = None            # spacing between origins (default: horizon)
-    min_train_periods: int = 52        # skip folds with less training data
+    min_train_periods: int | None = None   # (52 wk / 12 mo = one year)
     draws: int | None = None           # override sampler draws for CV speed
     tune: int | None = None
     make_plots: bool = True
+
+    def __post_init__(self):
+        self.cadence = str(self.cadence or "auto").strip().lower()
+        if self.cadence not in VALID_CADENCE:
+            raise ValueError(f"cadence must be one of {VALID_CADENCE}, "
+                             f"got {self.cadence!r}")
+
+    def resolved(self, plan: "PeriodPlan") -> "CVConfig":
+        """Fill every unset count from the cadence preset. Explicit wins."""
+        from dataclasses import replace as _replace
+        return _replace(
+            self,
+            cadence=plan.cadence,
+            horizon=plan.cv_horizon if self.horizon is None else self.horizon,
+            n_folds=plan.cv_n_folds if self.n_folds is None else self.n_folds,
+            min_train_periods=(plan.cv_min_train_periods
+                               if self.min_train_periods is None
+                               else self.min_train_periods),
+            draws=plan.cv_draws if self.draws is None else self.draws,
+            tune=plan.cv_tune if self.tune is None else self.tune,
+        )

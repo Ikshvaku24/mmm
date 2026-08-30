@@ -36,7 +36,8 @@ import os
 import numpy as np
 import pandas as pd
 
-from config import OutputConfig
+from config import (PERIOD_PRESETS, OutputConfig,
+                    lognormal_moments)
 
 BASELINE_CORE = "__baseline_core__"
 ACTUAL_ROW = "Sales Volume (Actual)"
@@ -45,7 +46,21 @@ ACTUAL_ROW = "Sales Volume (Actual)"
 # --------------------------------------------------------------------------
 # reporting periods
 # --------------------------------------------------------------------------
-def period_labels(dates, mode: str = "mat") -> np.ndarray:
+def _mat_periods(pdata, out_cfg) -> int | None:
+    """MAT block length: OutputConfig.cadence wins, else the run's PeriodPlan.
+
+    Returns None when neither is pinned, which leaves period_labels to infer it
+    from the date spacing exactly as before.
+    """
+    cad = str(getattr(out_cfg, "cadence", "auto") or "auto").lower()
+    if cad in ("weekly", "monthly"):
+        return PERIOD_PRESETS[cad].mat_periods
+    plan = getattr(pdata, "plan", None)
+    return getattr(plan, "mat_periods", None) if plan is not None else None
+
+
+def period_labels(dates, mode: str = "mat",
+                  mat_periods: int | None = None) -> np.ndarray:
     """Label each observation with a reporting period.
 
     "none"  everything in one "Total" block
@@ -88,9 +103,15 @@ def period_labels(dates, mode: str = "mat") -> np.ndarray:
     n = len(uniq)
     if n < 2:
         return np.array(["MAT 1"] * len(dts), dtype=object)
-    gap_days = float(np.median(np.diff(uniq.to_numpy()).astype("timedelta64[D]")
-                               .astype(float)))
-    per_year = max(1, int(round(365.25 / gap_days))) if gap_days > 0 else n
+    if mat_periods:
+        # an explicit cadence (OutputConfig.cadence / the run's PeriodPlan)
+        # beats inference - a panel with irregular gaps can otherwise round to
+        # the wrong number of periods per year
+        per_year = int(mat_periods)
+    else:
+        gap_days = float(np.median(np.diff(uniq.to_numpy())
+                                   .astype("timedelta64[D]").astype(float)))
+        per_year = max(1, int(round(365.25 / gap_days))) if gap_days > 0 else n
 
     if n >= 2 * per_year:
         mat2 = per_year               # most recent full year
@@ -125,6 +146,85 @@ def _region_col(pdata) -> np.ndarray:
 # --------------------------------------------------------------------------
 # 01_data - the transformed matrix the model actually receives
 # --------------------------------------------------------------------------
+def write_prior_summary(pdata, outdir: str, out_cfg=None) -> pd.DataFrame:
+    """What each written prior actually MEANS as a coefficient distribution.
+
+    The prior file is written in convenient units; the model samples something
+    else. For a sign-constrained feature it samples
+
+        beta = +/- exp(Normal(mu, sigma))
+
+    so neither `global_prior_mean` nor `global_prior_sd` is the number the
+    sampler sees. This file prints both sides, per feature and per region:
+
+      input_*        exactly what is in feature_priors.csv
+      mu_log/sigma_log   the parameters actually handed to PyMC
+      implied_*      the (mu, sigma) pair back-transformed into COEFFICIENT
+                     units - median, mean, sd and a 90% interval
+
+    Read it to answer two questions the prior file cannot answer on its own:
+      1. "I wrote prior_sd=0.2 - is the coefficient really +/-20%?"
+         Compare implied_q05/implied_q95 against implied_median.
+      2. "Is my prior_mean the median or the mean?" They differ by
+         exp(sigma^2/2), which is 2% at sigma=0.2 but 33% at sigma=0.9;
+         implied_median and implied_mean are both printed so the gap is visible
+         rather than assumed.
+    """
+    specs = _spec_map(pdata)
+    rows = []
+    for name, s in specs.items():
+        sgn = {"positive": 1.0, "negative": -1.0}.get(s.sign, 0.0)
+        dist = ("lognormal" if s.sign != "free" else "normal")
+
+        def _row(region, in_mean, in_sd, mu, sigma, is_override):
+            if s.sign == "free":
+                mom = {"median": mu, "mean": mu, "sd": sigma,
+                       "q05": mu - 1.6448536 * sigma,
+                       "q95": mu + 1.6448536 * sigma}
+            else:
+                mom = lognormal_moments(mu, sigma, sgn)
+            return {
+                "feature": name,
+                "region": region,
+                "is_region_override": is_override,
+                "pooling": s.pooling,
+                "sign_constraint": s.sign,
+                "distribution": (f"{dist}({'+' if sgn > 0 else '-'})"
+                                 if sgn else dist),
+                # ---- as written in feature_priors.csv --------------------
+                "input_prior_mean": float(in_mean),
+                "input_prior_sd": float(in_sd),
+                "input_regional_sd": float(s.regional_sd),
+                "prior_sd_basis": s.prior_sd_basis,
+                "prior_mean_basis": s.prior_mean_basis,
+                # ---- as sampled by the model ------------------------------
+                "mu_log": float(mu),
+                "sigma_log": float(sigma),
+                "regional_sd_log": (float(s.regional_sd_log)
+                                    if s.regional_sd_log is not None else np.nan),
+                # ---- back in coefficient units ----------------------------
+                "implied_median": mom["median"],
+                "implied_mean": mom["mean"],
+                "implied_sd": mom["sd"],
+                "implied_q05": mom["q05"],
+                "implied_q95": mom["q95"],
+                "implied_rel_sd": (abs(mom["sd"] / mom["mean"])
+                                   if mom["mean"] else np.nan),
+                "units": "scaled axis (KPI scale per feature scale)",
+            }
+
+        rows.append(_row("__population__", s.prior_mean, s.prior_sd,
+                         s.mu_log, s.sigma_log, False))
+        for r in pdata.region_names:
+            mu_r, sg_r = s.sampled_params_for(r)
+            rp = s.region_priors.get(r)
+            rows.append(_row(r, s.prior_mean_for(r), s.prior_sd_for(r),
+                             mu_r, sg_r, rp is not None))
+    df = pd.DataFrame(rows)
+    df.to_csv(os.path.join(outdir, "prior_summary.csv"), index=False)
+    return df
+
+
 def write_model_input(pdata, outdir: str, out_cfg: OutputConfig | None = None) -> None:
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
@@ -264,7 +364,8 @@ def write_actual_vs_predicted(decomp, pdata, outdir: str,
         "region": _region_col(pdata),
         "date": pd.to_datetime(pdata.dates.values),
         "dataset": np.where(pdata.train_mask, "train", "test"),
-        "period": period_labels(pdata.dates.values, out_cfg.period_split),
+        "period": period_labels(pdata.dates.values, out_cfg.period_split,
+                                _mat_periods(pdata, out_cfg)),
         "actual": actual, "fitted": med, "residual": resid,
         "abs_pct_error": ape,
         "fitted_lo90_mean": m_lo, "fitted_hi90_mean": m_hi,
@@ -295,7 +396,8 @@ def _component_frame(decomp, pdata, out_cfg: OutputConfig) -> pd.DataFrame:
     region = _region_col(pdata)
     dates = pd.to_datetime(pdata.dates.values)
     dataset = np.where(pdata.train_mask, "train", "test")
-    period = period_labels(pdata.dates.values, out_cfg.period_split)
+    period = period_labels(pdata.dates.values, out_cfg.period_split,
+                                _mat_periods(pdata, out_cfg))
 
     parts = [(BASELINE_CORE, "baseline_core", "Baseline", np.median(core, axis=0))]
     for name, vals in decomp.contrib_median.items():
@@ -339,7 +441,8 @@ def write_contribution_timeseries(comp: pd.DataFrame, decomp, pdata,
         "region": _region_col(pdata),
         "date": pd.to_datetime(pdata.dates.values),
         "dataset": np.where(pdata.train_mask, "train", "test"),
-        "period": period_labels(pdata.dates.values, out_cfg.period_split),
+        "period": period_labels(pdata.dates.values, out_cfg.period_split,
+                                _mat_periods(pdata, out_cfg)),
     })
     extra = []
     for name, group, vals in (
@@ -390,7 +493,8 @@ def write_contribution_summary(comp: pd.DataFrame, decomp, pdata, outdir: str,
     obs = pd.DataFrame({
         "region": _region_col(pdata),
         "date": pd.to_datetime(pdata.dates.values),
-        "period": period_labels(pdata.dates.values, out_cfg.period_split),
+        "period": period_labels(pdata.dates.values, out_cfg.period_split,
+                                _mat_periods(pdata, out_cfg)),
         "actual": pdata.y_orig, "fitted": med})
 
     periods = list(pd.unique(obs["period"]))

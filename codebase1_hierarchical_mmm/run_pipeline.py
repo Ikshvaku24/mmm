@@ -41,6 +41,7 @@ from fit import fit, sample_prior
 from model import build_model
 from outputs import (coefficient_report, compute_decomposition,
                      contribution_report, fit_report, prior_predictive_plot)
+from plotting import set_figure_defaults
 
 
 def run(df: pd.DataFrame,
@@ -59,6 +60,9 @@ def run(df: pd.DataFrame,
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
 
+    # one place sets figure size/resolution for every chart in the run
+    set_figure_defaults(dpi=out_cfg.fig_dpi, scale=out_cfg.fig_scale)
+
     print("[1/5] preparing data")
     pdata = prepare_data(df, run_cfg, model_cfg)
     write_data_stage_outputs(pdata, dirs["01_data"], out_cfg)
@@ -71,7 +75,7 @@ def run(df: pd.DataFrame,
 
     print("[3/5] convergence diagnostics")
     convergence_report(idata, dirs["02_convergence"])
-    prior_posterior_report(idata, dirs["02_convergence"])
+    prior_posterior_report(idata, dirs["02_convergence"], out_cfg)
     prior_predictive_plot(idata, pdata, dirs["02_convergence"])
     enforce_convergence(quick_convergence_checks(idata),
                         run_cfg.on_convergence_failure)

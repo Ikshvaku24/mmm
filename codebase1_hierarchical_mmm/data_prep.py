@@ -42,7 +42,7 @@ import numpy as np
 import pandas as pd
 
 from config import (FeatureSpec, ModelConfig, RunConfig, bucket_features,
-                    validate_region_priors)
+                    resolve_period_plan, validate_region_priors)
 
 
 def resolve_scaling(v_train: np.ndarray, center_mode: str, scale_mode: str,
@@ -149,6 +149,10 @@ class PreparedData:
     train_mask: np.ndarray          # (n_obs,) bool
     test_mask: np.ndarray
     x_scale_table: pd.DataFrame = field(default=None)   # region x feature scaling stats
+    plan: object = None             # the resolved PeriodPlan for this panel -
+                                    # carries cadence, MAT length and the CV
+                                    # defaults so nothing downstream has to
+                                    # re-infer them from the dates
     X_raw: np.ndarray = None        # (n_obs, k) the SAME columns before scaling
                                     # (after dust-zeroing) - kept so the model
                                     # input can be exported raw next to scaled
@@ -195,8 +199,20 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
 
     # ---- train / holdout split by date ------------------------------------
     all_dates = np.sort(d[dc].unique())
-    if run_cfg.holdout_periods > 0:
-        cutoff = all_dates[-run_cfg.holdout_periods]
+    # One cadence decision for the whole run. "auto" reads the observed date
+    # spacing, so a 104-week panel gets 13/52 and a 24-month panel gets 3/12
+    # without anyone remembering to change three separate numbers.
+    plan = resolve_period_plan(run_cfg.cadence, all_dates)
+    holdout = (plan.holdout_periods if run_cfg.holdout_periods is None
+               else int(run_cfg.holdout_periods))
+    if holdout >= len(all_dates):
+        raise ValueError(
+            f"holdout_periods={holdout} but the panel has only "
+            f"{len(all_dates)} {plan.unit}. A {plan.cadence} panel wants "
+            f"{plan.holdout_periods}; set RunConfig(holdout_periods=None) to "
+            "take that automatically.")
+    if holdout > 0:
+        cutoff = all_dates[-holdout]
         train_mask = (d[dc] < cutoff).to_numpy()
     else:
         train_mask = np.ones(len(d), dtype=bool)
@@ -339,7 +355,7 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         buckets=bucket_features(model_cfg.features),
         X_fourier=Xf, fourier_names=f_names, t=t,
         train_mask=train_mask, test_mask=test_mask,
-        x_scale_table=x_scale_table, X_raw=X_raw,
+        x_scale_table=x_scale_table, X_raw=X_raw, plan=plan,
     )
 
 
@@ -381,31 +397,44 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str,
 
     # the transformed matrix handed to the sampler, plus its column stats -
     # imported here for the same circular-import reason as save_fig below
-    from reconciliation import write_model_input
+    from reconciliation import write_model_input, write_prior_summary
     write_model_input(pdata, outdir, out_cfg)
+
+    # what the written priors mean once converted to the axis the model samples
+    if out_cfg.prior_summary:
+        write_prior_summary(pdata, outdir, out_cfg)
 
     if not out_cfg.data_plots:
         return
 
+    # plotting.py has no project imports, so this one IS safe at module level -
+    # but it is kept local for symmetry with the rest of the lazy plot imports.
+    from plotting import annotate, figsize, save_fig, units_note
+
     ncol = min(4, G)
     nrow = int(np.ceil(G / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(4.5 * ncol, 2.6 * nrow),
+    fig, axes = plt.subplots(nrow, ncol, figsize=figsize(5.0 * ncol, 3.0 * nrow),
                              squeeze=False, sharex=True)
     for g, r in enumerate(pdata.region_names):
         ax = axes[g // ncol][g % ncol]
         m = pdata.region_idx == g
-        ax.plot(pdata.dates[m], pdata.y_orig[m], lw=0.9)
+        ax.plot(pdata.dates[m], pdata.y_orig[m], lw=0.9, label="actual KPI")
         if pdata.test_mask.any():
             mt = m & pdata.test_mask
             if mt.any():
                 ax.axvspan(pdata.dates[mt].min(), pdata.dates[mt].max(),
-                           alpha=0.15, color="orange")
-        ax.set_title(str(r), fontsize=9)
+                           alpha=0.15, color="orange", label="holdout window")
+        annotate(ax, "date (period start)", "KPI (original units, as supplied)",
+                 str(r))
+        ax.tick_params(axis="x", rotation=30, labelsize=7)
+        if g == 0:
+            ax.legend(fontsize=7)
     for k in range(G, nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
-    fig.suptitle("KPI by region (orange = holdout)")
+    fig.suptitle("KPI by region - raw input before any scaling "
+                 "(orange = holdout)", fontsize=11)
+    units_note(fig, "This is the dv column exactly as passed in, BEFORE the "
+                    "per-region centring/scaling the model fits on. Use it to "
+                    "confirm the level and seasonality look right per region.")
     fig.tight_layout()
-    # imported here, not at module level: outputs imports data_prep, so a
-    # top-level import would be circular. By call time both modules are loaded.
-    from outputs import save_fig
     save_fig(fig, os.path.join(outdir, "kpi_by_region.png"))

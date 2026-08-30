@@ -31,27 +31,15 @@ import pandas as pd
 from compat import get_group, has_group
 from config import ModelConfig, OutputConfig, RunConfig
 from data_prep import PreparedData
+from plotting import annotate, figsize, save_fig, units_note
 from reconciliation import (write_actual_vs_predicted,
                             write_contribution_diagnostics)
 
 
-def save_fig(fig, path: str, dpi: int = 130) -> None:
-    """Robust savefig: ensure the directory exists, retry once (the Databricks
-    /Workspace filesystem can transiently fail rapid PNG writes), and on final
-    failure warn-and-continue - a plot must never kill a finished fit."""
-    import time as _time
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    for attempt in (1, 2):
-        try:
-            fig.savefig(path, dpi=dpi)
-            break
-        except OSError as e:
-            if attempt == 2:
-                print(f"[outputs] WARNING: could not save {path}: {e}")
-            else:
-                _time.sleep(0.5)
-                os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
-    plt.close(fig)
+# save_fig now lives in plotting.py so data_prep, diagnostics, outputs and
+# cross_validation all share one definition of size/dpi/labelling. Re-exported
+# here because callers (and tests) have always imported it from outputs.
+__all_plot_helpers__ = (save_fig, figsize, annotate, units_note)
 
 
 # --------------------------------------------------------------------------
@@ -443,20 +431,31 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             lo = np.array([_hdi(arr[:, g])[0] for g in range(arr.shape[1])])
             hi = np.array([_hdi(arr[:, g])[1] for g in range(arr.shape[1])])
             order = np.argsort(med)
-            fig, ax = plt.subplots(figsize=(6, max(2.5, 0.3 * len(order) + 1)))
+            fig, ax = plt.subplots(
+                figsize=figsize(6.5, max(2.5, 0.3 * len(order) + 1.3)))
             ypos = np.arange(len(order))
             ax.errorbar(med[order], ypos,
                         xerr=[med[order] - lo[order], hi[order] - med[order]],
-                        fmt="o", ms=4, lw=1.2, capsize=2)
+                        fmt="o", ms=4, lw=1.2, capsize=2,
+                        label="regional median, 90% HDI")
             ax.set_yticks(ypos)
             ax.set_yticklabels([pdata.region_names[i] for i in order], fontsize=8)
-            if name in popd:
+            has_pop = name in popd
+            if has_pop:
                 ax.axvline(np.median(popd[name]), color="firebrick", ls="--", lw=1,
-                           label="population median")
-                ax.legend(fontsize=8)
-            ax.axvline(0, color="grey", lw=0.8)
-            ax.set_title(f"{name} - regional coefficients, scaled axes "
-                         "(median, 90% HDI)", fontsize=10)
+                           label="population median (pooling centre)")
+            ax.axvline(0, color="grey", lw=0.8, label="no effect")
+            annotate(ax,
+                     "coefficient (scaled axis: KPI sd per feature sd)",
+                     "region",
+                     f"{name} - regional coefficients (median, 90% HDI)",
+                     legend=True, legend_fontsize=7)
+            units_note(fig,
+                       "Scaled axis. Multiply by dv_scale/feature_scale for KPI "
+                       "units per raw feature unit - that conversion is the "
+                       "median_orig_units column of coefficient_report.csv. "
+                       "Regional spread here is tau (cross-region), not prior "
+                       "uncertainty.")
             fig.tight_layout()
             save_fig(fig, os.path.join(fdir, f"{name}.png"))
     return df
@@ -602,38 +601,52 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     G = len(pdata.region_names)
     ncol = min(3, G)
     nrow = int(np.ceil(G / ncol))
-    fig, axes = plt.subplots(nrow, ncol, figsize=(5.5 * ncol, 2.8 * nrow),
+    fig, axes = plt.subplots(nrow, ncol, figsize=figsize(6.0 * ncol, 3.1 * nrow),
                              squeeze=False, sharex=True)
     for g, r in enumerate(pdata.region_names):
         ax = axes[g // ncol][g % ncol]
         mg = pdata.region_idx == g
         ax.fill_between(pdata.dates[mg], p_lo[mg], p_hi[mg], color="tab:blue",
-                        alpha=0.12, label="90% predictive")
+                        alpha=0.12, label="90% predictive interval")
         ax.fill_between(pdata.dates[mg], m_lo[mg], m_hi[mg], color="tab:blue",
-                        alpha=0.30, label="90% mean response")
+                        alpha=0.30, label="90% mean-response interval")
         ax.plot(pdata.dates[mg], pdata.y_orig[mg], color="black", lw=1, label="actual")
-        ax.plot(pdata.dates[mg], med[mg], color="tab:blue", lw=1, label="fitted")
+        ax.plot(pdata.dates[mg], med[mg], color="tab:blue", lw=1, label="fitted (median)")
         mt = mg & pdata.test_mask
         if mt.any():
             ax.axvspan(pdata.dates[mt].min(), pdata.dates[mt].max(),
-                       alpha=0.12, color="orange")
-        ax.set_title(str(r), fontsize=9)
+                       alpha=0.12, color="orange", label="holdout window")
+        annotate(ax, "date", "KPI (original units)", str(r))
+        ax.tick_params(axis="x", rotation=30, labelsize=7)
         if g == 0:
             ax.legend(fontsize=7)
     for k in range(G, nrow * ncol):
         axes[k // ncol][k % ncol].axis("off")
-    fig.suptitle("Actual vs fitted (orange = holdout)")
+    fig.suptitle("Actual vs fitted by region (orange band = holdout)", fontsize=11)
+    units_note(fig, "Y axis is the KPI in ORIGINAL units (inverse-transformed "
+                    "from the scaled axis the model fits on). The mean-response "
+                    "interval covers uncertainty in the fitted line; the wider "
+                    "predictive interval adds observation noise and is the one "
+                    "to judge holdout coverage against.")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "actual_vs_fitted.png"))
 
     resid = pdata.y_orig - med
-    fig, axes = plt.subplots(1, 2, figsize=(10, 3.5))
-    axes[0].scatter(med, resid, s=6, alpha=0.4)
-    axes[0].axhline(0, color="grey", lw=0.8)
-    axes[0].set_xlabel("fitted")
-    axes[0].set_ylabel("residual")
-    axes[1].hist(resid, bins=40)
-    axes[1].set_title("residual distribution")
+    fig, axes = plt.subplots(1, 2, figsize=figsize(11, 4.0))
+    axes[0].scatter(med, resid, s=6, alpha=0.4, label="one region-period")
+    axes[0].axhline(0, color="grey", lw=0.8, label="zero error")
+    annotate(axes[0], "fitted KPI (original units)",
+             "residual = actual - fitted (original units)",
+             "Residual vs fitted (look for funnelling / curvature)",
+             legend=True, legend_fontsize=7)
+    axes[1].hist(resid, bins=40, label="residuals")
+    axes[1].axvline(0, color="grey", lw=0.8, label="zero error")
+    annotate(axes[1], "residual = actual - fitted (original units)",
+             "count (number of region-periods)",
+             "Residual distribution (should be centred on 0)",
+             legend=True, legend_fontsize=7)
+    units_note(fig, "Both panels are in ORIGINAL KPI units, so the spread is "
+                    "directly comparable to weekly sales volume.")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "residuals.png"))
     return dfm
@@ -742,17 +755,28 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     # baseline parts are not switchable levers and dwarf everything else
     port = df[(df["region"] == "__portfolio__") & (df["group"] == "incremental")]
     port = port.reindex(port["median"].abs().sort_values(ascending=False).index).head(top_n)
-    fig, ax = plt.subplots(figsize=(8, max(3, 0.35 * len(port) + 1)))
+    fig, ax = plt.subplots(figsize=figsize(9, max(3, 0.35 * len(port) + 1.4)))
     ypos = np.arange(len(port))
     ax.barh(ypos, port["median"],
             xerr=[port["median"] - port["hdi_low"],
                   port["hdi_high"] - port["median"]],
-            capsize=2, color=np.where(port["median"] >= 0, "tab:blue", "tab:red"))
+            capsize=2, color=np.where(port["median"] >= 0, "tab:blue", "tab:red"),
+            label="median contribution (bar), 90% HDI (whisker)")
     ax.set_yticks(ypos)
     ax.set_yticklabels(port["feature"], fontsize=8)
     ax.invert_yaxis()
-    ax.axvline(0, color="grey", lw=0.8)
-    ax.set_title("Incremental contribution by feature (median, 90% HDI)")
+    ax.axvline(0, color="grey", lw=0.8, label="zero contribution")
+    annotate(ax,
+             "contribution volume (KPI units, summed over the whole window)",
+             "feature",
+             "Incremental contribution by feature - portfolio "
+             "(median, 90% HDI)", legend=True, legend_fontsize=7)
+    units_note(fig, "Blue = positive, red = negative. Volumes are summed over "
+                    "every period and region. What each is measured AGAINST "
+                    "depends on contribution_reference - see the "
+                    "contribution_vs column of contribution_totals.csv "
+                    "(a centred feature is measured vs its own average, "
+                    "not vs zero).")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "contribution_bars.png"))
 
@@ -761,19 +785,27 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
         bp = df[(df["region"] == "__portfolio__")
                 & (df["group"] == "baseline_part")]
         bp = bp.reindex(bp["median"].abs().sort_values(ascending=False).index)
-        fig, ax = plt.subplots(figsize=(8, max(2.5, 0.4 * len(bp) + 1)))
+        fig, ax = plt.subplots(figsize=figsize(9, max(2.5, 0.4 * len(bp) + 1.4)))
         ypos = np.arange(len(bp))
         ax.barh(ypos, bp["median"],
                 xerr=[bp["median"] - bp["hdi_low"],
                       bp["hdi_high"] - bp["median"]],
                 capsize=2,
-                color=np.where(bp["median"] >= 0, "tab:green", "tab:red"))
+                color=np.where(bp["median"] >= 0, "tab:green", "tab:red"),
+                label="median contribution (bar), 90% HDI (whisker)")
         ax.set_yticks(ypos)
         ax.set_yticklabels(bp["feature"], fontsize=8)
         ax.invert_yaxis()
-        ax.axvline(0, color="grey", lw=0.8)
-        ax.set_title("Baseline expanded: what makes up the base "
-                     "(median, 90% HDI)")
+        ax.axvline(0, color="grey", lw=0.8, label="zero contribution")
+        annotate(ax,
+                 "contribution volume (KPI units, summed over the whole window)",
+                 "baseline component",
+                 "Baseline expanded: what makes up the base "
+                 "(median, 90% HDI)", legend=True, legend_fontsize=7)
+        units_note(fig, "__baseline_core__ is the region intercept + "
+                        "seasonality + trend; the other rows are features "
+                        "flagged baseline=1. Together these are the "
+                        "__baseline__ block, not additional to it.")
         fig.tight_layout()
         save_fig(fig, os.path.join(outdir, "baseline_breakdown.png"))
 
@@ -797,17 +829,26 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
         pos = [c for c in cols if weekly[c].sum() >= 0]
         neg = [c for c in cols if weekly[c].sum() < 0]
 
-        fig, ax = plt.subplots(figsize=(11, 5))
+        fig, ax = plt.subplots(figsize=figsize(12, 5.5))
         stack_cols = [base_col] + pos
         ax.stackplot(weekly.index, [weekly[c].clip(lower=0) for c in stack_cols],
                      labels=stack_cols, alpha=0.85)
         if neg:
             ax.stackplot(weekly.index, [weekly[c].clip(upper=0) for c in neg],
-                         labels=neg, alpha=0.85)
+                         labels=[f"{c} (negative)" for c in neg], alpha=0.85)
         ax.plot(actual_weekly.index, actual_weekly.values, color="black", lw=1.2,
-                label="actual")
-        ax.legend(fontsize=7, ncol=3)
-        ax.set_title(title)
+                label="actual KPI")
+        ax.axhline(0, color="grey", lw=0.8)
+        ax.legend(fontsize=7, ncol=3, loc="upper left")
+        annotate(ax, "date (period start)",
+                 "contribution volume (KPI units, all regions summed)", title)
+        ax.tick_params(axis="x", rotation=30, labelsize=8)
+        units_note(fig, "Bands stack to the fitted KPI; the black line is "
+                        "actual, so the gap between the stack top and the line "
+                        "is model error. Negative contributions are drawn "
+                        "below zero rather than netted off, so the visible "
+                        "stack height exceeds the fitted value wherever a "
+                        "driver is pulling sales down.")
         fig.tight_layout()
         save_fig(fig, os.path.join(outdir, fname))
 
@@ -833,11 +874,18 @@ def prior_predictive_plot(idata, pdata: PreparedData, outdir: str) -> None:
         return
     os.makedirs(outdir, exist_ok=True)
     pp = ppd["y_obs"].values.reshape(-1)
-    fig, ax = plt.subplots(figsize=(7, 3.5))
-    ax.hist(pp, bins=60, density=True, alpha=0.5, label="prior predictive (scaled)")
+    fig, ax = plt.subplots(figsize=figsize(8, 4.0))
+    ax.hist(pp, bins=60, density=True, alpha=0.5,
+            label="prior predictive (what the priors alone generate)")
     ax.hist(pdata.y[pdata.train_mask], bins=60, density=True, alpha=0.5,
-            label="actual (scaled)")
-    ax.legend(fontsize=8)
-    ax.set_title("Prior predictive check - KPI scale")
+            label="actual observed KPI")
+    annotate(ax, "KPI (scaled axis - the axis the model samples on)",
+             "density (normalised, so the two are comparable)",
+             "Prior predictive check - are the priors on the right scale?",
+             legend=True, legend_fontsize=8)
+    units_note(fig, "The prior band should COVER the actual distribution and be "
+                    "somewhat wider. Much wider = priors too vague; narrower or "
+                    "offset = priors fight the data, which shows up later as "
+                    "prior-data conflict in prior_posterior_contraction.csv.")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "prior_predictive_check.png"))

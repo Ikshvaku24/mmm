@@ -39,11 +39,14 @@ def _region_prior_arrays(specs, region_names, log_scale: bool):
     a feature with no overrides yields columns that are constant down the region
     axis - i.e. exactly the old behaviour.
     """
-    loc = np.array([[s.prior_mean_for(r) for s in specs] for r in region_names],
-                   dtype=float)
-    sd = np.array([[s.prior_sd_for(r) for s in specs] for r in region_names],
-                  dtype=float)
-    return (np.log(loc) if log_scale else loc), sd
+    # sampled_params_for() owns BOTH conversions - log(mean) for signed
+    # features, and the prior_sd_basis / prior_mean_basis translation. Doing it
+    # in config.py rather than here means it can be reported and unit-tested
+    # without PyMC. `log_scale` is now implicit in the spec's own sign.
+    pairs = [[s.sampled_params_for(r) for s in specs] for r in region_names]
+    loc = np.array([[mu for mu, _ in row] for row in pairs], dtype=float)
+    sd = np.array([[sg for _, sg in row] for row in pairs], dtype=float)
+    return loc, sd
 
 
 def _bucket_betas(model, bname, specs, region_names):
@@ -67,16 +70,22 @@ def _bucket_betas(model, bname, specs, region_names):
     sgn = 1.0 if sign == "positive" else -1.0
     pref = "logbeta" if signed else "beta"
 
-    # feature-level (population) prior, and the per-region grid
-    pop_loc = np.array([s.prior_mean for s in specs], dtype=float)
-    pop_loc = np.log(pop_loc) if signed else pop_loc
-    pop_sd = np.array([s.prior_sd for s in specs], dtype=float)
+    # feature-level (population) prior, and the per-region grid.
+    # mu_log / sigma_log are the SAMPLED parameters, already carrying
+    #   mu     = log(prior_mean)            (prior_mean_basis="median", default)
+    #          = log(prior_mean) - sigma^2/2 (prior_mean_basis="mean")
+    #   sigma  = prior_sd, or sqrt(log(1+r^2)) under prior_sd_basis="relative"
+    # for a signed feature, and pass prior_mean/prior_sd straight through for a
+    # free one. See config.resolve_prior_params.
+    pop_loc = np.array([s.mu_log for s in specs], dtype=float)
+    pop_sd = np.array([s.sigma_log for s in specs], dtype=float)
     reg_loc, reg_sd = _region_prior_arrays(specs, region_names, log_scale=signed)
 
     if pooling == "hierarchical":
         mu = pm.Normal(f"mu_{pref}_{bname}", mu=pop_loc, sigma=pop_sd, dims=dim)
-        tau = pm.HalfNormal(f"tau_{pref}_{bname}",
-                            sigma=np.array([s.regional_sd for s in specs]), dims=dim)
+        tau = pm.HalfNormal(
+            f"tau_{pref}_{bname}",
+            sigma=np.array([s.regional_sd_log for s in specs]), dims=dim)
         z = pm.Normal(f"z_beta_{bname}", 0.0, 1.0, dims=("region", dim))
         eta = mu[None, :] + tau[None, :] * z
         # fixed per-region shift of the shrinkage centre (0 where no override)

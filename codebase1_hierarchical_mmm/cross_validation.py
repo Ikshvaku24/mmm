@@ -17,10 +17,31 @@ fold; for quick sweeps use SamplerConfig(sampler="advi") (PE convention: ADVI
 for CV speed, NUTS for the final fit) or CVConfig(draws=..., tune=...).
 
 Usage:
-    from config import CVConfig, ModelConfig, RunConfig, SamplerConfig
+    from config import CVConfig, ModelConfig, OutputConfig, RunConfig, SamplerConfig
     from cross_validation import run_cv
-    cv = run_cv(df, model_cfg, RunConfig(run_name="fy26"),
-                SamplerConfig(sampler="numpyro"), CVConfig(horizon=13, n_folds=5))
+
+    # WEEKLY (104 weeks): the preset gives horizon 13, 5 folds, min_train 52
+    cv = run_cv(df, model_cfg,
+                run_cfg=RunConfig(run_name="fy26", cadence="weekly"),
+                sampler_cfg=SamplerConfig(sampler="numpyro"),
+                cv_cfg=CVConfig(),               # everything from the preset
+                out_cfg=OutputConfig())          # figure size/dpi only
+
+    # MONTHLY (24 months): horizon 3, 3 folds, min_train 12, draws/tune 500
+    cv = run_cv(df, model_cfg,
+                run_cfg=RunConfig(run_name="bmc", cadence="monthly"),
+                cv_cfg=CVConfig())
+
+CADENCE. Leave `cadence="auto"` and the spacing of the dates decides. Every
+CVConfig count left at None then comes from that preset, so you never hand a
+24-month panel a 13-period horizon. An explicit value always wins:
+CVConfig(horizon=6) keeps 6 and takes the rest from the preset.
+
+`run_cv` does NOT read the model or prior config from anywhere else: pass the
+same `model_cfg` and `run_cfg` you passed to `run()`, or the folds will be
+scaled and pooled differently from the headline fit and the comparison is void.
+`holdout_periods` on the run_cfg is overridden per fold (to cv_cfg.horizon),
+so the value you set for the main run is ignored here rather than compounding.
 
 Outputs (<output_dir>/<run_name>/06_cross_validation/):
     cv_fold_metrics.csv          per fold x region x train/test: all fit metrics
@@ -29,6 +50,7 @@ Outputs (<output_dir>/<run_name>/06_cross_validation/):
     cv_coefficient_stability.csv fold-wise posterior medians per feature/region
     cv_stability_ranking.csv     features ranked by cross-fold instability
     cv_report.md                 headline readout
+    cv_accuracy_by_fold.png      test wMAPE per fold, per region
     stability/<feature>.png      coefficient medians across folds, per region
     fold_k/sampling_log.json     per-fold run manifests
 """
@@ -43,23 +65,31 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
-from config import CVConfig, ModelConfig, RunConfig, SamplerConfig
+from config import (CVConfig, ModelConfig, OutputConfig, RunConfig,
+                    SamplerConfig, resolve_period_plan)
 from data_prep import make_folds, prepare_data
 from diagnostics import quick_convergence_checks
 from fit import fit
 from model import build_model
 from outputs import (beta_draws_by_feature, compute_decomposition,
-                     compute_fit_metrics, save_fig, stack_posterior)
+                     compute_fit_metrics, stack_posterior)
+from plotting import (annotate, figsize, save_fig, set_figure_defaults,
+                      units_note)
 
 
 def run_cv(df: pd.DataFrame,
            model_cfg: ModelConfig,
            run_cfg: RunConfig | None = None,
            sampler_cfg: SamplerConfig | None = None,
-           cv_cfg: CVConfig | None = None) -> dict:
+           cv_cfg: CVConfig | None = None,
+           out_cfg: OutputConfig | None = None) -> dict:
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     cv_cfg = cv_cfg or CVConfig()
+    # out_cfg is used only for figure size/dpi here: CV writes its own tables,
+    # not the staged reconciliation files
+    out_cfg = out_cfg or OutputConfig()
+    set_figure_defaults(dpi=out_cfg.fig_dpi, scale=out_cfg.fig_scale)
     outdir = os.path.join(run_cfg.output_dir, run_cfg.run_name,
                           "06_cross_validation")
     os.makedirs(outdir, exist_ok=True)
@@ -68,8 +98,30 @@ def run_cv(df: pd.DataFrame,
     d = df.copy()
     d[dc] = pd.to_datetime(d[dc])
     dates = np.sort(d[dc].unique())
+
+    # Resolve the cadence ONCE, from the CV config if it pins one, else the run
+    # config, else the data. Every unset count then comes from that preset:
+    #   weekly   horizon 13, 5 folds, min_train 52  (the historic defaults)
+    #   monthly  horizon  3, 3 folds, min_train 12, draws/tune 500
+    cad = cv_cfg.cadence if cv_cfg.cadence != "auto" else run_cfg.cadence
+    plan = resolve_period_plan(cad, dates)
+    cv_cfg = cv_cfg.resolved(plan)
+    print(f"[cv] cadence={plan.cadence} ({plan.periods_per_year} periods/year): "
+          f"horizon={cv_cfg.horizon} {plan.unit}, n_folds={cv_cfg.n_folds}, "
+          f"min_train={cv_cfg.min_train_periods} {plan.unit}")
+    if len(dates) < cv_cfg.min_train_periods + cv_cfg.horizon:
+        raise ValueError(
+            f"{len(dates)} {plan.unit} is too short for CV at this cadence: "
+            f"min_train_periods={cv_cfg.min_train_periods} + "
+            f"horizon={cv_cfg.horizon} needs at least "
+            f"{cv_cfg.min_train_periods + cv_cfg.horizon}. Lower them "
+            "explicitly on CVConfig, or check the cadence was detected right.")
     folds = make_folds(len(dates), cv_cfg.horizon, cv_cfg.n_folds,
                        cv_cfg.step, cv_cfg.min_train_periods)
+    if len(folds) < cv_cfg.n_folds:
+        print(f"[cv] NOTE: {len(folds)} folds fit in {len(dates)} "
+              f"{plan.unit}, not the {cv_cfg.n_folds} requested "
+              "(earlier origins would fall below min_train_periods)")
 
     scfg = sampler_cfg
     if cv_cfg.draws or cv_cfg.tune:
@@ -86,7 +138,8 @@ def run_cv(df: pd.DataFrame,
               f"test {test_span[0]}..{test_span[1]}")
 
         sub = d[d[dc] <= pd.Timestamp(dates[te - 1])]
-        fold_run = replace(run_cfg, holdout_periods=cv_cfg.horizon)
+        fold_run = replace(run_cfg, holdout_periods=cv_cfg.horizon,
+                           cadence=plan.cadence)
         pdata = prepare_data(sub, fold_run, model_cfg)
         region_sets.append(tuple(pdata.region_names))
 
@@ -120,8 +173,12 @@ def run_cv(df: pd.DataFrame,
 
     # ---- summary across folds (test window) --------------------------------
     test = fold_metrics[fold_metrics["dataset"] == "test"]
+    # r2_within_region is included because plain r2 on the __all__ row pools
+    # regions whose levels differ several-fold and reads far too high (v3: 0.994
+    # vs 0.596). Quote the within-region figure.
     agg_cols = [c for c in ["wmape_pct", "mape_pct", "mape_region_weighted_pct",
-                            "mae", "crps", "coverage_90_pred_pct", "r2"]
+                            "mae", "crps", "coverage_90_pred_pct",
+                            "r2_within_region", "r2"]
                 if c in test.columns]
     summary = (test.groupby("region")[agg_cols]
                .agg(["mean", "std"]).round(3))
@@ -144,19 +201,45 @@ def run_cv(df: pd.DataFrame,
         sdir = os.path.join(outdir, "stability")
         os.makedirs(sdir, exist_ok=True)
         for name, grp in coef.groupby("feature"):
-            fig, ax = plt.subplots(figsize=(6, 3.2))
+            fig, ax = plt.subplots(figsize=figsize(7, 3.8))
             for r, gr in grp.groupby("region"):
                 ax.plot(gr["fold"], gr["median"], marker="o", ms=3, lw=1,
                         label=str(r))
-            ax.axhline(0, color="grey", lw=0.8)
-            ax.set_xlabel("fold (chronological)")
-            ax.set_ylabel("posterior median (scaled)")
-            ax.set_title(f"{name} - coefficient stability across CV folds",
-                         fontsize=10)
-            if grp["region"].nunique() <= 10:
-                ax.legend(fontsize=7)
+            ax.axhline(0, color="grey", lw=0.8, label="no effect")
+            ax.set_xticks(sorted(grp["fold"].unique()))
+            annotate(ax,
+                     "CV fold (1 = earliest origin, later folds see more data)",
+                     "posterior median coefficient\n"
+                     "(scaled axis: KPI sd per feature sd)",
+                     f"{name} - coefficient stability across CV folds",
+                     legend=grp["region"].nunique() <= 10, legend_fontsize=7)
+            units_note(fig, "A flat line means the coefficient is stable as the "
+                            "training window grows - the contribution story "
+                            "holds up. A line that swings or changes rank order "
+                            "is fragile, however good the error metric looks.")
             fig.tight_layout()
             save_fig(fig, os.path.join(sdir, f"{name}.png"))
+
+        # accuracy across folds, per region - the other half of the CV story
+        try:
+            fig, ax = plt.subplots(figsize=figsize(8, 4.2))
+            for r, gr in test.groupby("region"):
+                ax.plot(gr["fold"], gr["wmape_pct"], marker="o", ms=3, lw=1,
+                        label=str(r))
+            annotate(ax,
+                     "CV fold (1 = earliest origin, later folds see more data)",
+                     "test wMAPE (%) - lower is better",
+                     "Holdout accuracy across folds",
+                     legend=True, legend_fontsize=7)
+            units_note(fig, "Each point is one refit predicting the next "
+                            f"{cv_cfg.horizon} {plan.unit} it has never seen. Rising "
+                            "error in later folds usually means the most recent "
+                            "window behaves differently (regime change), not "
+                            "that the model got worse.")
+            fig.tight_layout()
+            save_fig(fig, os.path.join(outdir, "cv_accuracy_by_fold.png"))
+        except Exception as e:  # noqa: BLE001 - a plot must never kill a CV run
+            print(f"[cv] WARNING: accuracy plot failed: {e}")
 
     # ---- headline report ----------------------------------------------------
     t_all = test[test["region"] == "__all__"]
@@ -166,7 +249,9 @@ def run_cv(df: pd.DataFrame,
                                | (fold_metrics["divergences"] > 0))]
     lines = [
         "# Expanding-window CV report",
-        f"- folds: {len(folds)}, horizon: {cv_cfg.horizon} periods, "
+        f"- cadence: {plan.cadence} ({plan.periods_per_year} periods/year)",
+        f"- folds: {len(folds)}, horizon: {cv_cfg.horizon} {plan.unit}, "
+        f"min train: {cv_cfg.min_train_periods} {plan.unit}, "
         f"sampler: {scfg.sampler}",
         f"- test wMAPE: {t_all['wmape_pct'].mean():.2f}% "
         f"(+/- {t_all['wmape_pct'].std():.2f} across folds)",

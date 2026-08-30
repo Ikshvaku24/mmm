@@ -53,6 +53,8 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `model_input_matrix` | `model_input_matrix.csv` | 01 |
 | `model_input_summary` | `model_input_summary.csv` | 01 |
 | `data_plots` | `kpi_by_region.png` | 01 |
+| `prior_summary` | `prior_summary.csv` | 01 |
+| `contraction_plot` | `prior_posterior_contraction.png` | 02 |
 | `forest_plots` | `forest/*.png` | 03 |
 | `actual_vs_predicted` | `actual_vs_predicted.csv` | 04 |
 | `fit_plots` | `actual_vs_fitted.png`, `residuals.png` | 04 |
@@ -85,6 +87,11 @@ Two options rather than switches:
   | **more** than 104 | MAT 2 = last 52, MAT 1 = the 52 before, everything older → one **`Pre-MAT`** block. 130 weeks ⇒ Pre-MAT (26) + MAT 1 (52) + MAT 2 (52) |
   | **fewer** than 104 | no full year to roll, so split in half: MAT 1 = older half, MAT 2 = recent half. 80 weeks ⇒ 40 + 40; an odd period goes to MAT 1 |
 
+  **The MAT length follows the cadence.** `OutputConfig(cadence=...)` sets it
+  explicitly (`weekly` → 52, `monthly` → 12); `auto` takes it from the run's
+  `PeriodPlan`, and failing that infers it from the date spacing. So a 24-month
+  panel rolls **12 + 12**, not 52 + 52.
+
   `Pre-MAT` is deliberately *not* folded into MAT 1 — that would make MAT 1 an
   unequal window and a MAT-on-MAT volume comparison would be meaningless. It is
   also not split into further year blocks; if you have several years of history
@@ -99,6 +106,65 @@ Two options rather than switches:
 - **`include_raw_features`** — also dump the pre-scaling feature values into
   `model_input_matrix.csv`. Doubles that file's width; leave it on unless size
   matters, because without it the scaling cannot be checked.
+- **`rope_scaled`** — the region of practical equivalence, on the scaled
+  coefficient axis. Drives `prob_negligible`; set `0` to skip.
+
+### Figure size and resolution
+
+Every chart in every stage goes through `plotting.py`, so two knobs change all
+of them at once:
+
+```python
+OutputConfig(fig_dpi=220, fig_scale=1.8)   # big, for a wall or a projector
+OutputConfig(fig_dpi=110, fig_scale=1.0)   # small, to fit more on a page
+```
+
+| Option | Default | Effect |
+|---|---|---|
+| `fig_dpi` | `160` | Output resolution. 160 stays legible pasted into a deck at half width |
+| `fig_scale` | `1.4` | Multiplies every figure's width and height |
+
+Both apply to `01_data`, `02_convergence`, `03_coefficients`, `04_fit`,
+`05_contributions` **and** the CV stability charts. Every axis carries its
+quantity *and its unit*, every colour/line style has a legend entry, and most
+figures carry a footnote saying which axis the numbers live on — raw, scaled,
+or original KPI units. That distinction is the one that has caused every
+scaling bug in this project's history, so it is stated on the picture rather
+than left to the reader.
+
+### `prior_summary.csv`
+
+**What each written prior actually means as a coefficient distribution.** The
+prior file is written in convenient units; the model samples something else. For
+a sign-constrained feature it samples `beta = ±exp(Normal(mu, sigma))`, so
+*neither* `global_prior_mean` nor `global_prior_sd` is the number PyMC sees.
+
+| Column | Meaning |
+|---|---|
+| `feature`, `region` | `__population__` = the feature-level prior; then one row per region |
+| `is_region_override` | `True` where a per-region row in the CSV supplied it |
+| `distribution` | `lognormal(+)` / `lognormal(-)` / `normal` |
+| `input_prior_mean`, `input_prior_sd`, `input_regional_sd` | **exactly what is in the CSV** |
+| `prior_sd_basis`, `prior_mean_basis` | how those inputs were interpreted |
+| `mu_log`, `sigma_log`, `regional_sd_log` | **the parameters handed to PyMC** |
+| `implied_median`, `implied_mean`, `implied_sd` | back-transformed to coefficient units |
+| `implied_q05`, `implied_q95` | 90% prior interval on the coefficient |
+| `implied_rel_sd` | `implied_sd / implied_mean` — the realised "±x%" |
+
+**Two questions this answers that the prior file cannot.**
+
+1. *"I wrote `prior_sd=0.2` — is the coefficient really ±20%?"* Read
+   `implied_rel_sd`. Under `prior_sd_basis="log"` writing 0.2 gives 0.2020, and
+   the hand-rounded 0.198 gives 0.19996; under `"relative"` it is exactly
+   0.20000. Under the mistake that broke v5 (`0.2 × prior_mean`) it reads 0.003.
+2. *"Is my `prior_mean` the median or the mean?"* Both are printed. They differ
+   by `exp(sigma²/2)` — 2% at `sigma=0.2`, 12% at 0.5, **33% at 0.9** — so on a
+   wide prior the gap is not a rounding detail.
+
+Compare `implied_median` here against `median` in `coefficient_report.csv` to
+see how far the data moved each coefficient, and against
+`prior_posterior_contraction.csv`'s `mean_shift_in_prior_sd` for whether that
+move is large relative to the prior's own width.
 
 ### The reconciliation chain
 
@@ -359,17 +425,58 @@ Bucket suffixes: `h`/`i`/`g` = hierarchical / independent / global pooling;
 
 | Column | Meaning |
 |---|---|
-| `parameter` | Which parameter |
-| `prior_sd` | Spread before seeing data |
-| `posterior_sd` | Spread after |
-| `contraction` | `1 − (posterior_var / prior_var)` |
+| `parameter` | `variable[name]`, e.g. `mu_logbeta_hpos[TDP]` |
+| `variable` | The model parameter block alone |
+| `name` | **The feature / region name**, from the model coords |
+| `role` | What kind of parameter it is (see below) |
+| `prior_mean` / `posterior_mean` | Centre before / after seeing data |
+| `prior_sd` / `posterior_sd` | Spread before / after |
+| `contraction` | `1 − (posterior_var / prior_var)` — *did the data sharpen it?* |
+| `mean_shift_in_prior_sd` | `(posterior_mean − prior_mean) / prior_sd` — *did the data move it?* |
+| `informative` | `False` for `z_*` non-centred offsets (`N(0,1)` by construction) |
 
-**How to read it.** Near **1** = the data determined this number. Near **0** =
-the posterior is just your prior, so report it as an assumption, not a finding.
-**Negative** = the posterior came out *wider* than the prior, which means the
-data is fighting the model — in v1 TDP scored **−131** and AVP **−112**; after
-the centring fix they became **+0.89** and **+0.93**, the best-informed
-parameters in the model. This file is the fastest way to spot a broken spec.
+**Two questions, two columns — you need both.** A parameter can contract hard
+around a value nowhere near the prior mean you supplied, and contraction alone
+will not tell you.
+
+- **`contraction`** — near **1** = the data determined this number. Near **0** =
+  the posterior is just your prior, so report it as an assumption, not a
+  finding. **Negative** = the posterior came out *wider* than the prior, which
+  means the data is fighting the model — in v1 TDP scored **−131** and AVP
+  **−112**; after the centring fix they became **+0.89** and **+0.93**.
+- **`mean_shift_in_prior_sd`** — this is the **prior-data conflict** statistic
+  and the one to open when *a posterior median disagrees with the prior mean you
+  supplied*. `|shift| > 2` gets a warning in `convergence_report.txt`. It means
+  either the prior is genuinely wrong, or — far more often — something upstream
+  is feeding the model **different units than the prior was built on**. Both v4
+  and v5 failures would have shown up here.
+
+**`role` values:** `population mean, LOG scale` · `cross-region spread, LOG
+scale` · `population effect` · `coefficient (global pooling…)` · `coefficient
+(independent pooling…)` · `coefficient (region level)` · `seasonality` ·
+`trend` · `intercept` · `noise` · `non-centred offset`.
+
+> Anything whose name contains **`logbeta`** is on the **log** scale, so a shift
+> of 0.7 there is a **factor of 2** in KPI units, not 0.7 of one.
+
+**Every** parameter shared by the prior and posterior groups is now listed.
+Before v7 a prefix allowlist silently dropped `pooling="global"` coefficients
+(`gbeta_*` / `glogbeta_*`), `pooling="independent"` coefficients (`beta_*` /
+`logbeta_*`) and `beta_fourier` — so a config where every dummy was `global`
+produced a contraction file with none of its features in it. Filter on `role`
+or `informative` instead.
+
+### `prior_posterior_contraction.png`
+
+Two panels, sorted worst-first, `z_*` offsets excluded:
+
+- **Left — how much the data sharpened each parameter.** Bars are `contraction`;
+  red below 0.2 (prior-dominated), amber to 0.5, green above.
+- **Right — where the data moved it**, in prior sds, with red guides at ±2.
+
+A parameter that is **green on the left and red on the right** is the dangerous
+one: the data was confident, and confident about something your prior did not
+predict. Check the scaling before you accept the number.
 
 ### `energy_plot.png`, `trace_worst_rhat.png`, `prior_predictive_check.png`
 
