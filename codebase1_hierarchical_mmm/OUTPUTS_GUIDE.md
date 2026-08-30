@@ -55,6 +55,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `data_plots` | `kpi_by_region.png` | 01 |
 | `prior_summary` | `prior_summary.csv` | 01 |
 | `contraction_plot` | `prior_posterior_contraction.png` | 02 |
+| `prior_posterior_plots` | `prior_posterior/<param>.png` | 02 |
 | `forest_plots` | `forest/*.png` | 03 |
 | `actual_vs_predicted` | `actual_vs_predicted.csv` | 04 |
 | `fit_plots` | `actual_vs_fitted.png`, `residuals.png` | 04 |
@@ -465,6 +466,37 @@ Before v7 a prefix allowlist silently dropped `pooling="global"` coefficients
 `logbeta_*`) and `beta_fourier` — so a config where every dummy was `global`
 produced a contraction file with none of its features in it. Filter on `role`
 or `informative` instead.
+
+### `prior_posterior/<param>.png` — the three-curve chart
+
+One per parameter: **Prior** (what you asserted), **Data** (what the data alone
+says) and **Posterior** (the two combined).
+
+The likelihood is not stored by the sampler. For a Gaussian prior and an
+approximately Gaussian posterior it is recovered exactly:
+
+```
+1/sd_like²  = 1/sd_post² − 1/sd_prior²
+mu_like     = sd_like² × (mu_post/sd_post² − mu_prior/sd_prior²)
+```
+
+| What you see | Meaning |
+|---|---|
+| Data narrow, near Prior | the data agrees with you |
+| Data narrow, far from Prior | the data disagrees **and wins** |
+| Data very wide | the posterior **is** your prior |
+| **No Data curve** | posterior wider than prior — **unidentified** |
+| Data far, Posterior stuck near Prior | prior fighting data |
+
+The annotation box carries `contraction`, `mean_shift_in_prior_sd`, a plain-words
+verdict, and for log-scale parameters the coefficient in original units.
+
+Only informative parameters are drawn (`z_*` offsets are `N(0,1)` by
+construction), only the parameter block rather than its identical per-region
+copies, ordered by |mean shift| and capped at `OutputConfig.prior_posterior_max`
+(default 60).
+
+**`docs/TUNING_GUIDE.md` explains what to change once you have read one.**
 
 ### `prior_posterior_contraction.png`
 

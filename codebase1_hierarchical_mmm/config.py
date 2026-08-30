@@ -850,6 +850,11 @@ class OutputConfig:
                                         # mean, sd and 90% interval)
     # ---- 02_convergence ---------------------------------------------------
     contraction_plot: bool = True       # prior_posterior_contraction.png
+    prior_posterior_plots: bool = True  # prior_posterior/<param>.png - the
+                                        # three-curve prior / likelihood /
+                                        # posterior chart, one per parameter
+    prior_posterior_max: int = 60       # cap on how many of those to draw,
+                                        # taken in order of |mean shift|
     # ---- 03_coefficients --------------------------------------------------
     forest_plots: bool = True
     # ---- 04_fit -----------------------------------------------------------
@@ -885,7 +890,7 @@ class OutputConfig:
                                         # projection, lower to fit more on a page
 
     _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
-              "prior_summary", "contraction_plot", "forest_plots", "actual_vs_predicted",
+              "prior_summary", "contraction_plot", "prior_posterior_plots", "forest_plots", "actual_vs_predicted",
               "fit_plots", "contribution_summary", "contribution_timeseries",
               "contribution_math", "contribution_reconciliation",
               "contribution_plots")
@@ -900,6 +905,8 @@ class OutputConfig:
                              f"got {self.cadence!r}")
         if self.rope_scaled < 0:
             raise ValueError("rope_scaled must be >= 0")
+        if self.prior_posterior_max < 0:
+            raise ValueError("prior_posterior_max must be >= 0")
         if self.fig_dpi < 50:
             raise ValueError("fig_dpi must be >= 50")
         if self.fig_scale <= 0:

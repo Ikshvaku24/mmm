@@ -338,6 +338,48 @@ def prior_posterior_report(idata, outdir: str, out_cfg=None,
             f.write("See prior_posterior_contraction.csv\n")
 
     _contraction_plot(inf, outdir, out_cfg)
+    _per_parameter_plots(idata, outdir, out_cfg, skip_prefixes)
+
+
+def _per_parameter_plots(idata, outdir, out_cfg, skip_prefixes=()) -> int:
+    """One prior / likelihood / posterior chart per parameter.
+
+    Only INFORMATIVE parameters (z_* offsets are N(0,1) by construction) and
+    only the parameter BLOCK, never its per-region copies: under
+    pooling="global" every region carries an identical value, so the per-region
+    charts would be duplicates of the block chart.
+    """
+    if out_cfg is not None and not getattr(out_cfg, "prior_posterior_plots", True):
+        return 0
+    cap = int(getattr(out_cfg, "prior_posterior_max", 60) or 60) if out_cfg else 60
+    prior, posterior = get_group(idata, "prior"), get_group(idata, "posterior")
+    pairs = []
+    for v in prior.data_vars:
+        name = str(v)
+        if v not in posterior:
+            continue
+        if skip_prefixes and any(name.startswith(p) for p in skip_prefixes):
+            continue
+        role = _role_of(name)
+        if role in _UNINFORMATIVE:
+            continue
+        # region-level copies of a pooled/global block duplicate the block
+        if name.startswith("beta_") and not name.startswith("beta_fourier"):
+            continue
+        logged = "logbeta" in name
+        try:
+            slices = list(_labelled_slices(prior[v], posterior[v]))
+        except Exception:  # noqa: BLE001
+            continue
+        for lab, pr, po in slices:
+            pairs.append((f"{name}[{lab}]" if lab else name, pr, po, role, logged))
+    try:
+        from prior_plots import write_prior_posterior_plots
+        return write_prior_posterior_plots(
+            pairs, os.path.join(outdir, "prior_posterior"), cap)
+    except Exception as e:  # noqa: BLE001 - a plot must never kill a fit
+        print(f"[diagnostics] WARNING: per-parameter prior plots failed: {e}")
+        return 0
 
 
 def _contraction_plot(df: pd.DataFrame, outdir: str, out_cfg=None,

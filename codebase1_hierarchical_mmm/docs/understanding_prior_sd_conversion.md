@@ -1,3 +1,65 @@
+# How 1.645 came into HDI
+
+We multiply by $1.645$ because standard deviation ($\sigma$) only measures the **width of a single standard unit**, whereas an interval (like a 90% HDI) measures the **distance from the center to a specific boundary**.
+
+To get the actual distance on the graph, you have to multiply the *unit size* ($\sigma$) by the *number of units needed to reach the boundary* ($1.645$).
+
+---
+
+### 1. The Analogy: Measuring Distance in Steps
+
+Think of standard deviation ($\sigma$) as the **length of your stride**, and the interval as the **distance to a fence**.
+
+* $\sigma = 0.20$ means your stride length is **$0.20$ log-units**.
+* The 90% boundary sits **$1.645$ strides away** from the center.
+
+To find out how many log-units far away the fence is:
+
+$$\text{Distance to fence} = (\text{Length of 1 stride}) \times (\text{Number of strides})$$
+
+$$\text{Log Margin} = \sigma \times 1.645 = 0.20 \times 1.645 = \mathbf{0.329}$$
+
+---
+
+### 2. The Math Behind the Multiplication
+
+Any normal distribution $X \sim \text{Normal}(\mu, \sigma)$ can be converted to a standard z-score using:
+
+$$z = \frac{X - \mu}{\sigma}$$
+
+We want to find the boundary value $X_{\text{high}}$ where the upper tail cut-off leaves $5\%$ of the probability above it ($z = 1.645$):
+
+$$1.645 = \frac{X_{\text{high}} - \mu}{\sigma}$$
+
+Now, rearrange the equation using algebra to isolate $X_{\text{high}}$:
+
+1. Multiply both sides by $\sigma$:
+
+$$1.645 \times \sigma = X_{\text{high}} - \mu$$
+
+
+2. Add $\mu$ to both sides:
+
+$$X_{\text{high}} = \mu + (1.645 \times \sigma)$$
+
+
+
+The term $(1.645 \times \sigma)$ is the **Log Margin**—the exact quantity you must add to the center $\mu$ to reach the 90% interval's upper edge.
+
+---
+
+### 3. Summary
+
+| Term | What it is | Example Value |
+| --- | --- | --- |
+| **$\sigma$** | The size of **1** standard deviation. | $0.20$ log-units |
+| **$1.645$** | The **number of standard deviations** required to cover 90% of the distribution. | $1.645$ standard deviations |
+| **$1.645 \times \sigma$** | The **total distance (margin)** from the center to the 90% boundary. | $0.329$ log-units |
+
+Once you have that total log-distance ($0.329$), you add it to the mean ($\mu + 0.329$) and exponentiate to get the real-world upper bound ($\text{hdi\_high}$).
+
+<hr style="border: 2px solid green;">
+
 # If i want 20% uncertainity in mean for a feature in the feature scale itself then i would put 20% in the formula?
 
 Yes, exactly! That is **100% correct**.
@@ -76,6 +138,7 @@ It ensures that when the log-normal model exponentiates its parameters back to n
 <hr style="border: 2px solid green;">
 
 # Derive this formula
+# we are using median instead of mean thus no subtraction of (sigma^2/2)
 
 Absolutely. The core idea is actually quite simple:
 
