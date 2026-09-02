@@ -29,11 +29,13 @@ Typical use (e.g. from a Databricks notebook):
 from __future__ import annotations
 
 import os
+import warnings
 
 import pandas as pd
 
 from compat import extend_idata, save_idata
-from config import ModelConfig, OutputConfig, RunConfig, SamplerConfig
+from config import (INTERCEPT_PARAMS, CVConfig, ModelConfig, OutputConfig,
+                    RunConfig, SamplerConfig)
 from data_prep import prepare_data, write_data_stage_outputs
 from diagnostics import (convergence_report, enforce_convergence,
                          prior_posterior_report, quick_convergence_checks)
@@ -42,6 +44,8 @@ from model import build_model
 from outputs import (coefficient_report, compute_decomposition,
                      contribution_report, fit_report, prior_predictive_plot)
 from plotting import set_figure_defaults
+from warnings_report import (collect_warnings, print_warning_summary,
+                             write_warning_docs)
 
 
 def run(df: pd.DataFrame,
@@ -49,20 +53,64 @@ def run(df: pd.DataFrame,
         run_cfg: RunConfig | None = None,
         sampler_cfg: SamplerConfig | None = None,
         save_trace: bool = True,
-        out_cfg: OutputConfig | None = None):
+        out_cfg: OutputConfig | None = None,
+        cv_cfg: CVConfig | None = None):
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
     root = os.path.join(run_cfg.output_dir, run_cfg.run_name)
     dirs = {k: os.path.join(root, k) for k in
-            ["01_data", "02_convergence", "03_coefficients", "04_fit",
-             "05_contributions"]}
+            ["00_warnings", "01_data", "02_convergence", "03_coefficients",
+             "04_fit", "05_contributions"]}
     for d in dirs.values():
         os.makedirs(d, exist_ok=True)
 
     # one place sets figure size/resolution for every chart in the run
     set_figure_defaults(dpi=out_cfg.fig_dpi, scale=out_cfg.fig_scale)
 
+    # Every warning from here on is captured, grouped by category and written
+    # to 00_warnings/ instead of printed one-per-feature. With 65 features a
+    # single mistake in one column of the prior file otherwise produces 65
+    # near-identical paragraphs and buries the one that mattered.
+    with collect_warnings() as caught:
+        # The per-feature prior checks live in FeatureSpec.resolved(), which the
+        # caller already ran when it built ModelConfig - usually before this
+        # function was reached, so those warnings would be missed. Re-resolving
+        # is pure arithmetic on the specs (no data, no sampling) and makes the
+        # report complete no matter where the config was assembled.
+        [s.resolved() for s in model_cfg.features]
+
+        # dropping the intercept only makes sense on a centred KPI: with
+        # dv_center="none" the KPI keeps its level and nothing is left to carry
+        # it, so every coefficient would be dragged up to fake an intercept.
+        if not model_cfg.include_intercept and run_cfg.dv_center == "none":
+            warnings.warn(
+                "include_intercept=False with dv_center='none': the KPI still "
+                "carries its level but the model has no term to absorb it. Use "
+                "dv_center='mean', or keep the intercept.")
+
+        result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
+                             dirs, root, save_trace)
+
+    wdf = write_warning_docs(caught, dirs["00_warnings"], run_cfg.run_name)
+    print_warning_summary(wdf, dirs["00_warnings"])
+    result["warnings"] = wdf
+
+    # cross-validation is opt-in: it is a full refit per fold, so it can cost
+    # more than the headline run. cv.enabled=false leaves the folder absent.
+    if cv_cfg is not None and cv_cfg.enabled:
+        from cross_validation import run_cv
+        print("[6/6] cross-validation")
+        result["cv"] = run_cv(df, model_cfg, run_cfg, sampler_cfg, cv_cfg, out_cfg)
+
+    print(f"done -> {root}")
+    return result
+
+
+def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
+                save_trace):
+    """The five reporting stages. Split out so `run` can wrap them all in one
+    warning-capture block without indenting the whole body twice."""
     print("[1/5] preparing data")
     pdata = prepare_data(df, run_cfg, model_cfg)
     write_data_stage_outputs(pdata, dirs["01_data"], out_cfg)
@@ -75,7 +123,9 @@ def run(df: pd.DataFrame,
 
     print("[3/5] convergence diagnostics")
     convergence_report(idata, dirs["02_convergence"])
-    prior_posterior_report(idata, dirs["02_convergence"], out_cfg)
+    prior_posterior_report(idata, dirs["02_convergence"], out_cfg,
+                           skip_prefixes=() if out_cfg.report_intercept
+                           else INTERCEPT_PARAMS)
     prior_predictive_plot(idata, pdata, dirs["02_convergence"])
     enforce_convergence(quick_convergence_checks(idata),
                         run_cfg.on_convergence_failure)
@@ -96,7 +146,6 @@ def run(df: pd.DataFrame,
     if save_trace:
         save_idata(idata, os.path.join(root, "trace.nc"))
 
-    print(f"done -> {root}")
     return {"idata": idata, "pdata": pdata, "decomposition": decomp,
             "coefficients": coef, "metrics": metrics, "contributions": contrib,
             "output_dir": root}

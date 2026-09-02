@@ -8,7 +8,13 @@ All example values are the real ones from the `real_data_v3` run
 > files alike. They were added after that run and will appear next time you
 > execute the pipeline. Everything else is exactly what is sitting in your v3
 > folders. The 🆕 files are the *reconciliation* outputs: they exist so every
-> number in the core tables can be re-derived by hand from the data.
+> number in the core tables can be re-derived by hand from the data — plus the
+> two folders added since: `00_warnings/` (every warning, grouped by category
+> instead of printed once per feature) and `06_cross_validation/` (written only
+> when `cv.enabled: true`).
+
+Which files a run writes is controlled by `config.yaml`; see
+`docs/TUNING_GUIDE.md` for which setting to reach for when a number looks wrong.
 
 ---
 
@@ -16,16 +22,19 @@ All example values are the real ones from the `real_data_v3` run
 
 | Folder | Question it answers | Look here when |
 |---|---|---|
+| 🆕 `00_warnings` | What did the run object to? | **Read the index first** — one document per category, not one paragraph per feature |
 | `01_data` | What actually went into the model? | Numbers look strange — check scaling first (🆕 `model_input_matrix.csv` is the row-by-row answer) |
 | `02_convergence` | Can I trust the sampler at all? | **Always read this first** |
 | `03_coefficients` | What did each driver do, per retailer? | Building the effect story |
 | `04_fit` | How well does it predict? | Judging model quality |
 | `05_contributions` | How do sales split across drivers? | Building the business deck |
+| 🆕 `06_cross_validation` | Does it hold up on data it has not seen, and are the coefficients stable? | Before anyone acts on a ROI number. Written only when `cv.enabled: true` |
 | `trace.nc` | The raw posterior (all draws) | Re-analysis without re-fitting |
 
-**Read them in this order: 02 → 04 → 03 → 05.** If convergence failed, nothing
-downstream means anything. If the fit is poor, the contributions are a story
-about a model that doesn't describe your business.
+**Read them in this order: 00 → 02 → 04 → 03 → 05 (→ 06).** A high-severity
+warning usually explains the thing you were about to spend an hour diagnosing.
+If convergence failed, nothing downstream means anything. If the fit is poor,
+the contributions are a story about a model that doesn't describe your business.
 
 ---
 
@@ -54,8 +63,10 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `model_input_summary` | `model_input_summary.csv` | 01 |
 | `data_plots` | `kpi_by_region.png` | 01 |
 | `prior_summary` | `prior_summary.csv` | 01 |
+| *(always, when run from YAML)* | `resolved_config.yaml` | 01 |
 | `contraction_plot` | `prior_posterior_contraction.png` | 02 |
 | `prior_posterior_plots` | `prior_posterior/<param>.png` | 02 |
+| `report_intercept` | *(hides rows, writes no file — see below)* | 02 |
 | `forest_plots` | `forest/*.png` | 03 |
 | `actual_vs_predicted` | `actual_vs_predicted.csv` | 04 |
 | `fit_plots` | `actual_vs_fitted.png`, `residuals.png` | 04 |
@@ -64,6 +75,15 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `contribution_math` | `contribution_math.csv` | 05 |
 | `contribution_reconciliation` | `contribution_reconciliation.csv` | 05 |
 | `contribution_plots` | the four 05 PNGs | 05 |
+| *(always)* | `00_warnings/*` | 00 |
+| `cv.enabled` **(CVConfig, not OutputConfig)** | everything in `06_cross_validation/` | 06 |
+
+`report_intercept` is the odd one out: it writes no file, it **removes rows**.
+`false` drops `mu_alpha` / `tau_alpha` / `z_alpha` / `alpha_region` from
+`prior_posterior_contraction.csv` and its per-parameter charts, so a nuisance
+level does not crowd out the drivers in the diagnostic you actually read. It
+never touches the convergence tables — an intercept with a bad R-hat is never
+hidden — and never touches the decomposition, so contributions still reconcile.
 
 Two options rather than switches:
 
@@ -265,7 +285,75 @@ the priors implied. The run now warns when `prior_sd < 0.05`.
 
 ---
 
+## 🆕 `00_warnings` — what the run objected to
+
+Almost every check in this codebase fires **per feature**. With 65 features,
+one wrong column in the prior file used to produce 65 near-identical paragraphs
+in the notebook — which meant nobody read any of them. The run now captures its
+warnings, groups them by category, and writes one document per category. The
+console gets **one line per category**, not one per feature.
+
+Nothing is suppressed: every warning still reaches `all_warnings.csv` verbatim.
+
+| File | Contents |
+|---|---|
+| `00_INDEX.md` | **Read this first.** Counts per category, sorted by severity, each linking to its document |
+| `<category>.md` | One per category: what it means, why it fires, what to do, and the table of affected features |
+| `all_warnings.csv` | Every warning as one row — for filtering and for diffing two runs |
+
+### `all_warnings.csv`
+
+| Column | Meaning |
+|---|---|
+| `category` | Category slug, matching the `.md` filename |
+| `severity` | `high` (a reported number is probably not measuring what you think) / `medium` (worth knowing) / `review` (uncategorised — nobody has triaged this yet) |
+| `feature` | The feature the warning is about, parsed off the front of the message. Blank for run-level warnings |
+| `region` | The region, when the warning was region-specific |
+| `warning_class` | Python warning class (`UserWarning`, …) |
+| `source` | `file.py:line` that raised it |
+| `message` | The full text, whitespace-normalised |
+| `detail` | The text with the `feature:` prefix stripped — what goes in the per-category table |
+
+### The categories
+
+| Slug | Severity | Fires when |
+|---|---|---|
+| `prior_pins_coefficient` | high | `prior_sd` converts to a log-scale sigma < 0.05, so the posterior ≈ the prior. **The most common one**, and usually `0.2 * prior_mean` written where `prior_sd=0.2` + `prior_sd_basis=relative` was meant |
+| `prior_mean_not_a_magnitude` | high | A sign-constrained feature was given `prior_mean <= 0`. The value was **replaced by a default** — the model is not using your number |
+| `negative_values_uncentred` | high | A sign-constrained feature has negative values but is scaled without centring |
+| `collinear_with_intercept` | high | An always-on feature is ~constant after scaling and fights the region intercept. This is the defect that broke `real_data_v1` |
+| `degenerate_feature_column` | high | A column is constant, empty or non-positive over the training window; the scale fell back to 1.0 |
+| `intercept_without_centering` | high | `include_intercept: false` with `dv_center: none` — nothing is left to carry the level |
+| `pooling_collapsed` | medium | `regional_sd_prior` < 0.02, so hierarchical pooling is one shared coefficient in all but name |
+| `per_region_prior_sd_ignored` | medium | A per-region `prior_sd` was written but hierarchical pooling ignores it |
+| `seasonality_overfit_risk` | medium | `fourier_order` is high for the number of training periods |
+| `cadence_ambiguous` | medium | Date spacing is neither weekly nor monthly; monthly was assumed |
+| `other` | review | Matched no rule — read it in full rather than assuming it is routine |
+
+**How to read it.** `high` means a number in your report is probably not
+measuring what you think. `prior_pins_coefficient` in particular is the
+"agreement trap": a feature that matches a benchmark *because the posterior is
+the prior you derived from that benchmark* has not been validated by anything.
+Cross-check its `contraction` in `02_convergence` — near 0 confirms the model
+learned nothing about it.
+
+An empty run still writes `00_INDEX.md` saying so; a missing file would be
+ambiguous ("did it not run, or was it clean?").
+
+---
+
 ## `01_data` — what went into the model
+
+### `resolved_config.yaml`
+
+Written when the run was started from a settings file (`run_from_yaml`). It is
+the **effective** configuration — every default filled in, not just the keys the
+YAML mentioned — plus `_source`, the path of the file it came from.
+
+**How to read it.** This is the answer to "what settings produced these
+numbers?" six months from now. Diff two runs' `resolved_config.yaml` to see
+exactly what changed between them; the feature-level priors are not in here,
+they are in the run's `prior_summary.csv`.
 
 ### `panel_summary.csv`
 
@@ -914,6 +1002,161 @@ that ties to actual sales — use `contribution_summary.csv` instead.
 
 ---
 
+## 🆕 `06_cross_validation` — does it hold up out of sample?
+
+Written **only when `cv.enabled: true`** (in `config.yaml`, or
+`CVConfig(enabled=True)`). It is off by default because every fold is a **full
+refit**: a 5-fold CV costs roughly five times the headline run. Turn it on once
+the single fit looks sane.
+
+**What it does.** Expanding-window (rolling-origin) CV. Fold *k* trains on
+everything before its test window, predicts the next `horizon` periods, and the
+origin steps forward. Because every scaling statistic is computed from the
+training window only, each fold just slices the data and reuses the normal
+pipeline — no leakage, no special-cased code path.
+
+**Why it matters more than the single holdout.** One holdout is one draw. Five
+origins tell you whether the accuracy — and, more importantly, the
+*coefficients* — are a property of the model or of the window you happened to
+pick. For an MMM the coefficient stability is the real test: if a coefficient
+swings as the origin moves, its contribution story is fragile however good the
+error metric looks.
+
+**Cadence.** Every count comes from the cadence preset unless you set it:
+weekly → horizon 13, 5 folds, min train 52; monthly → horizon 3, 3 folds,
+min train 12, and shorter chains. An explicit value always wins.
+
+| File | Contents |
+|---|---|
+| `cv_fold_metrics.csv` | Every fit metric, per fold × region × train/test |
+| `cv_summary.csv` | Mean ± sd of the test metrics across folds, per region |
+| `cv_coefficient_stability.csv` | The raw fold-wise coefficient medians |
+| 🆕 `cv_stability_by_region.csv` | Spread of those medians, per feature × region |
+| `cv_stability_ranking.csv` | Features ranked by instability |
+| `cv_report.md` | The headline readout |
+| `cv_accuracy_by_fold.png` | Test wMAPE per fold, per region |
+| `stability/<feature>.png` | Coefficient medians across folds, one line per region |
+| `fold_k/sampling_log.json` | Per-fold run manifest |
+
+### `cv_fold_metrics.csv`
+
+One row per **fold × region × dataset**. `region` includes `__all__` (pooled)
+and `__aggregate__` (regions summed to a national series); `dataset` is `train`
+or `test` — **read the `test` rows**, the train rows are there for comparison.
+
+| Column | Meaning |
+|---|---|
+| `fold` | 1-based fold number, chronological |
+| `region` | Region, or `__all__` / `__aggregate__` |
+| `dataset` | `train` or `test` |
+| `train_end` | Last date in this fold's training window |
+| `test_start`, `test_end` | The window being predicted |
+| `r2` | Pooled R² — **inflated** when region levels differ; do not quote it |
+| `r2_within_region` | R² against each region's own mean — **the honest one** |
+| `mape_pct` | Mean absolute % error |
+| `wmape_pct` | Volume-weighted % error — the headline accuracy number |
+| `mape_region_weighted_pct` | Volume-weighted average of per-region MAPEs |
+| `mae` | Mean absolute error, KPI units |
+| `crps` | Continuous ranked probability score — combines calibration and sharpness; lower is better, KPI units |
+| `coverage_90_mean_pct` | % of actuals inside the mean-response band; expected well below 90 |
+| `coverage_90_pred_pct` | % inside the posterior predictive band — **judge the fold by this**, target ~90 |
+| `resid_t_stat`, `resid_p_value` | Test of H₀: mean residual = 0. Small p on `test` = systematic bias in that window |
+| `durbin_watson` | Residual autocorrelation; 2 = none, < 1.5 = positive |
+| `n` | Observations in the cell |
+| `max_rhat` | Worst R-hat **of that fold's own fit** |
+| `divergences` | Divergent transitions in that fold |
+
+**How to read it.** Check `max_rhat` and `divergences` *first*. A fold that did
+not converge contributes a meaningless accuracy number, and averaging it into
+`cv_summary.csv` quietly corrupts the summary. `cv_report.md` counts these for
+you ("folds with convergence flags: 1 of 5") — if that count is not 0, exclude
+those folds by hand before quoting anything.
+
+Then look at the **spread** of `wmape_pct` across folds, not just its mean. A
+model at 5% ± 1% is usable; 5% ± 4% means the number depends on where you cut.
+
+### `cv_summary.csv`
+
+One row per region. Every metric appears twice, `<metric>_mean` and
+`<metric>_std`, aggregated over the **test** rows only.
+
+| Column | Meaning |
+|---|---|
+| `region` | Region, `__all__`, or `__aggregate__` |
+| `wmape_pct_mean` / `_std` | Headline accuracy and its stability across folds |
+| `mape_pct_mean` / `_std` | Unweighted equivalent |
+| `mape_region_weighted_pct_mean` / `_std` | Volume-weighted average of per-region MAPEs |
+| `mae_mean` / `_std` | KPI units |
+| `crps_mean` / `_std` | Probabilistic accuracy |
+| `coverage_90_pred_pct_mean` / `_std` | Calibration. Far below 90 = overconfident intervals; far above = uselessly wide |
+| `r2_within_region_mean` / `_std` | **Quote this, not `r2`** |
+| `r2_mean` / `_std` | Pooled R², inflated by between-region level differences |
+
+**How to read it.** The `_std` column is the point of the file. A mean that
+looks good with a large sd is not a result, it is a coin flip. And a region
+whose `wmape_pct_mean` is far worse than the others usually has too little
+signal to support its own coefficients — check its `data_support` flags in
+`03_coefficients/coefficient_report.csv`.
+
+### `cv_coefficient_stability.csv`
+
+The raw material: one row per **fold × feature × region**.
+
+| Column | Meaning |
+|---|---|
+| `fold` | Fold number |
+| `feature` | Feature name |
+| `region` | Region |
+| `median` | Posterior median of that coefficient, **on the scaled axis**, in that fold |
+
+Long format on purpose — pivot it to plot a feature's coefficient against
+`fold`, which is exactly what `stability/<feature>.png` shows.
+
+### 🆕 `cv_stability_by_region.csv`
+
+The middle view, and usually the one that answers the question: *which region
+is making this feature unstable?*
+
+| Column | Meaning |
+|---|---|
+| `feature`, `region` | The cell |
+| `mean` | Average of that coefficient's fold medians |
+| `std` | Standard deviation across folds |
+| `min`, `max` | Range across folds — check whether it straddles zero |
+| `rel_sd_pct` | `std / abs(mean) × 100` — the scale-free instability measure |
+
+**How to read it.** `rel_sd_pct` under ~15% is stable. Above ~50% the
+coefficient is being re-estimated from scratch each fold and its contribution
+should not be presented as a finding. If `min` and `max` have opposite signs on
+a `free` feature, the model cannot even agree on the direction — a sign
+constraint or a structural fix is needed, not a prior tweak.
+
+### `cv_stability_ranking.csv`
+
+The roll-up: features sorted worst-first.
+
+| Column | Meaning |
+|---|---|
+| `feature` | Feature name |
+| `avg_rel_sd_pct` | `rel_sd_pct` averaged over regions |
+
+**How to read it.** This is the list to check before anyone acts on a ROI
+number. One caveat: a feature pinned by a tight prior will look beautifully
+stable here — because the prior, not the data, is holding it still. Read this
+file next to `contraction` in `02_convergence`: stable **and** contracted is a
+real result; stable **and** uncontracted just means you fixed it by hand.
+
+### `cv_report.md`
+
+The headline readout — cadence and fold geometry, mean test wMAPE ± sd,
+region-weighted MAPE, CRPS, predictive coverage, the count of folds with
+convergence flags, and the five least stable features. It closes with the point
+worth repeating to stakeholders: **fold metrics judge prediction**. Contribution
+and ROI validity additionally need stable coefficients and, ideally, calibration
+against lift experiments.
+
+---
+
 ## `trace.nc`
 
 The full posterior in NetCDF. Reload with
@@ -924,6 +1167,9 @@ re-running the 6-minute fit.
 
 ## Triage checklist
 
+0. 🆕 **`00_warnings/00_INDEX.md`** — any `high` category first. A pinned prior
+   or a feature collinear with the intercept explains most "that number looks
+   wrong" questions before you open anything else.
 1. **`02_convergence/convergence_report.txt`** — R-hat < 1.01, ESS > 400, tree
    depth not saturated. If not, stop; nothing else is meaningful.
 2. **`prior_posterior_contraction.csv`** — any negative contraction means a
@@ -937,6 +1183,10 @@ re-running the 6-minute fit.
 6. **`05_contributions/contribution_reconciliation.csv`** — `reconciles_to_actual_pct`
    must be 100 and `median_gap_pct` near 0. Then read `residual_pct`: that is how
    much of actual sales the decomposition simply does not explain.
+7. 🆕 **`06_cross_validation/cv_stability_ranking.csv`** (when `cv.enabled`) —
+   before anyone acts on a ROI number. Cross-read it with `contraction`: stable
+   *and* contracted is a result; stable *and* uncontracted means the prior is
+   holding it still.
 
 ## "That contribution can't be right" — where to look
 
@@ -947,6 +1197,8 @@ re-running the 6-minute fit.
 | Percentages don't sum to 100 | `contribution_summary.csv` | You dropped the Residual line, or summed `baseline_part` rows alongside `__baseline__` |
 | Two files disagree by ~0.1% | `contribution_math.csv` | `volume_median_of_total` vs `volume_sum_of_medians` — see "two arithmetics" |
 | A scaling factor looks wrong | `model_input_matrix.csv` | Recompute `(raw − center) / scale` and compare with `__scaled` |
+| The number equals the prior you wrote | 🆕 `00_warnings/prior_pins_coefficient.md` | `prior_sd` too tight — the posterior is the prior. Confirm with `contraction` ≈ 0 |
+| It changes every time you refit | 🆕 `06_cross_validation/cv_stability_by_region.csv` | `rel_sd_pct` above ~50% means the coefficient is re-estimated from scratch each window |
 
 ## Known gaps in this run
 
@@ -959,5 +1211,6 @@ re-running the 6-minute fit.
   for these, so this is a broken data extract, not three dead channels.
 - **Holdout prediction is weak** (`r2_within_region` −0.66, coverage 74%). The
   single 13-week holdout lands entirely in Q4, and with two years of data there is
-  only one prior Q4 to learn holiday seasonality from. Use the expanding-window CV
-  in `cross_validation.py` before drawing conclusions from this one split.
+  only one prior Q4 to learn holiday seasonality from. Set `cv.enabled: true` in
+  `config.yaml` and read `06_cross_validation/` before drawing conclusions from
+  this one split.

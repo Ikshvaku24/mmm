@@ -95,6 +95,47 @@ dummy_covid,,global,free,0.0,1.0,,,
 
 ## Run
 
+### From `config.yaml` (recommended)
+
+`config.yaml` holds every setting outside the feature table, **shown at its
+default value with a line of help above it** — so it is also the reference for
+what the pipeline does when you say nothing. Delete anything you are happy with;
+omitted keys fall back to those defaults, and a **misspelled key stops the run**
+(naming the closest valid spelling) rather than silently leaving a default in
+place.
+
+```python
+from settings import run_from_yaml
+result = run_from_yaml("config.yaml")
+```
+
+```bash
+python settings.py config.yaml            # same thing from a shell
+python settings.py --write config.yaml    # regenerate the annotated template
+```
+
+A minimal file is just the lines that differ:
+
+```yaml
+data:
+  input_path: input_datacube.xlsx
+  feature_priors: feature_priors.csv
+model:
+  fourier_order: 2
+  include_trend: true
+  likelihood: student_t
+run:
+  run_name: fy26
+  holdout_periods: 13
+```
+
+The **features and their priors stay in the CSV** — a per-feature prior table
+belongs in a table. Each run writes its *effective* settings (every default
+filled in) to `outputs/<run_name>/01_data/resolved_config.yaml`, so a run can be
+reproduced without the original file.
+
+### From Python
+
 ```python
 from config import (ModelConfig, OutputConfig, RunConfig, SamplerConfig,
                     load_feature_config)
@@ -108,17 +149,40 @@ result = run(df, ModelConfig(features=load_feature_config("feature_priors.csv"),
              out_cfg=OutputConfig(period_split="mat"))
 ```
 
+The config objects are the source of truth; the YAML is a front end onto exactly
+these fields, and every value still passes the same validation.
+
+### The region intercept
+
+`model.include_intercept` (default `true`) is a free hierarchical region
+intercept. Set it `false` to remove `mu_alpha` / `tau_alpha` / `alpha_region`
+entirely, so no **estimated** term can absorb sales the named drivers should be
+explaining — the setup a vendor model with region fixed-effect dummies is
+implicitly using. The level does not disappear: with `run.dv_center: mean` the
+baseline becomes the **fixed** training mean (zero posterior width) instead of a
+free parameter, and contributions still reconcile to actual sales. Only use it
+with `dv_center: mean`.
+
+`output.report_intercept` (default `true`) is the reporting-only twin: `false`
+drops the intercept parameters from the prior/posterior contraction report and
+its per-parameter charts, and touches nothing else — convergence tables still
+cover every parameter, and the decomposition is unchanged.
+
+See `docs/TUNING_GUIDE.md` §2.1–2.2 for when to reach for which.
+
 Smoke test / parameter recovery: `python synthetic_example.py`.
 
 ## Outputs (`outputs/<run_name>/`)
 
 | folder | contents |
 |---|---|
+| `00_warnings` | the run's own warnings, grouped by category: `00_INDEX.md` (counts by severity), one `<category>.md` per category with the affected features and the fix, and `all_warnings.csv`. The console gets one line per category instead of one paragraph per feature |
 | `01_data` | panel summary, per-region scaling stats, KPI plots |
 | `02_convergence` | `sampling_log.json` run manifest (package versions, devices, sampler requested vs used, timings), R-hat / bulk+tail ESS / divergences / per-chain BFMI / tree-depth report, energy & worst-trace plots, prior-posterior contraction, prior-predictive check |
 | `03_coefficients` | `coefficient_report.csv` — per region + population row: median, sd, **true 90% HDI**, P(effect>0) *(blank for sign-constrained features — vacuous there)*, `scaling_method`, **original-unit conversion** (KPI units per raw feature unit) and **data-support flags** (`none` / `weak` / `weak (near-constant)` / `adequate` — a region where the feature never ran, **or where it never moves**, gets a shrinkage prior, not a regional estimate; `support_warnings.txt` lists these); forest plots showing shrinkage toward the population mean |
 | `04_fit` | R² / MAPE / wMAPE / MAE per region, train **and holdout**, plus **two coverage columns**: `coverage_90_pred_pct` (posterior predictive — judge holdout by this) and `coverage_90_mean_pct` (mean-response interval — expected to be narrower than 90%); **`resid_t_stat` / `resid_p_value`** (bias test) and **`durbin_watson`** (residual autocorrelation) — see "Significance" below; fit plots show both bands; residual plots. On the `__all__` row read **`r2_within_region`**, not `r2`: the pooled `r2` is inflated by the differences in level between regions and can sit at 0.99 while every region is fitted badly |
 | `05_contributions` | contribution totals with HDIs, **volume** and share-of-sales, `contribution_vs` (whether a feature's contribution is measured versus zero or versus its own average level), a **`group`** column (`baseline_total` / `baseline_part` / `incremental`), incremental bar chart, `baseline_breakdown.png`, and the weekly decomposition in both collapsed and baseline-expanded form |
+| `06_cross_validation` | written only when `cv.enabled: true`: `cv_fold_metrics.csv` (every metric per fold x region x train/test, plus that fold's own `max_rhat`/`divergences`), `cv_summary.csv` (mean +/- **sd** across folds - the sd is the point), `cv_stability_by_region.csv` and `cv_stability_ranking.csv` (how much each coefficient moves as the origin steps forward), `cv_report.md`, and the fold/stability charts. Every fold is a full refit, so budget ~n_folds x the headline run |
 
 ## Reconciliation outputs (`OutputConfig`)
 

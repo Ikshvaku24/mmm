@@ -48,6 +48,7 @@ Outputs (<output_dir>/<run_name>/06_cross_validation/):
                                  + fold convergence (max R-hat, divergences)
     cv_summary.csv               mean +/- sd across folds (test window)
     cv_coefficient_stability.csv fold-wise posterior medians per feature/region
+    cv_stability_by_region.csv   mean/sd/min/max + rel_sd_pct per feature x region
     cv_stability_ranking.csv     features ranked by cross-fold instability
     cv_report.md                 headline readout
     cv_accuracy_by_fold.png      test wMAPE per fold, per region
@@ -192,6 +193,11 @@ def run_cv(df: pd.DataFrame,
     stab = (coef.groupby(["feature", "region"])["median"]
             .agg(["mean", "std", "min", "max"]).reset_index())
     stab["rel_sd_pct"] = (stab["std"] / (stab["mean"].abs() + 1e-12) * 100).round(1)
+    # the per-feature x region view: the raw fold medians are in
+    # cv_coefficient_stability.csv and the feature-level roll-up in
+    # cv_stability_ranking.csv, but the middle table - which REGION is unstable
+    # for a given feature - is the one that usually answers the question
+    stab.to_csv(os.path.join(outdir, "cv_stability_by_region.csv"), index=False)
     rank = (stab.groupby("feature")["rel_sd_pct"].mean()
             .sort_values(ascending=False).reset_index()
             .rename(columns={"rel_sd_pct": "avg_rel_sd_pct"}))

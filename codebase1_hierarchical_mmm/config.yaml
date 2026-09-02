@@ -1,0 +1,209 @@
+# ===========================================================================
+#  Codebase 1 - hierarchical MMM: run settings
+# ===========================================================================
+#  EVERY key below is shown at its DEFAULT value, so this file doubles as the
+#  reference for what the pipeline does when you say nothing. Delete anything
+#  you are happy with - omitted keys fall back to exactly these values.
+#
+#  Run it:
+#      from settings import run_from_yaml
+#      result = run_from_yaml("config.yaml")
+#  or, from a shell:
+#      python settings.py config.yaml
+#
+#  Regenerate this file (e.g. after upgrading the codebase):
+#      python settings.py --write config.yaml
+#
+#  A typo is an ERROR, not a silent default: an unknown key stops the run and
+#  names the closest valid spelling.
+#
+#  The FEATURES and their priors are not here - they live in the CSV named by
+#  data.feature_priors, because a per-feature prior table belongs in a table.
+#  See docs/TUNING_GUIDE.md for which knob to reach for in which situation.
+# ===========================================================================
+
+
+# --------------------------------------------------------------------------
+# Where the inputs are. Paths are relative to this file unless absolute.
+# --------------------------------------------------------------------------
+data:
+  # panel file: one row per region x date, columns date/region/dv/features
+  input_path: input_datacube.xlsx
+  # Excel sheet name (null = first sheet). Ignored for .csv/.parquet
+  sheet: null
+  # the feature/prior table - the list of modelled columns
+  feature_priors: feature_priors.csv
+  # explicit strptime format for the date column (null = infer)
+  date_format: null
+
+
+# --------------------------------------------------------------------------
+# The statistical model: what terms exist and how strong the baseline priors are.
+# --------------------------------------------------------------------------
+model:
+  # 'normal' | 'student_t'. student_t is robust to promo/holiday spikes
+  likelihood: normal
+  # annual seasonality harmonics. 0 = no seasonality block. 2 is a good start
+  fourier_order: 0
+  # period of the seasonal cycle in days (365.25 = annual)
+  fourier_period_days: 365.25
+  # add a pooled per-region linear time trend
+  include_trend: false
+  # keep the region intercept alpha_g. false removes it entirely, so no ESTIMATED term can
+  # absorb sales the drivers should be explaining - reach for it when the intercept has eaten
+  # the decomposition. Note the level does not vanish: with run.dv_center: mean the baseline
+  # becomes the FIXED historical mean (zero posterior width) instead of a free parameter. Only
+  # sane with run.dv_center: mean
+  include_intercept: true
+  # prior sd of the POPULATION intercept (KPI is standardised, so 0.5 is wide)
+  alpha_prior_sd: 0.5
+  # prior scale of how far region intercepts spread around it
+  alpha_regional_sd: 0.5
+  # partial-pool the per-region noise level. false = independent sigma per region
+  pool_sigma: true
+
+
+# --------------------------------------------------------------------------
+# Data handling, the KPI scale (= the unit your priors live in) and run bookkeeping.
+# --------------------------------------------------------------------------
+run:
+  # output folder name. Change it every run or you overwrite the last one
+  run_name: run
+  # parent directory the run folder is created in
+  output_dir: outputs
+  # name of the date column in the input file
+  date_col: date
+  # name of the region column
+  region_col: region
+  # name of the KPI/dependent column. Pass it RAW - scaling happens here
+  dv_col: dv
+  # 'mean' | 'none' - what is subtracted from the KPI before fitting
+  dv_center: mean
+  # 'none'|'sd'|'mean'|'mean_positive'|'max' - the unit your PRIORS live in
+  dv_scale: sd
+  # 'region' (own scale each) | 'global' (one number for all regions)
+  dv_scale_scope: region
+  # 'auto'|'weekly'|'monthly' - sets every period count downstream
+  cadence: auto
+  # last N dates held out per region for OOS metrics. null = cadence preset
+  holdout_periods: 0
+  # posterior draws used for the decomposition and plots
+  report_draws: 400
+  # 'warn' | 'fail' - 'fail' refuses to persist an unconverged fit
+  on_convergence_failure: warn
+  # snap |v| < this * max|v| to 0 before scaling. ~1e-6 kills adstock dust
+  zero_threshold_rel: 0.0
+  # reject a scale-only feature whose scaling factor is below this
+  min_feature_scale: 1.0e-12
+  # warn when an always-on scaled feature is this flat (collinear with alpha)
+  near_constant_sd: 0.1
+
+
+# --------------------------------------------------------------------------
+# MCMC settings. Nothing here changes the model, only how well it is explored.
+# --------------------------------------------------------------------------
+sampler:
+  # posterior draws kept per chain
+  draws: 1000
+  # warmup/adaptation steps per chain (discarded)
+  tune: 1000
+  # independent chains. 4 is the minimum for a trustworthy R-hat
+  chains: 4
+  # NUTS acceptance target. Raise toward 0.99 to clear divergences
+  target_accept: 0.92
+  # random seed - set it, so a run is reproducible
+  seed: 42
+  # 'numpyro' (JAX/GPU) | 'pymc' | 'advi'
+  sampler: numpyro
+  # numpyro only: 'sequential' | 'parallel' | 'vectorized' (best on one GPU)
+  chain_method: sequential
+  # extra kwargs for the NUTS kernel only (mapping, {} for none)
+  nuts_kwargs: {}
+  # prior draws - these feed the contraction report, keep >= 500
+  prior_predictive_draws: 500
+  # keep pointwise log-lik for LOO/WAIC. Makes the trace much bigger
+  store_log_likelihood: false
+  # sampler: advi only - mean-field VI iterations
+  advi_iters: 30000
+  # false = a failed GPU run raises instead of silently going to CPU
+  allow_sampler_fallback: false
+
+
+# --------------------------------------------------------------------------
+# Which files each stage writes. The CORE tables are always written.
+# --------------------------------------------------------------------------
+output:
+  # 01_data: every row exactly as the model sees it
+  model_input_matrix: true
+  # 01_data: per region x feature scaled-column statistics
+  model_input_summary: true
+  # 01_data: kpi_by_region.png
+  data_plots: true
+  # 01_data: what each written prior means as a coefficient distribution
+  prior_summary: true
+  # 02_convergence: prior_posterior_contraction.png
+  contraction_plot: true
+  # 02_convergence: the three-curve prior/data/posterior chart per parameter
+  prior_posterior_plots: true
+  # cap on how many of those charts to draw (largest mean shift first)
+  prior_posterior_max: 60
+  # include mu_alpha/tau_alpha/z_alpha/alpha_region in the CONTRACTION report and its charts.
+  # false hides them when the intercept is a nuisance level. Never affects convergence tables or
+  # reconciliation
+  report_intercept: true
+  # 03_coefficients: per-feature forest plot across regions
+  forest_plots: true
+  # 04_fit: row-level actual / fitted / residual
+  actual_vs_predicted: true
+  # 04_fit: fit and residual charts
+  fit_plots: true
+  # 05_contributions: the vendor-style volume + % table
+  contribution_summary: true
+  # 05_contributions: volume per region x date x driver (large file)
+  contribution_timeseries: true
+  # 05_contributions: the beta x sum(x) x dv_scale audit trail
+  contribution_math: true
+  # 05_contributions: components -> fitted -> actual
+  contribution_reconciliation: true
+  # 05_contributions: contribution bars and stacked decomposition
+  contribution_plots: true
+  # 'none' | 'week' | 'year' | 'mat' - reporting blocks in contribution_summary
+  period_split: mat
+  # 'auto'|'weekly'|'monthly' - sets the MAT block length (52 weekly / 12 monthly)
+  cadence: auto
+  # also dump the pre-scaling feature values
+  include_raw_features: true
+  # region of practical equivalence on the SCALED coefficient axis. Gives prob_negligible, the
+  # only non-vacuous 'significance' for a sign-constrained feature (whose p_value is 0 by
+  # construction). 0 = skip
+  rope_scaled: 0.01
+  # resolution of every chart. 160 stays legible pasted into a deck
+  fig_dpi: 160
+  # multiplies every figure size. Raise for projection, lower to fit a page
+  fig_scale: 1.4
+
+
+# --------------------------------------------------------------------------
+# Expanding-window cross-validation, used only by cross_validation.run_cv().
+# --------------------------------------------------------------------------
+cv:
+  # run expanding-window cross-validation after the main fit. Off by default: every fold is a
+  # FULL refit, so a 5-fold CV costs roughly 5x the headline run. Turn it on once the single fit
+  # looks sane. Outputs land in 06_cross_validation/
+  enabled: false
+  # 'auto'|'weekly'|'monthly' - the preset every null below is filled from
+  cadence: auto
+  # test periods per fold (null -> 13 weekly / 3 monthly)
+  horizon: null
+  # number of expanding-window folds (null -> 5 weekly / 3 monthly)
+  n_folds: null
+  # periods between fold origins (null -> horizon)
+  step: null
+  # shortest training window (null -> 52 weekly / 12 monthly)
+  min_train_periods: null
+  # override sampler.draws for CV speed (null -> preset)
+  draws: null
+  # override sampler.tune for CV speed (null -> preset)
+  tune: null
+  # write the CV accuracy charts
+  make_plots: true

@@ -99,6 +99,10 @@ BUCKET_ORDER = ["hpos", "hneg", "hfree",
 # ---------------------------------------------------------------------------
 VALID_CADENCE = ("auto", "weekly", "monthly")
 
+# every parameter the region-intercept block creates, in one place, so the
+# reporting switch and the model builder cannot drift apart
+INTERCEPT_PARAMS = ("mu_alpha", "tau_alpha", "z_alpha", "alpha_region")
+
 
 @dataclass(frozen=True)
 class PeriodPlan:
@@ -430,12 +434,19 @@ class FeatureSpec:
         # the prior, the fit degrades, and the contributions are whatever the
         # priors implied. Warn rather than raise - a deliberately fixed
         # coefficient is a legitimate (if unusual) choice.
-        if s.sign != "free" and s.prior_sd < 0.05:
+        # Only meaningful for prior_sd_basis="log", where the written number IS
+        # the sampled sigma. Under "relative"/"absolute" the written number is
+        # converted first, so this test would both mis-describe it ("is on the
+        # LOG scale") and fire a second time alongside the post-conversion check
+        # further down - two warnings for one condition, one of them wrong.
+        if (s.sign != "free" and s.prior_sd < 0.05
+                and str(s.prior_sd_basis).strip().lower() == "log"):
             warnings.warn(
                 f"{s.name}: prior_sd={s.prior_sd:.4g} is on the LOG scale, so "
                 f"this pins the coefficient to about +/-{s.prior_sd:.1%} of "
                 f"{s.prior_mean:.4g} - the data cannot move it. If you meant "
-                "'20% uncertainty', use prior_sd=0.2, not 0.2*prior_mean.")
+                "'20% uncertainty', use prior_sd=0.2 with "
+                "prior_sd_basis='relative', not 0.2*prior_mean.")
         if s.pooling == "hierarchical" and 0 < s.regional_sd < 0.02:
             warnings.warn(
                 f"{s.name}: regional_sd={s.regional_sd:.4g} allows essentially "
@@ -668,6 +679,21 @@ class ModelConfig:
     fourier_order: int = 0              # 0 = no seasonality block
     fourier_period_days: float = 365.25
     include_trend: bool = False
+    include_intercept: bool = True      # region intercept alpha_g. False removes
+                                        # mu_alpha / tau_alpha / z_alpha /
+                                        # alpha_region from the model entirely, so
+                                        # no ESTIMATED term can absorb sales the
+                                        # drivers should be explaining (the vendor
+                                        # decomposition works this way).
+                                        # The level does NOT disappear: with
+                                        # dv_center="mean" the inverse transform
+                                        # still adds the training mean back, so
+                                        # __baseline_core__ becomes that FIXED
+                                        # number, with zero posterior width,
+                                        # rather than a free parameter.
+                                        # Only sane with dv_center="mean": with
+                                        # dv_center="none" the KPI keeps its level
+                                        # and nothing is left to carry it.
     alpha_prior_sd: float = 0.5         # population intercept prior (dv is standardised)
     alpha_regional_sd: float = 0.5
     pool_sigma: bool = True             # partial-pool region noise on the log scale
@@ -855,6 +881,17 @@ class OutputConfig:
                                         # posterior chart, one per parameter
     prior_posterior_max: int = 60       # cap on how many of those to draw,
                                         # taken in order of |mean shift|
+    report_intercept: bool = True       # include the region-intercept parameters
+                                        # (mu_alpha, tau_alpha, z_alpha,
+                                        # alpha_region) in the prior/posterior
+                                        # CONTRACTION report and its per-parameter
+                                        # charts. False drops those rows when the
+                                        # intercept is a nuisance level you do not
+                                        # present. It never touches the convergence
+                                        # tables (R-hat/ESS/divergences are always
+                                        # reported for every parameter) and never
+                                        # touches the decomposition, so
+                                        # contributions still reconcile.
     # ---- 03_coefficients --------------------------------------------------
     forest_plots: bool = True
     # ---- 04_fit -----------------------------------------------------------
@@ -942,6 +979,10 @@ class CVConfig:
     plus shorter chains, because 24 months cannot support a 13-period horizon
     or a 52-period minimum training window.
     """
+    enabled: bool = False              # run CV at all. Off by default because
+                                       # every fold is a FULL refit, so a 5-fold
+                                       # CV costs ~5x the headline run. Turn it
+                                       # on once the single fit looks sane.
     cadence: str = "auto"              # "auto" | "weekly" | "monthly"
     horizon: int | None = None         # test periods per fold  (13 wk / 3 mo)
     n_folds: int | None = None         # (5 wk / 3 mo)

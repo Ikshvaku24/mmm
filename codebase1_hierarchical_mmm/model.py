@@ -3,7 +3,8 @@
 Replaces the per-region loop of production_code.py with a single vectorised
 PyMC model. Structure per region g, time t (all on the scaled data):
 
-    y[g,t] = alpha_g                                  region intercept (pooled)
+    y[g,t] = alpha_g                                  region intercept (pooled,
+                                                      optional: include_intercept)
            + Fourier seasonality (optional, global)
            + trend_g * t (optional, pooled)
            + sum_j beta[g,j] * X[g,t,j]               features, pooled by config
@@ -119,12 +120,18 @@ def build_model(pdata: PreparedData, cfg: ModelConfig) -> pm.Model:
     with pm.Model(coords=coords) as model:
         terms = []
 
-        # baseline: hierarchical region intercept (Meridian: tau_g)
-        mu_a = pm.Normal("mu_alpha", 0.0, cfg.alpha_prior_sd)
-        tau_a = pm.HalfNormal("tau_alpha", cfg.alpha_regional_sd)
-        z_a = pm.Normal("z_alpha", 0.0, 1.0, dims="region")
-        alpha = pm.Deterministic("alpha_region", mu_a + tau_a * z_a, dims="region")
-        terms.append(alpha[reg])
+        # baseline: hierarchical region intercept (Meridian: tau_g).
+        # include_intercept=False drops the whole block, leaving no free level
+        # term - the drivers (and seasonality/trend, if on) must explain the KPI
+        # by themselves. That is how the vendor decomposition is built, and it is
+        # the lever to pull when the intercept has absorbed most of sales.
+        if cfg.include_intercept:
+            mu_a = pm.Normal("mu_alpha", 0.0, cfg.alpha_prior_sd)
+            tau_a = pm.HalfNormal("tau_alpha", cfg.alpha_regional_sd)
+            z_a = pm.Normal("z_alpha", 0.0, 1.0, dims="region")
+            alpha = pm.Deterministic("alpha_region", mu_a + tau_a * z_a,
+                                     dims="region")
+            terms.append(alpha[reg])
 
         # seasonality (light version of Meridian's spline mu_t)
         if pdata.X_fourier is not None:
@@ -148,6 +155,10 @@ def build_model(pdata: PreparedData, cfg: ModelConfig) -> pm.Model:
             beta = _bucket_betas(model, bname, specs, pdata.region_names)
             terms.append((pt.constant(X_b) * beta[reg]).sum(axis=1))
 
+        if not terms:
+            raise ValueError(
+                "the model has no terms: include_intercept=False with no "
+                "features, no seasonality and no trend leaves nothing to fit")
         mu = sum(terms)
 
         # noise: one sigma per region. Default = partial pooling on the log scale

@@ -13,6 +13,39 @@ so there are exactly four places a number can come from — **the coefficient**
 model structure** (what else competes for the same variance). Diagnose which one
 before touching anything.
 
+### Where the levers live
+
+| Lever family | Set it in |
+|---|---|
+| per-feature priors, signs, pooling, scaling, reporting reference | `feature_priors.csv` — one row per feature |
+| everything else (model / run / sampler / output / cv) | `config.yaml`, or the Python config objects directly |
+
+`config.yaml` carries **every** setting at its **default value**, with a line of
+help above each one, so it doubles as the reference for what the pipeline does
+when you say nothing. Omit any key and that default applies; a **misspelled key
+is an error**, not a silent default.
+
+```python
+from settings import run_from_yaml
+result = run_from_yaml("config.yaml")
+```
+
+Regenerate it after upgrading the codebase with
+`python settings.py --write config.yaml`. Each run also drops its **effective**
+settings — every default filled in — at
+`outputs/<run_name>/01_data/resolved_config.yaml`, which is the record of what
+actually ran.
+
+---
+
+### Start from the warnings
+
+Every run writes `00_warnings/00_INDEX.md`: the run's own warnings grouped by
+category, each document naming the affected features and the fix. Read the
+`high` rows before diagnosing anything by hand — `prior_pins_coefficient` and
+`collinear_with_intercept` between them explain most surprises, and they name
+the exact features.
+
 ---
 
 ## 0. The diagnostic loop — always start here
@@ -222,7 +255,50 @@ intercept near 0.9 means it has claimed ~90% of sales before any feature speaks.
 > does not choose which. A feature already too high can go higher. Treat it as
 > an experiment and re-check the comparison, not a guaranteed fix.
 
-### 2.2 `fourier_order` / `include_trend` — seasonality and trend
+### 2.2 `include_intercept` — remove the intercept outright
+
+Default **`true`**. `alpha_prior_sd=0.05` (§2.1) *squeezes* the intercept;
+`include_intercept: false` **deletes it**. No `mu_alpha`, no `tau_alpha`, no
+`alpha_region` — the model simply has no estimated level term, so nothing can
+quietly absorb sales the named drivers should be explaining.
+
+**What actually happens to the level.** It does not vanish. With
+`dv_center: mean` the KPI is centred before fitting and the mean is added back
+by the inverse transform, so `__baseline_core__` becomes that **fixed
+historical mean** — the same number every draw, **zero posterior width**. The
+baseline stops being a free parameter and becomes an accounting constant. Every
+contribution still reconciles to actual sales.
+
+| | intercept on | intercept off |
+|---|---|---|
+| `__baseline_core__` | estimated, has an HDI | the training mean, no HDI |
+| what absorbs unexplained variance | the intercept | the residual |
+| `alpha_region` in the reports | present | absent |
+| drivers | compete with a free level | carry everything above the mean |
+
+> **Use when:** the benchmark you are reproducing has no intercept (region
+> fixed-effect dummies *are* its intercept), or `mu_alpha` has run away — on a
+> KPI scaled to mean 1.0, a posterior near 0.9 means the intercept claimed ~90%
+> of sales before any feature spoke.
+>
+> **Do not use with `dv_center: none`.** The KPI still carries its level and
+> nothing is left to hold it, so every coefficient is dragged upwards to fake an
+> intercept. `run_pipeline` warns, but the run will not stop you.
+
+Order of escalation, mildest first:
+
+1. `alpha_prior_sd: 0.05` — intercept pinned near zero but still estimated.
+2. `include_intercept: false` — gone.
+3. Explicit region dummies as features, if you want a level you can *see*.
+
+Reporting-only twin: `output.report_intercept: false` hides
+`mu_alpha` / `tau_alpha` / `z_alpha` / `alpha_region` from the contraction
+report and its per-parameter charts, and **nothing else** — convergence tables
+still cover every parameter (an intercept with a bad R-hat is never hidden) and
+the decomposition is untouched. Use it to stop a nuisance level crowding out the
+drivers in the diagnostics you actually read.
+
+### 2.3 `fourier_order` / `include_trend` — seasonality and trend
 
 Defaults `0` and `False`.
 
@@ -231,12 +307,12 @@ Defaults `0` and `False`.
 > same weeks, and the dummies will shrink. If holdout drifts while actuals
 > recover, a latent trend extrapolating is a common cause.
 
-### 2.3 `likelihood` — `normal` | `student_t`
+### 2.4 `likelihood` — `normal` | `student_t`
 
 > **Use `student_t`** when a few weeks (promotions, stockouts) drag the fit.
 > It stops outliers from bending every coefficient.
 
-### 2.4 `pool_sigma`
+### 2.5 `pool_sigma`
 
 Partial-pool region noise on the log scale. Keep `True` unless a region has
 genuinely different volatility and enough data to prove it.
@@ -364,13 +440,16 @@ still sums to the fitted value.
 | High R-hat, saturated tree depth, divergences | level variable collinear with intercept | `center_mode=mean` (§4.2) |
 | Offsetting ± contributions between two features | mutual collinearity | `center_mode`, or merge them |
 | `baseline_core_pct` very negative, features > 100% | redundant free intercept | `alpha_prior_sd=0.05` (§2.1) |
+| Intercept alone claims most of sales (`mu_alpha` ≈ 0.9 on a mean-1.0 KPI) | a free level is out-competing every driver | `alpha_prior_sd=0.05`, then `include_intercept: false` (§2.2) |
+| Intercept rows drown the contraction report | nuisance parameter, not a driver | `output.report_intercept: false` (§2.2) |
 | Centred feature reports ≈ 0% | measured vs its own mean | `contribution_reference=zero` (§5.1) |
 | Every contribution off by a constant factor | scale mismatch | `dv_scale` / `dv_scale_scope` (§4.1) |
 | Regions all identical when they should differ | `regional_sd` too small, or `global` pooling | §1.5 / §1.6 |
 | Regions wildly different, small ones noisy | no pooling | `pooling=hierarchical` (§1.6) |
-| Holdout drifts away while actuals recover | trend extrapolating / seasonality too smooth | `include_trend`, `fourier_order` (§2.2) |
-| A few weeks bend every coefficient | outliers | `likelihood="student_t"` (§2.3) |
+| Holdout drifts away while actuals recover | trend extrapolating / seasonality too smooth | `include_trend`, `fourier_order` (§2.3) |
+| A few weeks bend every coefficient | outliers | `likelihood="student_t"` (§2.4) |
 | `p_value = 0` everywhere | sign constraints — vacuous by construction | read `prob_negligible` (§5.2) |
+| Accuracy looks fine but a coefficient moves every refit | fragile, window-dependent estimate | `cv.enabled: true`, then `cv_stability_by_region.csv` |
 
 ---
 
@@ -470,10 +549,13 @@ beta_g              = mu + tau·z_g                — hierarchical
 | fix its direction | `sign_constraint` |
 | change region sharing | `pooling`, `regional_sd_prior` |
 | free/pin the level | `alpha_prior_sd` |
+| remove the level entirely | `model.include_intercept: false` |
+| hide the intercept from diagnostics | `output.report_intercept: false` |
+| check coefficients across windows | `cv.enabled: true` |
 | fix sampler geometry | `center_mode=mean` |
 | change the counterfactual | `contribution_reference` |
 | change the units | `dv_scale`, `scale_mode` |
 
-**Related:** `OUTPUTS_GUIDE.md` (every file and column) ·
+**Related:** `config.yaml` (every setting + its default) · `OUTPUTS_GUIDE.md` (every file and column) ·
 `docs/understanding_prior_sd_conversion.md` · `docs/when_cneter_is_not_1.md` ·
 `../CLAUDE.md` (run history and decisions already made)

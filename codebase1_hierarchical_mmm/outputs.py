@@ -236,8 +236,13 @@ def compute_decomposition(idata, pdata: PreparedData, cfg: ModelConfig,
     G = len(pdata.region_names)
     S = post.sizes["sample"]
 
-    alpha = post["alpha_region"].transpose("sample", "region").values
-    core = alpha[:, reg]
+    # ModelConfig.include_intercept=False leaves no alpha_region in the trace;
+    # the core baseline is then seasonality + trend only (or exactly zero).
+    if "alpha_region" in post:
+        alpha = post["alpha_region"].transpose("sample", "region").values
+        core = alpha[:, reg]
+    else:
+        core = np.zeros((S, len(reg)), dtype=float)
     if pdata.X_fourier is not None and "beta_fourier" in post:
         bf = post["beta_fourier"].transpose("sample", "fourier").values
         core = core + bf @ pdata.X_fourier.T

@@ -1,0 +1,403 @@
+"""Collect the run's warnings, group them by CATEGORY, and write one document
+per category instead of a wall of text in the notebook.
+
+The problem this solves
+-----------------------
+Almost every warning in this codebase is raised **per feature**. With 65
+features in the prior file, one mistake in one column of `feature_priors.csv`
+produces 65 near-identical paragraphs in the cell output - so the one warning
+that mattered is invisible, and the ones that are merely informational are
+indistinguishable from it. The text is also the wrong shape: what you want is
+"these 44 features are pinned, here they are in a table, here is the fix",
+not the same 6 lines 44 times.
+
+So the run captures its warnings, matches each to a category, and writes
+
+    00_warnings/00_INDEX.md          counts per category + severity, read first
+    00_warnings/<category>.md        what it means, why it fires, the fix, and
+                                     the table of affected features/regions
+    00_warnings/all_warnings.csv     every warning as a row, for filtering
+
+and prints ONE line per category to the console.
+
+Nothing is suppressed - every warning still reaches the CSV verbatim. The
+console just stops being the place you are expected to read them.
+"""
+from __future__ import annotations
+
+import contextlib
+import os
+import re
+import warnings
+
+import pandas as pd
+
+# --------------------------------------------------------------------------- #
+# categories
+# --------------------------------------------------------------------------- #
+# Each rule: (slug, severity, match-substrings, title, what it means, the fix).
+# `match` is checked against the warning text; the FIRST rule that matches wins,
+# so order them most-specific first. Anything unmatched lands in "other", which
+# is deliberately loud - an uncategorised warning is one nobody has triaged.
+_RULES = (
+    dict(
+        slug="prior_pins_coefficient",
+        severity="high",
+        match=("the data cannot move it", "The data cannot move it"),
+        title="Prior is so tight the data cannot move the coefficient",
+        means=(
+            "`prior_sd` for these features converts to a log-scale sigma below "
+            "0.05, i.e. the coefficient is pinned to within about +/-5% of "
+            "`prior_mean`. The posterior will come back as the prior wearing a "
+            "hat, and the contribution you report is simply the number you "
+            "wrote in the prior file - not something the model learned."),
+        why=(
+            "The usual cause is writing `0.2 * prior_mean` when you meant "
+            "\"+/-20% uncertainty\". For a sign-constrained feature `prior_sd` "
+            "is on the LOG scale, so 20% uncertainty is `prior_sd=0.2` with "
+            "`prior_sd_basis=relative` - not 0.2 times the mean."),
+        fix=(
+            "In `feature_priors.csv`, set `prior_sd_basis=relative` and write "
+            "the fraction you actually mean (0.2 = +/-20%). If the pin is "
+            "deliberate - you are imposing a benchmark coefficient rather than "
+            "estimating one - this warning is the receipt, and the feature's "
+            "`contraction` in 02_convergence will be ~0. Say so when you "
+            "present it. See docs/TUNING_GUIDE.md section 1.3."),
+    ),
+    dict(
+        slug="pooling_collapsed",
+        severity="medium",
+        match=("hierarchical pooling collapses",),
+        title="regional_sd is so small that hierarchical pooling collapses",
+        means=(
+            "`regional_sd_prior` below 0.02 leaves essentially no room for "
+            "regions to differ, so `beta_g = mu + tau*z_g` becomes one shared "
+            "coefficient in all but name."),
+        why=(
+            "That is only correct if every region truly responds identically "
+            "on the SCALED axis - which cannot hold if the regions were scaled "
+            "by one global number (`dv_scale_scope='global'`)."),
+        fix=(
+            "Raise `regional_sd_prior`, or say what you mean directly with "
+            "`pooling=global` - which is honest about fitting one coefficient "
+            "and costs one parameter instead of G. TUNING_GUIDE section 1.5/1.6."),
+    ),
+    dict(
+        slug="per_region_prior_sd_ignored",
+        severity="medium",
+        match=("per-region prior_sd is ignored",),
+        title="A per-region prior_sd was written but is not used",
+        means=(
+            "Under `pooling='hierarchical'` the spread across regions is "
+            "governed by the pooled `regional_sd`, so a per-region `prior_sd` "
+            "on an override row has nowhere to act and was dropped."),
+        why="The per-region MEAN is still applied; only the sd is ignored.",
+        fix=(
+            "Delete the `global_prior_sd` cell on those override rows, or "
+            "switch the feature to `pooling=independent`, where each region "
+            "genuinely gets its own prior. TUNING_GUIDE section 1.7."),
+    ),
+    dict(
+        slug="prior_mean_not_a_magnitude",
+        severity="high",
+        match=("need prior_mean > 0", "(a magnitude)"),
+        title="A sign-constrained feature was given a non-positive prior_mean",
+        means=(
+            "For `sign_constraint=positive|negative` the coefficient is built "
+            "as `+/-exp(...)`, so `prior_mean` is a MAGNITUDE and must be > 0. "
+            "The direction comes from `sign_constraint`, never from the sign "
+            "of the mean."),
+        why=(
+            "Writing a negative mean for a negative feature is the common "
+            "reading, and it is wrong here - the value was replaced by a "
+            "default (0.05) or fell back to the feature-level prior, so the "
+            "model is NOT using the number you wrote."),
+        fix=(
+            "Write the positive magnitude and set `sign_constraint=negative`. "
+            "TUNING_GUIDE section 1.4."),
+    ),
+    dict(
+        slug="negative_values_uncentred",
+        severity="high",
+        match=("assumes non-negative values",),
+        title="A sign-constrained feature has negative values but is not centred",
+        means=(
+            "Scaling without centring divides by the mean of positive values "
+            "and assumes the column never goes negative. These columns do, so "
+            "the sign constraint is being applied to an axis that crosses "
+            "zero and the constraint no longer means what it says."),
+        why=(
+            "Typically a level variable (price index, distribution) or a "
+            "de-meaned column arriving where a spend column was expected."),
+        fix=(
+            "Set `center=1` (or `center_mode=mean`) for these features. If you "
+            "do, also set `contribution_reference=zero` or their contribution "
+            "collapses to ~0, because the centred column sums to zero over the "
+            "training window. TUNING_GUIDE sections 4.2 and 5.1."),
+    ),
+    dict(
+        slug="collinear_with_intercept",
+        severity="high",
+        match=("almost collinear with the region intercept",),
+        title="An always-on feature is nearly constant and fights the intercept",
+        means=(
+            "After scaling without centring these columns sit at ~1.0 every "
+            "period, which is exactly what the region intercept already is. "
+            "The sampler cannot separate the two."),
+        why=(
+            "This is the defect that broke real_data_v1: coefficients of +31 "
+            "and -33 on TDP/AVP, a decomposition of +91% / -97% that cancelled "
+            "out, max R-hat 1.26 and tree depth saturated in 100% of steps."),
+        fix=(
+            "Set `center_mode=mean` for these features (the legacy `center=1` "
+            "flag is a no-op when an explicit `center_mode` is present) and "
+            "pair it with `contribution_reference=zero`. Centring is a "
+            "reparameterisation: it fixes the geometry without changing the "
+            "attribution. TUNING_GUIDE section 4.2."),
+    ),
+    dict(
+        slug="degenerate_feature_column",
+        severity="high",
+        match=("The column is constant, empty or non-positive",),
+        title="A feature column is degenerate over the training window",
+        means=(
+            "The scaling factor came out zero, negative or non-finite, so 1.0 "
+            "was used instead. The column is constant, all-zero, or entirely "
+            "non-positive in the training window."),
+        why=(
+            "Usually a column that does not belong in the model at all - the "
+            "v1 run had three coupon columns whose non-zero values were all "
+            "~1e-15, i.e. float noise being fitted as a regressor."),
+        fix=(
+            "Drop these rows from `feature_priors.csv`, or check they are the "
+            "columns you meant. `run.zero_threshold_rel: 1.0e-6` snaps "
+            "adstock-tail dust to exact zero; `run.min_feature_scale` rejects "
+            "a column whose own scale is dust."),
+    ),
+    dict(
+        slug="seasonality_overfit_risk",
+        severity="medium",
+        match=("risk of overfitting", "is high for"),
+        title="fourier_order is high for the number of training periods",
+        means=(
+            "Each harmonic costs two parameters. With few training periods the "
+            "seasonal block can chase noise, and it competes with any explicit "
+            "seasonal dummies you already have."),
+        why="Rule of thumb: at least 6 training periods per harmonic.",
+        fix=(
+            "Lower `model.fourier_order`, or drop it to 0 if seasonality is "
+            "already carried by dummies. TUNING_GUIDE section 2.3."),
+    ),
+    dict(
+        slug="cadence_ambiguous",
+        severity="medium",
+        match=("neither weekly nor monthly",),
+        title="The date spacing is neither weekly nor monthly",
+        means=(
+            "Cadence was inferred as monthly as a fallback. Every downstream "
+            "period count - holdout length, MAT block size, CV horizon and "
+            "minimum training window - follows from it."),
+        why="Irregular dates, or a panel that is not on a calendar grid.",
+        fix="Set `run.cadence` (and `cv.cadence`) explicitly rather than 'auto'.",
+    ),
+    dict(
+        slug="intercept_without_centering",
+        severity="high",
+        match=("include_intercept=False with dv_center",),
+        title="The intercept was removed but the KPI still carries its level",
+        means=(
+            "`model.include_intercept: false` leaves no term to hold the level "
+            "of the KPI, and `run.dv_center: none` leaves that level in the "
+            "data. Every coefficient will be dragged upwards to fake an "
+            "intercept."),
+        why="The two settings are only coherent together one way round.",
+        fix=(
+            "Set `run.dv_center: mean`. The baseline then becomes the fixed "
+            "training mean instead of a free parameter. TUNING_GUIDE section 2.2."),
+    ),
+)
+
+_OTHER = dict(
+    slug="other",
+    severity="review",
+    match=(),
+    title="Uncategorised warnings",
+    means="These did not match any known category.",
+    why=("An uncategorised warning is one nobody has triaged yet - read it in "
+         "full rather than assuming it is routine."),
+    fix=("If it turns out to be a recurring, understood condition, add a rule "
+         "for it in warnings_report.py so it gets its own document and its "
+         "own fix instructions."),
+)
+
+SEVERITY_ORDER = {"high": 0, "medium": 1, "review": 2, "low": 3}
+
+
+def classify(message: str) -> dict:
+    """Which category rule does this warning text belong to?"""
+    text = str(message)
+    for rule in _RULES:
+        if any(m in text for m in rule["match"]):
+            return rule
+    return _OTHER
+
+
+# `name: rest` or `name[region]: rest` - every per-feature warning in this
+# codebase is written that way, which is what makes the tables possible.
+_SUBJECT = re.compile(r"^\s*([^\s:][^:]{0,200}?)(?:\[([^\]]+)\])?\s*:\s")
+
+
+def split_subject(message: str) -> tuple[str, str, str]:
+    """(feature, region, remaining text) for a per-feature warning."""
+    text = str(message).strip()
+    m = _SUBJECT.match(text)
+    if not m:
+        return "", "", text
+    feature = (m.group(1) or "").strip()
+    # a sentence that merely contains a colon is not a subject line
+    if " " in feature and len(feature.split()) > 6:
+        return "", "", text
+    return feature, (m.group(2) or "").strip(), text[m.end():].strip()
+
+
+@contextlib.contextmanager
+def collect_warnings():
+    """Capture every warning raised inside the block, without swallowing it.
+
+    Yields the list the warnings land in. `simplefilter("always")` is essential:
+    the default filter shows a given warning once per source line, so 44
+    features tripping the same check at the same line would be recorded once
+    and the other 43 silently lost from the report.
+    """
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        yield caught
+
+
+def to_frame(caught) -> pd.DataFrame:
+    """The captured warnings as one row each, with category and subject."""
+    rows = []
+    for w in caught or []:
+        text = str(getattr(w, "message", w))
+        rule = classify(text)
+        feature, region, detail = split_subject(text)
+        rows.append({
+            "category": rule["slug"],
+            "severity": rule["severity"],
+            "feature": feature,
+            "region": region,
+            "warning_class": getattr(getattr(w, "category", None), "__name__", ""),
+            "source": f"{os.path.basename(str(getattr(w, 'filename', '')))}"
+                      f":{getattr(w, 'lineno', '')}",
+            "message": " ".join(text.split()),
+            "detail": " ".join(detail.split()),
+        })
+    cols = ["category", "severity", "feature", "region", "warning_class",
+            "source", "message", "detail"]
+    return pd.DataFrame(rows, columns=cols)
+
+
+def _rule_by_slug(slug: str) -> dict:
+    for r in _RULES:
+        if r["slug"] == slug:
+            return r
+    return _OTHER
+
+
+def _table(df: pd.DataFrame) -> list[str]:
+    """A markdown table of who tripped this category."""
+    named = df[df["feature"].astype(str) != ""]
+    if named.empty:
+        return ["```", *[f"- {m}" for m in df["message"].unique()[:40]], "```"]
+    has_region = (named["region"].astype(str) != "").any()
+    head = "| feature | region | detail |" if has_region else "| feature | detail |"
+    rule = "|---|---|---|" if has_region else "|---|---|"
+    out = [head, rule]
+    for _, r in named.iterrows():
+        detail = str(r["detail"]).replace("|", "/")
+        if len(detail) > 200:
+            detail = detail[:197] + "..."
+        out.append(f"| `{r['feature']}` | {r['region']} | {detail} |" if has_region
+                   else f"| `{r['feature']}` | {detail} |")
+    unnamed = df[df["feature"].astype(str) == ""]
+    if len(unnamed):
+        out += ["", "Not tied to one feature:", ""]
+        out += [f"- {m}" for m in unnamed["message"].unique()]
+    return out
+
+
+def write_warning_docs(caught, outdir: str, run_name: str = "") -> pd.DataFrame:
+    """Write 00_INDEX.md, one <category>.md per category, and all_warnings.csv.
+
+    Returns the frame so callers can print a summary. Writing an index even
+    when there are no warnings matters: a missing file is ambiguous ("did it
+    not run, or was it clean?"), an explicit "no warnings" is not.
+    """
+    df = to_frame(caught)
+    os.makedirs(outdir, exist_ok=True)
+    df.to_csv(os.path.join(outdir, "all_warnings.csv"), index=False)
+
+    if df.empty:
+        with open(os.path.join(outdir, "00_INDEX.md"), "w", encoding="utf-8") as f:
+            f.write(f"# Warnings{' - ' + run_name if run_name else ''}\n\n"
+                    "No warnings were raised during this run.\n")
+        return df
+
+    counts = (df.groupby(["category", "severity"]).size()
+              .reset_index(name="n"))
+    counts["_ord"] = counts["severity"].map(SEVERITY_ORDER).fillna(9)
+    counts = counts.sort_values(["_ord", "n"], ascending=[True, False])
+
+    lines = [f"# Warnings{' - ' + run_name if run_name else ''}", "",
+             f"{len(df)} warnings in {counts.shape[0]} categories. "
+             "Read the high-severity ones first; each links to a document with "
+             "the affected features and the fix.", "",
+             "| severity | category | count | document |", "|---|---|---|---|"]
+    for _, r in counts.iterrows():
+        rule = _rule_by_slug(r["category"])
+        lines.append(f"| **{r['severity']}** | {rule['title']} | {r['n']} | "
+                     f"[{r['category']}.md]({r['category']}.md) |")
+    lines += ["", "Every warning verbatim, one row each: `all_warnings.csv`.", "",
+              "> These are warnings, not errors - the run completed. A "
+              "high-severity one means a number in the report is probably not "
+              "measuring what you think it measures.", ""]
+    with open(os.path.join(outdir, "00_INDEX.md"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines))
+
+    for slug, grp in df.groupby("category"):
+        rule = _rule_by_slug(slug)
+        body = [f"# {rule['title']}", "",
+                f"**Severity:** {rule['severity']} &nbsp;&nbsp; "
+                f"**Raised {len(grp)} time(s)**"
+                + (f" across {grp['feature'].nunique()} features"
+                   if (grp['feature'].astype(str) != '').any() else ""), "",
+                "## What it means", "", rule["means"], "",
+                "## Why it fires", "", rule["why"], "",
+                "## What to do", "", rule["fix"], "",
+                "## Affected", ""]
+        body += _table(grp)
+        body += ["", "---", "",
+                 f"Source: `{'`, `'.join(sorted(set(grp['source'])))}`"]
+        with open(os.path.join(outdir, f"{slug}.md"), "w", encoding="utf-8") as f:
+            f.write("\n".join(body) + "\n")
+    return df
+
+
+def print_warning_summary(df: pd.DataFrame, outdir: str) -> None:
+    """One line per category on the console, instead of one per feature."""
+    if df is None or df.empty:
+        print("[warnings] none")
+        return
+    counts = (df.groupby(["category", "severity"]).size()
+              .reset_index(name="n"))
+    counts["_ord"] = counts["severity"].map(SEVERITY_ORDER).fillna(9)
+    counts = counts.sort_values(["_ord", "n"], ascending=[True, False])
+    print(f"[warnings] {len(df)} warnings in {len(counts)} categories "
+          f"-> {outdir}")
+    for _, r in counts.iterrows():
+        rule = _rule_by_slug(r["category"])
+        n_feat = df[(df["category"] == r["category"])
+                    & (df["feature"].astype(str) != "")]["feature"].nunique()
+        extra = f", {n_feat} features" if n_feat else ""
+        print(f"  [{r['severity']:>6}] {r['n']:>4}x{extra:<16} "
+              f"{rule['title']}  -> 00_warnings/{r['category']}.md")
