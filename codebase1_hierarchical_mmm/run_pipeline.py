@@ -41,8 +41,10 @@ from diagnostics import (convergence_report, enforce_convergence,
                          prior_posterior_report, quick_convergence_checks)
 from fit import fit, sample_prior
 from model import build_model
-from outputs import (coefficient_report, compute_decomposition,
-                     contribution_report, fit_report, prior_predictive_plot)
+from assumptions import write_assumptions, write_collinearity
+from outputs import (beta_draws_by_feature, coefficient_report,
+                     compute_decomposition, contribution_report, fit_report,
+                     prior_predictive_plot, stack_posterior)
 from plotting import set_figure_defaults
 from warnings_report import (collect_warnings, print_warning_summary,
                              write_warning_docs)
@@ -54,7 +56,8 @@ def run(df: pd.DataFrame,
         sampler_cfg: SamplerConfig | None = None,
         save_trace: bool = True,
         out_cfg: OutputConfig | None = None,
-        cv_cfg: CVConfig | None = None):
+        cv_cfg: CVConfig | None = None,
+        extra_warnings: list | None = None):
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
@@ -92,7 +95,12 @@ def run(df: pd.DataFrame,
         result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
                              dirs, root, save_trace)
 
-    wdf = write_warning_docs(caught, dirs["00_warnings"], run_cfg.run_name)
+    # Warnings raised while the CONFIG was being read happen before this
+    # function is reached (load_feature_config runs in the caller), so the
+    # driver captures them and hands them in - otherwise they escape to the
+    # notebook, which is the one place they are not supposed to appear.
+    wdf = write_warning_docs(list(extra_warnings or []) + list(caught),
+                             dirs["00_warnings"], run_cfg.run_name)
     print_warning_summary(wdf, dirs["00_warnings"])
     result["warnings"] = wdf
 
@@ -114,6 +122,10 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     print("[1/5] preparing data")
     pdata = prepare_data(df, run_cfg, model_cfg)
     write_data_stage_outputs(pdata, dirs["01_data"], out_cfg)
+    # Pre-fit collinearity: a property of the DATA, so it is computed before any
+    # sampling and its verdict is valid whatever the priors turn out to do.
+    collin = (write_collinearity(pdata, model_cfg, dirs["01_data"])
+              if out_cfg.collinearity else None)
 
     print("[2/5] building + sampling model")
     model = build_model(pdata, model_cfg)
@@ -136,6 +148,12 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     decomp = compute_decomposition(idata, pdata, model_cfg,
                                    n_draws=run_cfg.report_draws)
     metrics = fit_report(decomp, pdata, dirs["04_fit"], out_cfg)
+    if out_cfg.assumption_checks:
+        # Post-fit: what the FITTED model could separate, and whether the
+        # residuals behave the way the likelihood assumes.
+        write_assumptions(decomp, pdata, dirs["04_fit"], model_cfg,
+                          beta_draws_by_feature(stack_posterior(idata), pdata),
+                          collin)
 
     print("[5/5] contributions")
     # coef is passed in so contribution_math.csv can print the median

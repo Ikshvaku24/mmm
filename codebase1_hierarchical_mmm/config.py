@@ -513,12 +513,19 @@ class FeatureSpec:
             s.regional_sd_log = float(s.regional_sd)
         # the < 0.05 warning above tests the WRITTEN number; under a converted
         # basis the sampled sigma is what matters, so re-check it
+        # Under a NON-log basis a small number is not a units mistake - writing
+        # 0.02 with prior_sd_basis='relative' says "+/-2%", which is exactly
+        # what the author meant. So this is NOT the "did you mean 20%?" warning;
+        # it is a note that the coefficient is being FIXED rather than
+        # estimated, which changes how the contribution must be described.
         if s.sign != "free" and s.prior_sd_basis != "log" and s.sigma_log < 0.05:
             warnings.warn(
                 f"{s.name}: prior_sd={s.prior_sd:.4g} with "
-                f"prior_sd_basis={s.prior_sd_basis!r} converts to a log-scale "
-                f"sigma of {s.sigma_log:.4g}, which pins the coefficient to "
-                f"about +/-{s.sigma_log:.1%}. The data cannot move it.")
+                f"prior_sd_basis={s.prior_sd_basis!r} is a deliberate "
+                f"+/-{s.prior_sd:.1%} band. The coefficient is therefore FIXED "
+                "by the prior, not estimated: its posterior will be its prior "
+                "and its contribution is an assumption, not a finding. Valid "
+                "choice - recorded so the report says so.")
         return s
 
     # -- per-region prior lookup (falls back to the feature-level prior) ----
@@ -870,6 +877,11 @@ class OutputConfig:
     model_input_matrix: bool = True     # every row exactly as the model sees it
     model_input_summary: bool = True    # per region x feature scaled-column stats
     data_plots: bool = True             # kpi_by_region.png
+    collinearity: bool = True           # collinearity_summary/vif/pairs.csv -
+                                        # VIF, Belsley condition number and
+                                        # correlated pairs, measured on the
+                                        # MODEL'S design matrix (intercept +
+                                        # Fourier + trend + features), per region
     prior_summary: bool = True          # what each written prior means as a
                                         # coefficient distribution (mu/sigma
                                         # actually sampled + implied median,
@@ -896,12 +908,26 @@ class OutputConfig:
     forest_plots: bool = True
     # ---- 04_fit -----------------------------------------------------------
     actual_vs_predicted: bool = True    # row-level actual / fitted / residual
+    assumption_checks: bool = True      # assumption_checks.csv +
+                                        # posterior_correlation.csv +
+                                        # assumptions_report.md - linearity,
+                                        # homoscedasticity, autocorrelation,
+                                        # residual tails, influence, and which
+                                        # coefficient pairs are trading off
     fit_plots: bool = True
     # ---- 05_contributions -------------------------------------------------
     contribution_summary: bool = True        # vendor-style volume + % table
     contribution_timeseries: bool = True     # volume per region x date x driver
     contribution_math: bool = True           # beta x sum(x) x sd_y audit trail
     contribution_reconciliation: bool = True  # components -> fitted -> actual
+    benchmark_comparison: bool = True    # benchmark_comparison.xlsx (or .csv):
+                                        # one row per region x feature with the
+                                        # run's numbers already laid out, ONE
+                                        # empty column to paste a benchmark
+                                        # contribution into, and live formulas
+                                        # for %diff, the ratio, delta and the
+                                        # corrected global_prior_mean. Needs
+                                        # contribution_math
     contribution_plots: bool = True
     # ---- options ----------------------------------------------------------
     period_split: str = "mat"           # "none" | "week" | "year" | "mat"
@@ -927,10 +953,12 @@ class OutputConfig:
                                         # projection, lower to fit more on a page
 
     _FLAGS = ("model_input_matrix", "model_input_summary", "data_plots",
-              "prior_summary", "contraction_plot", "prior_posterior_plots", "forest_plots", "actual_vs_predicted",
+              "collinearity", "prior_summary", "contraction_plot",
+              "prior_posterior_plots", "forest_plots", "actual_vs_predicted",
+              "assumption_checks",
               "fit_plots", "contribution_summary", "contribution_timeseries",
               "contribution_math", "contribution_reconciliation",
-              "contribution_plots")
+              "benchmark_comparison", "contribution_plots")
 
     def __post_init__(self):
         if self.period_split not in {"none", "week", "year", "mat"}:

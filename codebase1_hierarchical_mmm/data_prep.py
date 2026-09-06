@@ -326,19 +326,34 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         print(f"[data] zeroed near-zero dust (|v| < {run_cfg.zero_threshold_rel:g} "
               f"x max|v|) in {len(dust_counts)} features, e.g. "
               f"{dict(list(dust_counts.items())[:5])}")
-    for name, regs in near_constant.items():
+    # A near-constant column is only collinear with the INTERCEPT if there is
+    # one. With include_intercept=False the hazard is different and smaller:
+    # such columns are collinear with EACH OTHER (all of them are ~the same
+    # constant), so the warning only makes sense from the second one onward.
+    if getattr(model_cfg, "include_intercept", True):
+        for name, regs in near_constant.items():
+            warnings.warn(
+                f"{name}: always on but nearly constant after scaling without "
+                f"centring (scaled sd < {run_cfg.near_constant_sd:g}) in regions "
+                f"{regs}. It is "
+                "almost collinear with the region intercept, so the sampler cannot "
+                "separate its coefficient from the baseline - expect poor mixing "
+                "(high R-hat, low ESS, saturated tree depth) and a huge coefficient "
+                "that is offset by the baseline or by another level variable. "
+                "Set center=1 (or center_mode=mean) for this feature in the feature "
+                "config. If the column must stay untransformed, this warning is the "
+                "price: the intercept and this coefficient are trading off, so read "
+                "neither on its own.")
+    elif len(near_constant) > 1:
         warnings.warn(
-            f"{name}: always on but nearly constant after scaling without "
-            f"centring (scaled sd < {run_cfg.near_constant_sd:g}) in regions "
-            f"{regs}. It is "
-            "almost collinear with the region intercept, so the sampler cannot "
-            "separate its coefficient from the baseline - expect poor mixing "
-            "(high R-hat, low ESS, saturated tree depth) and a huge coefficient "
-            "that is offset by the baseline or by another level variable. "
-            "Set center=1 (or center_mode=mean) for this feature in the feature "
-            "config. If the column must stay untransformed, this warning is the "
-            "price: the intercept and this coefficient are trading off, so read "
-            "neither on its own.")
+            f"{', '.join(sorted(near_constant))}: {len(near_constant)} features "
+            "are always on and nearly constant after scaling without centring "
+            f"(scaled sd < {run_cfg.near_constant_sd:g}). There is no region "
+            "intercept to compete with (include_intercept=False), but they are "
+            "near-constant columns and therefore collinear with EACH OTHER - "
+            "only their SUM is identified, so the split between them is set by "
+            "the priors, not the data. Centre them (center_mode=mean), or keep "
+            "one and drop the rest.")
 
     # ---- seasonality & trend ----------------------------------------------
     Xf, f_names = fourier_features(d[dc], model_cfg.fourier_order,

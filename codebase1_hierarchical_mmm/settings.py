@@ -148,6 +148,9 @@ HELP: dict[str, dict[str, str]] = {
         "model_input_matrix": "01_data: every row exactly as the model sees it",
         "model_input_summary": "01_data: per region x feature scaled-column statistics",
         "data_plots": "01_data: kpi_by_region.png",
+        "collinearity": ("01_data: VIF, Belsley condition number and correlated column pairs, "
+                         "measured on the MODEL's design matrix (intercept + Fourier + trend + "
+                         "features), per region. Pre-fit: what the DATA can separate"),
         "prior_summary": "01_data: what each written prior means as a coefficient distribution",
         "contraction_plot": "02_convergence: prior_posterior_contraction.png",
         "prior_posterior_plots": "02_convergence: the three-curve prior/data/posterior chart per parameter",
@@ -157,11 +160,18 @@ HELP: dict[str, dict[str, str]] = {
                              "nuisance level. Never affects convergence tables or reconciliation"),
         "forest_plots": "03_coefficients: per-feature forest plot across regions",
         "actual_vs_predicted": "04_fit: row-level actual / fitted / residual",
+        "assumption_checks": ("04_fit: linearity, homoscedasticity, autocorrelation, residual "
+                              "tails and influence, plus which coefficient pairs are trading off "
+                              "in the posterior. Post-fit: what the MODEL could separate"),
         "fit_plots": "04_fit: fit and residual charts",
         "contribution_summary": "05_contributions: the vendor-style volume + % table",
         "contribution_timeseries": "05_contributions: volume per region x date x driver (large file)",
         "contribution_math": "05_contributions: the beta x sum(x) x dv_scale audit trail",
         "contribution_reconciliation": "05_contributions: components -> fitted -> actual",
+        "benchmark_comparison": ("05_contributions: benchmark_comparison.xlsx - paste a "
+                                 "benchmark contribution into one column and %diff, the "
+                                 "ratio, delta and the corrected global_prior_mean "
+                                 "recalculate live. Needs contribution_math"),
         "contribution_plots": "05_contributions: contribution bars and stacked decomposition",
         "period_split": "'none' | 'week' | 'year' | 'mat' - reporting blocks in contribution_summary",
         "cadence": "'auto'|'weekly'|'monthly' - sets the MAT block length (52 weekly / 12 monthly)",
@@ -425,7 +435,8 @@ def load_panel(settings: Settings):
 
 
 def run_from_yaml(path: str, df=None, save_trace: bool = True,
-                  record_settings: bool = True):
+                  record_settings: bool = True, settings: "Settings" = None,
+                  extra_warnings: list | None = None):
     """Load a settings file, fit, and write the full report.
 
     `df` skips the file read when the panel is already in memory. The effective
@@ -436,15 +447,24 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     full refit per fold, so it is opt-in rather than part of every run.
     """
     from run_pipeline import run
+    from warnings_report import collect_warnings
 
-    settings = load_settings(path)
+    # Loading the settings resolves every feature spec, which is where the
+    # per-feature prior warnings come from. Capture them here so they reach
+    # 00_warnings/ instead of the notebook. A caller that already loaded the
+    # settings passes them in, so the file is not read (and re-warned) twice.
+    caught = list(extra_warnings or [])
+    if settings is None:
+        with collect_warnings() as c:
+            settings = load_settings(path)
+        caught += list(c)
     if not settings.model.features:
         raise ValueError(
             f"{path}: no features. Set data.feature_priors to the prior CSV.")
     panel = load_panel(settings) if df is None else df
     result = run(panel, settings.model, settings.run, settings.sampler,
                  save_trace=save_trace, out_cfg=settings.output,
-                 cv_cfg=settings.cv)
+                 cv_cfg=settings.cv, extra_warnings=caught)
     if record_settings:
         dump_settings(settings, os.path.join(result["output_dir"], "01_data",
                                              "resolved_config.yaml"))

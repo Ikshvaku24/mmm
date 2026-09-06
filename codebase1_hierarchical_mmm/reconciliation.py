@@ -32,6 +32,7 @@ so the size of the gap is visible rather than assumed.
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -728,7 +729,22 @@ def write_contribution_diagnostics(decomp, pdata, outdir: str,
     if out_cfg.contribution_reconciliation:
         written["contribution_reconciliation"] = write_contribution_reconciliation(
             comp, decomp, pdata, outdir)
+    math_df = None
     if out_cfg.contribution_math:
-        written["contribution_math"] = write_contribution_math(
-            decomp, pdata, outdir, coef)
+        math_df = write_contribution_math(decomp, pdata, outdir, coef)
+        written["contribution_math"] = math_df
+    if out_cfg.benchmark_comparison:
+        # contribution_math is the only file carrying beta, SUM(x) and dv_scale
+        # together, which is what the sheet's formulas need to express a
+        # benchmark contribution on our own axis.
+        if math_df is None:
+            warnings.warn(
+                "benchmark_comparison needs contribution_math, which is "
+                "switched off - skipping the benchmark sheet. Set "
+                "output.contribution_math: true to get it.")
+        else:
+            from benchmark import write_benchmark_comparison
+            written["benchmark_comparison"] = write_benchmark_comparison(
+                decomp, pdata, outdir, math_df=math_df,
+                run_root=os.path.dirname(os.path.abspath(outdir)))
     return written

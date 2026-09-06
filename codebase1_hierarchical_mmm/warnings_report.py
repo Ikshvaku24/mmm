@@ -65,6 +65,43 @@ _RULES = (
             "present it. See docs/TUNING_GUIDE.md section 1.3."),
     ),
     dict(
+        slug="prior_deliberately_pinned",
+        severity="info",
+        match=("is a deliberate",),
+        title="Coefficient is fixed by the prior on purpose",
+        means=(
+            "`prior_sd_basis` is `relative` or `absolute` and the band written "
+            "is under +/-5%. That is not a units mistake - it says exactly what "
+            "was meant - so nothing here needs fixing."),
+        why=(
+            "It is recorded because it changes what the number IS. A "
+            "coefficient this tightly bounded is not estimated from the data: "
+            "its posterior is its prior, and its contribution is an assumption "
+            "you imposed. `contraction` for these features will be ~0."),
+        fix=(
+            "Nothing, if the pin is intended. Just describe these contributions "
+            "as inputs rather than findings - and do not cite them as the model "
+            "agreeing with the benchmark, because they were set from it. To let "
+            "the data speak, widen `global_prior_sd` toward 0.2."),
+    ),
+    dict(
+        slug="near_constant_mutual",
+        severity="high",
+        match=("collinear with EACH OTHER",),
+        title="Several near-constant features are collinear with each other",
+        means=(
+            "With `include_intercept: false` there is no intercept for a "
+            "near-constant column to fight, but two or more such columns are "
+            "all approximately the same constant, so only their SUM is "
+            "identified."),
+        why=(
+            "The split between them is then decided by the priors rather than "
+            "the data - which looks like a result and is not one."),
+        fix=(
+            "Centre them (`center_mode=mean`), or keep one and drop the rest. "
+            "Check `01_data/collinearity_pairs.csv` for the actual correlations."),
+    ),
+    dict(
         slug="pooling_collapsed",
         severity="medium",
         match=("hierarchical pooling collapses",),
@@ -230,7 +267,7 @@ _OTHER = dict(
          "own fix instructions."),
 )
 
-SEVERITY_ORDER = {"high": 0, "medium": 1, "review": 2, "low": 3}
+SEVERITY_ORDER = {"high": 0, "medium": 1, "review": 2, "low": 3, "info": 4}
 
 
 def classify(message: str) -> dict:
@@ -291,10 +328,47 @@ def to_frame(caught) -> pd.DataFrame:
                       f":{getattr(w, 'lineno', '')}",
             "message": " ".join(text.split()),
             "detail": " ".join(detail.split()),
+            "template": template_of(detail),
+            **{f"p_{k}": v for k, v in params_of(detail).items()},
         })
     cols = ["category", "severity", "feature", "region", "warning_class",
-            "source", "message", "detail"]
-    return pd.DataFrame(rows, columns=cols)
+            "source", "message", "detail", "template"]
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return pd.DataFrame(columns=cols)
+    extra = [c for c in df.columns if c.startswith("p_")]
+    return df[[c for c in cols if c in df.columns] + sorted(extra)]
+
+
+_NUM = re.compile(r"[-+]?\d*\.?\d+(?:[eE][-+]?\d+)?%?")
+_KV = re.compile(r"([A-Za-z_][A-Za-z_0-9]*)\s*=\s*'?([-+]?[\w.%/]+)'?")
+
+
+def template_of(detail: str) -> str:
+    """The message with every number blanked, so near-identical texts collapse.
+
+    44 features tripping one check produce 44 messages that differ only in the
+    numbers. Masking those gives a single template to print ONCE, with the
+    numbers moved into table columns where they can actually be compared.
+    """
+    return _NUM.sub("#", " ".join(str(detail).split()))
+
+
+def params_of(detail: str) -> dict:
+    """`key=value` pairs from the DIAGNOSIS, for the per-feature table.
+
+    Only the first sentence is read. The rest of a warning is advice, and advice
+    quotes settings too: "...use prior_sd=0.2 with prior_sd_basis='relative'".
+    Scanning the whole text made the table report `prior_sd_basis=relative` for
+    a feature whose basis is `log` - the exact opposite of what it says - which
+    is worse than having no column at all.
+    """
+    first = str(detail).split(". ")[0]
+    out = {}
+    for k, v in _KV.findall(first):
+        if k not in out:
+            out[k] = v
+    return out
 
 
 def _rule_by_slug(slug: str) -> dict:
@@ -305,24 +379,42 @@ def _rule_by_slug(slug: str) -> dict:
 
 
 def _table(df: pd.DataFrame) -> list[str]:
-    """A markdown table of who tripped this category."""
+    """The affected features - message text printed ONCE above, not per row.
+
+    The old version repeated the whole warning beside every feature, which for
+    44 features meant 44 copies of the same paragraph. Here the shared template
+    is printed once and the table carries only what actually differs: the
+    feature, the region, and whichever `key=value` numbers the message quoted.
+    """
+    out = []
+    templates = df["template"].value_counts() if "template" in df.columns \
+        else pd.Series(dtype=int)
+    if len(templates):
+        out += ["**The message** (identical for every feature below; `#` marks "
+                "the numbers, which are in the table):", "",
+                "> " + str(templates.index[0]), ""]
+        for extra in templates.index[1:]:
+            out += ["> " + str(extra), ""]
+
     named = df[df["feature"].astype(str) != ""]
     if named.empty:
-        return ["```", *[f"- {m}" for m in df["message"].unique()[:40]], "```"]
+        return out or ["(not tied to any single feature)"]
+
+    pcols = [c for c in named.columns
+             if c.startswith("p_") and named[c].notna().any()]
     has_region = (named["region"].astype(str) != "").any()
-    head = "| feature | region | detail |" if has_region else "| feature | detail |"
-    rule = "|---|---|---|" if has_region else "|---|---|"
-    out = [head, rule]
+    head = ["feature"] + (["region"] if has_region else []) \
+        + [c[2:] for c in pcols]
+    out += ["| " + " | ".join(head) + " |",
+            "|" + "|".join(["---"] * len(head)) + "|"]
     for _, r in named.iterrows():
-        detail = str(r["detail"]).replace("|", "/")
-        if len(detail) > 200:
-            detail = detail[:197] + "..."
-        out.append(f"| `{r['feature']}` | {r['region']} | {detail} |" if has_region
-                   else f"| `{r['feature']}` | {detail} |")
+        cells = [f"`{r['feature']}`"] + ([str(r["region"])] if has_region else [])
+        cells += ["" if pd.isna(r[c]) else f"`{r[c]}`" for c in pcols]
+        out.append("| " + " | ".join(cells) + " |")
+
     unnamed = df[df["feature"].astype(str) == ""]
     if len(unnamed):
-        out += ["", "Not tied to one feature:", ""]
-        out += [f"- {m}" for m in unnamed["message"].unique()]
+        out += ["", f"Plus {len(unnamed)} not tied to a single feature."]
     return out
 
 
@@ -335,7 +427,17 @@ def write_warning_docs(caught, outdir: str, run_name: str = "") -> pd.DataFrame:
     """
     df = to_frame(caught)
     os.makedirs(outdir, exist_ok=True)
-    df.to_csv(os.path.join(outdir, "all_warnings.csv"), index=False)
+    # Two files rather than one, so the prose is not repeated on every row:
+    #   all_warnings.csv  one row per warning - who, where, and the numbers
+    #   warning_texts.csv one row per distinct MESSAGE, with its full text
+    rowcols = [c for c in df.columns if c not in ("message", "detail")]
+    df[rowcols].to_csv(os.path.join(outdir, "all_warnings.csv"), index=False)
+    if not df.empty:
+        texts = (df.groupby(["category", "severity", "template"], as_index=False)
+                 .agg(n=("template", "size"),
+                      example=("message", "first")))
+        texts.sort_values(["severity", "n"], ascending=[True, False]).to_csv(
+            os.path.join(outdir, "warning_texts.csv"), index=False)
 
     if df.empty:
         with open(os.path.join(outdir, "00_INDEX.md"), "w", encoding="utf-8") as f:
@@ -383,8 +485,15 @@ def write_warning_docs(caught, outdir: str, run_name: str = "") -> pd.DataFrame:
     return df
 
 
-def print_warning_summary(df: pd.DataFrame, outdir: str) -> None:
-    """One line per category on the console, instead of one per feature."""
+def print_warning_summary(df: pd.DataFrame, outdir: str,
+                          verbose: bool = False) -> None:
+    """A headline, not a transcript.
+
+    The whole point of the folder is that the notebook stops being where you
+    read warnings, so this prints the count, the folder, and (unless `verbose`)
+    only the HIGH-severity categories - the ones that mean a reported number is
+    probably not measuring what you think. Everything else is in 00_INDEX.md.
+    """
     if df is None or df.empty:
         print("[warnings] none")
         return
@@ -392,12 +501,13 @@ def print_warning_summary(df: pd.DataFrame, outdir: str) -> None:
               .reset_index(name="n"))
     counts["_ord"] = counts["severity"].map(SEVERITY_ORDER).fillna(9)
     counts = counts.sort_values(["_ord", "n"], ascending=[True, False])
-    print(f"[warnings] {len(df)} warnings in {len(counts)} categories "
-          f"-> {outdir}")
-    for _, r in counts.iterrows():
+    shown = counts if verbose else counts[counts["severity"] == "high"]
+    print(f"[warnings] {len(df)} in {len(counts)} categories "
+          f"({len(counts) - len(shown)} not shown) -> {outdir}\00_INDEX.md")
+    for _, r in shown.iterrows():
         rule = _rule_by_slug(r["category"])
         n_feat = df[(df["category"] == r["category"])
                     & (df["feature"].astype(str) != "")]["feature"].nunique()
         extra = f", {n_feat} features" if n_feat else ""
         print(f"  [{r['severity']:>6}] {r['n']:>4}x{extra:<16} "
-              f"{rule['title']}  -> 00_warnings/{r['category']}.md")
+              f"{rule['title']}  -> {r['category']}.md")

@@ -50,6 +50,8 @@ Outputs (<output_dir>/<run_name>/06_cross_validation/):
     cv_coefficient_stability.csv fold-wise posterior medians per feature/region
     cv_stability_by_region.csv   mean/sd/min/max + rel_sd_pct per feature x region
     cv_stability_ranking.csv     features ranked by cross-fold instability
+    cv_scorecard.csv             ONE row summarising the run - the unit of
+                                 model comparison (see select_model)
     cv_report.md                 headline readout
     cv_accuracy_by_fold.png      test wMAPE per fold, per region
     stability/<feature>.png      coefficient medians across folds, per region
@@ -76,6 +78,212 @@ from outputs import (beta_draws_by_feature, compute_decomposition,
                      compute_fit_metrics, stack_posterior)
 from plotting import (annotate, figsize, save_fig, set_figure_defaults,
                       units_note)
+
+
+# --------------------------------------------------------------------------- #
+# model selection
+# --------------------------------------------------------------------------- #
+# A model is only comparable if it converged. These are hard gates, not scores:
+# an unconverged fold produces a meaningless accuracy number, and averaging it
+# in silently corrupts the comparison.
+RHAT_GATE = 1.05
+COVERAGE_GATE = (70.0, 98.0)      # predictive 90% coverage must be in this band
+STABILITY_GOOD = 15.0             # avg cross-fold relative sd of coefficients, %
+
+
+def _count_parameters(model_cfg, pdata) -> int:
+    """Roughly how many free parameters the model carries - for the parsimony
+    tiebreak only, so an approximation is fine."""
+    G = len(pdata.region_names)
+    n = 0
+    if getattr(model_cfg, "include_intercept", True):
+        n += 2 + G                                    # mu, tau, z per region
+    if getattr(model_cfg, "include_trend", False):
+        n += 2 + G
+    if getattr(pdata, "fourier_names", None):
+        n += len(pdata.fourier_names)
+    for specs in pdata.buckets.values():
+        for spec in specs:
+            pooling = getattr(spec, "pooling", "hierarchical")
+            n += (2 + G) if pooling == "hierarchical" else (G if pooling ==
+                                                            "independent" else 1)
+    n += 2 + G if getattr(model_cfg, "pool_sigma", True) else G
+    return int(n)
+
+
+def scorecard(fold_metrics: pd.DataFrame, rank: pd.DataFrame,
+              cv_cfg, n_folds: int, run_name: str = "",
+              n_parameters: int | None = None) -> pd.DataFrame:
+    """One row summarising a whole CV run - the unit of model comparison.
+
+    Everything here is measured on the TEST windows of the `__all__` row, so two
+    runs' scorecards are directly comparable as long as they used the same
+    folds (same cadence, horizon, n_folds and min_train_periods - the
+    `folds_signature` column exists to make that checkable rather than assumed).
+    """
+    t = fold_metrics[(fold_metrics["dataset"] == "test")
+                     & (fold_metrics["region"] == "__all__")]
+    conv = fold_metrics[(fold_metrics["dataset"] == "test")
+                        & (fold_metrics["region"] == "__all__")]
+    bad = int(((conv["max_rhat"] > RHAT_GATE) | (conv["divergences"] > 0)).sum())
+    n = max(len(t), 1)
+    wm, wsd = float(t["wmape_pct"].mean()), float(t["wmape_pct"].std(ddof=1)
+                                                  if len(t) > 1 else 0.0)
+    cov = float(t["coverage_90_pred_pct"].mean()) if "coverage_90_pred_pct" \
+        in t.columns else float("nan")
+    stab = float(rank["avg_rel_sd_pct"].median()) if len(rank) else float("nan")
+    admissible = (bad == 0
+                  and (not np.isfinite(cov)
+                       or COVERAGE_GATE[0] <= cov <= COVERAGE_GATE[1]))
+    reasons = []
+    if bad:
+        reasons.append(f"{bad} fold(s) did not converge")
+    if np.isfinite(cov) and not COVERAGE_GATE[0] <= cov <= COVERAGE_GATE[1]:
+        reasons.append(f"coverage {cov:.0f}% outside {COVERAGE_GATE}")
+    return pd.DataFrame([{
+        "run_name": run_name,
+        "admissible": admissible,
+        "why_not": "; ".join(reasons),
+        "n_folds": n_folds,
+        "folds_signature": f"{cv_cfg.cadence}/h{cv_cfg.horizon}/"
+                           f"f{n_folds}/m{cv_cfg.min_train_periods}",
+        "wmape_pct_mean": round(wm, 4),
+        "wmape_pct_sd": round(wsd, 4),
+        # the standard error is what decides whether two models actually differ:
+        # a gap smaller than this is fold-to-fold noise, not a better model
+        "wmape_pct_se": round(wsd / np.sqrt(n), 4),
+        "mape_region_weighted_pct_mean": round(
+            float(t["mape_region_weighted_pct"].mean()), 4)
+        if "mape_region_weighted_pct" in t.columns else np.nan,
+        "crps_mean": round(float(t["crps"].mean()), 3)
+        if "crps" in t.columns else np.nan,
+        "coverage_90_pred_pct_mean": round(cov, 2),
+        "r2_within_region_mean": round(float(t["r2_within_region"].mean()), 4)
+        if "r2_within_region" in t.columns else np.nan,
+        "coef_instability_median_pct": round(stab, 2),
+        "n_unstable_features": int((rank["avg_rel_sd_pct"] > 50).sum())
+        if len(rank) else 0,
+        "n_parameters": n_parameters if n_parameters is not None else np.nan,
+        "folds_not_converged": bad,
+    }])
+
+
+def select_model(scorecards: pd.DataFrame,
+                 fold_tables: dict | None = None) -> dict:
+    """Choose between candidate runs. Returns the winner and the reasoning.
+
+    The rule, in order - and the order is the point:
+
+    1. **Admissibility is a gate, not a score.** A run with an unconverged fold
+       or badly miscalibrated intervals is excluded outright. You cannot trade
+       convergence off against accuracy.
+    2. **Accuracy, but only beyond the noise.** Candidates within one standard
+       error of the best test wMAPE are declared TIED. Picking the numerically
+       smallest wMAPE out of a cluster that differs by less than the fold-to-
+       fold spread is selecting on noise, and it is how MMMs end up
+       overfitted to a particular set of origins.
+    3. **Coefficient stability breaks the tie.** Among equally accurate models,
+       take the one whose coefficients move least across folds. This is the
+       MMM-specific step: the deliverable is a decomposition, not a forecast,
+       and a coefficient that swings as the origin moves cannot support a
+       budget decision however well the model predicts.
+    4. **Parsimony breaks what remains.** Fewer parameters.
+
+    When `fold_tables` is given (run_name -> fold_metrics), a PAIRED comparison
+    is added: how many folds each candidate beat the best on. Paired beats
+    unpaired here because every candidate saw the same windows, so fold-level
+    wins are far more informative than overlapping means.
+    """
+    sc = scorecards.copy()
+    ok = sc[sc["admissible"]]
+    if ok.empty:
+        return {"winner": None, "tied": [], "reason":
+                "no candidate is admissible: "
+                + "; ".join(f"{r.run_name} ({r.why_not})"
+                            for r in sc.itertuples()),
+                "table": sc}
+    if len(set(ok["folds_signature"])) > 1:
+        return {"winner": None, "tied": [], "reason":
+                "candidates used DIFFERENT fold geometries "
+                f"({sorted(set(ok['folds_signature']))}) - their accuracy "
+                "numbers are not comparable. Re-run them with the same "
+                "CVConfig.", "table": sc}
+
+    best = ok.loc[ok["wmape_pct_mean"].idxmin()]
+    tol = float(best["wmape_pct_se"]) if np.isfinite(best["wmape_pct_se"]) else 0.0
+    tied = ok[ok["wmape_pct_mean"] <= best["wmape_pct_mean"] + tol]
+
+    paired = {}
+    if fold_tables and len(tied) > 1:
+        bref = _fold_wmape(fold_tables.get(best["run_name"]))
+        for name in tied["run_name"]:
+            f = _fold_wmape(fold_tables.get(name))
+            if f is not None and bref is not None and len(f) == len(bref):
+                paired[name] = int((f < bref).sum())
+
+    if len(tied) == 1:
+        return {"winner": str(best["run_name"]), "tied": [],
+                "reason": (f"lowest test wMAPE ({best['wmape_pct_mean']:.2f}%) "
+                           f"by more than one standard error ({tol:.2f})"),
+                "table": sc, "paired_wins": paired}
+
+    stable = tied.loc[tied["coef_instability_median_pct"].idxmin()]
+    others = tied[tied["run_name"] != stable["run_name"]]
+    if len(others) and abs(float(stable["coef_instability_median_pct"])
+                           - float(others["coef_instability_median_pct"].min())) < 1.0:
+        par = tied.loc[tied["n_parameters"].idxmin()] \
+            if tied["n_parameters"].notna().any() else stable
+        return {"winner": str(par["run_name"]),
+                "tied": list(tied["run_name"]),
+                "reason": ("accuracy and stability both tied within noise - "
+                           "chose the most parsimonious"),
+                "table": sc, "paired_wins": paired}
+    return {"winner": str(stable["run_name"]), "tied": list(tied["run_name"]),
+            "reason": (f"{len(tied)} candidates tied on accuracy (within one "
+                       f"standard error, {tol:.2f}pp); chose the one with the "
+                       "most stable coefficients across folds "
+                       f"({stable['coef_instability_median_pct']:.1f}% median "
+                       "relative sd)"),
+            "table": sc, "paired_wins": paired}
+
+
+def _fold_wmape(fm):
+    if fm is None or not len(fm):
+        return None
+    t = fm[(fm["dataset"] == "test") & (fm["region"] == "__all__")]
+    return t.sort_values("fold")["wmape_pct"].to_numpy() if len(t) else None
+
+
+def compare_cv_runs(run_dirs: list, outdir: str | None = None) -> dict:
+    """Read several finished CV runs and apply `select_model` to them.
+
+    Each path is a run folder (the one containing 06_cross_validation) or the
+    06_cross_validation folder itself.
+    """
+    cards, folds = [], {}
+    for d in run_dirs:
+        base = d if os.path.basename(d) == "06_cross_validation" \
+            else os.path.join(d, "06_cross_validation")
+        sc_p = os.path.join(base, "cv_scorecard.csv")
+        fm_p = os.path.join(base, "cv_fold_metrics.csv")
+        if not os.path.exists(sc_p):
+            print(f"[cv] no cv_scorecard.csv in {base} - skipping")
+            continue
+        c = pd.read_csv(sc_p)
+        if not str(c.iloc[0]["run_name"]).strip():
+            c["run_name"] = os.path.basename(os.path.dirname(base))
+        cards.append(c)
+        if os.path.exists(fm_p):
+            folds[str(c.iloc[0]["run_name"])] = pd.read_csv(fm_p)
+    if not cards:
+        raise SystemExit("no cv_scorecard.csv found in any of the given runs")
+    sc = pd.concat(cards, ignore_index=True)
+    res = select_model(sc, folds)
+    if outdir:
+        os.makedirs(outdir, exist_ok=True)
+        sc.to_csv(os.path.join(outdir, "cv_model_comparison.csv"), index=False)
+    print(f"[cv] winner: {res['winner']} - {res['reason']}")
+    return res
 
 
 def run_cv(df: pd.DataFrame,
@@ -203,6 +411,11 @@ def run_cv(df: pd.DataFrame,
             .rename(columns={"rel_sd_pct": "avg_rel_sd_pct"}))
     rank.to_csv(os.path.join(outdir, "cv_stability_ranking.csv"), index=False)
 
+    card = scorecard(fold_metrics, rank, cv_cfg, len(folds),
+                     run_name=run_cfg.run_name,
+                     n_parameters=_count_parameters(model_cfg, pdata))
+    card.to_csv(os.path.join(outdir, "cv_scorecard.csv"), index=False)
+
     if cv_cfg.make_plots:
         sdir = os.path.join(outdir, "stability")
         os.makedirs(sdir, exist_ok=True)
@@ -279,9 +492,49 @@ def run_cv(df: pd.DataFrame,
               "", "Note: fold metrics judge PREDICTION. Contribution/ROI "
                   "validity additionally needs stable coefficients (above) and, "
                   "ideally, calibration against lift experiments."]
+    c = card.iloc[0]
+    lines += [
+        "", "## Is this model usable, and how would you choose between two?", "",
+        f"- **admissible: {'YES' if c['admissible'] else 'NO'}**"
+        + (f" - {c['why_not']}" if c["why_not"] else ""),
+        f"- test wMAPE {c['wmape_pct_mean']:.2f}% "
+        f"(sd {c['wmape_pct_sd']:.2f} across folds, "
+        f"**standard error {c['wmape_pct_se']:.2f}**)",
+        f"- median coefficient instability {c['coef_instability_median_pct']:.1f}% "
+        f"({c['n_unstable_features']} features above 50%)",
+        "",
+        "**The standard error is the number that matters for choosing.** A rival "
+        f"model must beat {c['wmape_pct_mean']:.2f}% by more than "
+        f"{c['wmape_pct_se']:.2f}pp to be genuinely better; anything closer is "
+        "fold-to-fold noise, and picking the smaller number is selecting on "
+        "noise.", "",
+        "The selection rule, in order:", "",
+        "1. **Admissibility is a gate, not a score.** Any fold with R-hat > "
+        f"{RHAT_GATE} or a divergence, or predictive coverage outside "
+        f"{COVERAGE_GATE[0]:.0f}-{COVERAGE_GATE[1]:.0f}%, disqualifies the run. "
+        "Convergence is not tradeable against accuracy.",
+        "2. **Accuracy, beyond the noise.** Candidates within one standard "
+        "error of the best wMAPE are TIED.",
+        "3. **Coefficient stability breaks the tie.** The deliverable is a "
+        "decomposition, not a forecast: among equally accurate models take the "
+        "one whose coefficients move least across folds.",
+        "4. **Parsimony breaks what remains.**", "",
+        "Compare finished runs with:", "",
+        "```python",
+        "from cross_validation import compare_cv_runs",
+        'compare_cv_runs(["outputs/candidate_a", "outputs/candidate_b"])',
+        "```", "",
+        "It refuses to compare runs whose fold geometry differs "
+        f"(this run: `{c['folds_signature']}`), because their accuracy numbers "
+        "are not on the same scale.", "",
+        "> **CV cannot tell you the decomposition is right.** It measures "
+        "prediction and stability. A model can predict well and attribute "
+        "wrongly - that is what an omitted confounder does. Nothing in this "
+        "folder substitutes for an experiment.",
+    ]
     with open(os.path.join(outdir, "cv_report.md"), "w") as f:
         f.write("\n".join(lines) + "\n")
     print(f"[cv] done -> {outdir}")
     return {"fold_metrics": fold_metrics, "summary": summary,
             "coefficient_stability": stab, "stability_ranking": rank,
-            "output_dir": outdir}
+            "scorecard": card, "output_dir": outdir}

@@ -54,11 +54,17 @@ import sys
 import pandas as pd
 
 from settings import load_panel, load_settings, run_from_yaml
+from warnings_report import collect_warnings
 
 CONFIG = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
 
 # ---- 1. load + sanity-check the data ---------------------------------------
-settings = load_settings(CONFIG)
+# Reading the settings resolves every feature spec, which is where the
+# per-feature prior warnings are raised. Capturing them here is what keeps them
+# OUT of this cell: they are handed to the run below and written to
+# 00_warnings/ with one document per category instead.
+with collect_warnings() as config_warnings:
+    settings = load_settings(CONFIG)
 df = load_panel(settings)
 
 feat_names = [s.name for s in settings.model.features]
@@ -83,9 +89,12 @@ print("\nnon-zero periods per feature (lowest 8 - candidates to drop/pin):")
 print((df[feat_names] != 0).sum().sort_values().head(8))
 
 # ---- 2. fit + full report ---------------------------------------------------
-# Warnings are collected, grouped by category and written to 00_warnings/
-# rather than printed once per feature; the console gets one line per category.
-result = run_from_yaml(CONFIG, df=df)
+# Nothing warning-shaped is printed here. Everything goes to 00_warnings/:
+# 00_INDEX.md ranks the categories, each <category>.md states the message ONCE
+# and then tables the features it applies to. Only high-severity headlines
+# reach this cell.
+result = run_from_yaml(CONFIG, df=df, settings=settings,
+                       extra_warnings=list(config_warnings))
 print("outputs ->", result["output_dir"])
 print(result["metrics"][result["metrics"]["region"] == "__all__"])
 

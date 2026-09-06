@@ -62,6 +62,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `model_input_matrix` | `model_input_matrix.csv` | 01 |
 | `model_input_summary` | `model_input_summary.csv` | 01 |
 | `data_plots` | `kpi_by_region.png` | 01 |
+| `collinearity` | `collinearity_summary.csv`, `_vif.csv`, `_pairs.csv` | 01 |
 | `prior_summary` | `prior_summary.csv` | 01 |
 | *(always, when run from YAML)* | `resolved_config.yaml` | 01 |
 | `contraction_plot` | `prior_posterior_contraction.png` | 02 |
@@ -69,11 +70,13 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `report_intercept` | *(hides rows, writes no file — see below)* | 02 |
 | `forest_plots` | `forest/*.png` | 03 |
 | `actual_vs_predicted` | `actual_vs_predicted.csv` | 04 |
+| `assumption_checks` | `assumption_checks.csv`, `posterior_correlation.csv`, `assumptions_report.md` | 04 |
 | `fit_plots` | `actual_vs_fitted.png`, `residuals.png` | 04 |
 | `contribution_summary` | `contribution_summary.csv` | 05 |
 | `contribution_timeseries` | `contribution_timeseries.csv` | 05 |
 | `contribution_math` | `contribution_math.csv` | 05 |
 | `contribution_reconciliation` | `contribution_reconciliation.csv` | 05 |
+| `benchmark_comparison` | `benchmark_comparison.xlsx` (or `.csv`) | 05 |
 | `contribution_plots` | the four 05 PNGs | 05 |
 | *(always)* | `00_warnings/*` | 00 |
 | `cv.enabled` **(CVConfig, not OutputConfig)** | everything in `06_cross_validation/` | 06 |
@@ -354,6 +357,43 @@ YAML mentioned — plus `_source`, the path of the file it came from.
 numbers?" six months from now. Diff two runs' `resolved_config.yaml` to see
 exactly what changed between them; the feature-level priors are not in here,
 they are in the run's `prior_summary.csv`.
+
+### 🆕 `collinearity_summary.csv` / `_vif.csv` / `_pairs.csv`
+
+**Nothing measured collinearity before this.** The old `near_constant_sd` guard
+caught one special case; the general case — two features that move together,
+whose coefficients are then identified only as a sum — was invisible, and
+reconciliation cannot catch it because the sum is right.
+
+Measured on the **model's own design matrix**: the scaled features *plus* the
+intercept, the Fourier block and the trend, per region, training window only.
+A raw feature correlation matrix cannot see a feature that duplicates the
+intercept, a "promo" flag that is really December, or a channel that only ran
+during a growth phase.
+
+**`collinearity_summary.csv`** — one row per region.
+
+| Column | Meaning |
+|---|---|
+| `n_obs`, `n_columns` | size of the design |
+| `condition_number` | Belsley condition number of the unit-length design. **10 warn, 30 severe** |
+| `max_vif` | worst textbook (centred) VIF. 5 warn, 10 severe |
+| `max_vif_uncentred` | worst VIF with the mean kept in |
+| `worst_column` | which feature that was |
+| `n_vif_over_10`, `n_duplicating_intercept`, `n_pairs_over_0.8` | counts |
+| `verdict` | `ok` / `moderate` / `severe` |
+
+**Why two VIF columns.** The textbook centred VIF is **structurally blind to
+collinearity with the intercept**. On the exact `real_data_v1` case — an
+always-on feature scaled to ~1.0 every week — the centred VIF read **1.09**,
+looking perfect, while the condition number read **23,000**. `_vif.csv` has a
+`duplicates` column saying which kind you have: `other features` (high centred
+VIF) or `the intercept/level` (high uncentred, low centred → set
+`center_mode=mean`).
+
+**`collinearity_pairs.csv`** — column pairs above |r| = 0.8, worst first.
+Columns are named `__intercept__`, `__fourier__*`, `__trend__` or the feature
+name, so you can see *what* a feature is collinear with.
 
 ### `panel_summary.csv`
 
@@ -771,6 +811,62 @@ metrics report.
 drift shows up as a run of same-signed `residual`. `inside_pred_90` tells you
 exactly which weeks fell outside the band rather than just how many.
 
+### 🆕 `assumption_checks.csv` + `posterior_correlation.csv` + `assumptions_report.md`
+
+The classical regression assumptions, checked against this model. They do not
+invalidate standard errors in a Bayesian fit — they show up as
+**misspecification**: intervals too narrow, coefficients trading off,
+contributions that reconcile perfectly and are still wrong.
+
+**`assumption_checks.csv`** — one row per region × check.
+
+| Column | Meaning |
+|---|---|
+| `region`, `check` | which region, which assumption |
+| `statistic` | the measured value |
+| `threshold` | what would count as acceptable |
+| `verdict` | `ok` / `warn` |
+| `what_it_means` | why the assumption matters |
+| `what_to_do` | the lever that addresses it |
+
+Checks: linearity, homoscedasticity (sd of residuals in the top vs bottom third
+of fitted values — more powerful and more interpretable than a correlation),
+Durbin-Watson, ACF at lags 2/4/13, residual skew, excess kurtosis, and count of
+observations beyond 3 sd.
+
+**`posterior_correlation.csv`** — the check the pre-fit statistics cannot make:
+correlation between two coefficients' **posterior draws**, per region. Strongly
+negative means they are trading off — the model knows their sum, not their
+split, so neither contribution is readable alone.
+
+> **Read it next to `contraction`.** High VIF + *low* posterior correlation +
+> `contraction` near 0 is the dangerous combination: a tight prior pinned both
+> coefficients so they look fine, while the data never separated them. The
+> split is your assumption, not a finding.
+
+**🆕 `confounding_pairs.csv`** — correlation between every incremental feature
+and every `baseline=1` feature, per region. Adopted from Meridian's
+`PotentialBiasCheck`, which flags at |r| ≥ 0.1 because this is the closest
+computable stand-in for exogeneity: a media coefficient correlated with a
+control may be absorbing that control's effect, and no goodness-of-fit number
+will say so. **The threshold is raised to `max(0.1, 2/√n)`** — on 91 weeks the
+sampling SD of a correlation between unrelated columns is 0.105, so Meridian's
+flat 0.1 (fine on a geo × time panel with thousands of rows) would flag about
+half of all noise pairs. `threshold_used` and `n_obs` record what was applied.
+
+**🆕 `structural_checks.csv`** — two more from Meridian, per region plus
+`__all__`:
+
+| Column | Meaning |
+|---|---|
+| `ppp` | aggregate posterior predictive p-value: how extreme the observed TOTAL is under the posterior predictive. **Fails below 0.05.** Pointwise coverage cannot see a model whose weekly intervals are fine but whose annual total sits in its own tail — which is the shape of a decomposition that reconciles to 100% and is still wrong |
+| `p_negative_baseline` | P(total baseline < 0). Review at 0.2, fail at 0.8. A negative baseline says sales would be negative with no marketing — that is drivers over-claiming with the baseline absorbing the offset, which this project has seen |
+
+**`assumptions_report.md`** pulls all of it together and closes with the
+assumption no statistic can check — **exogeneity**. Spend follows expected
+sales; omitted category/competitor drivers load onto whatever correlates with
+them. Only geo experiments, holdout regions or switchback tests settle that.
+
 ### `residuals.png`
 
 Residual vs fitted, and a residual histogram. Want a shapeless cloud centred on
@@ -991,6 +1087,51 @@ and `share_of_actual_pct`.
 For the full vendor layout — pillar subtotals, a Residual line and a Grand Total
 that ties to actual sales — use `contribution_summary.csv` instead.
 
+### 🆕 `benchmark_comparison.xlsx` — paste a benchmark, formulas do the rest
+
+One row per region × feature, with this run's numbers already laid out and
+**live formulas in the cells**. Paste the vendor's (or last year's) contribution
+into **column E** and everything recalculates in the spreadsheet.
+
+Written as `.xlsx` when openpyxl is available (it is on Databricks), otherwise
+as `.csv` — Excel evaluates `=` formulas in a CSV on open, so the fallback works
+the same way.
+
+| Column | Filled by | Meaning |
+|---|---|---|
+| `region`, `feature`, `pillar` | the run | the cell |
+| `our_contribution` | the run | what this run reports, KPI units |
+| **`benchmark_contribution`** | **YOU** | paste here — highlighted in the sheet |
+| `pct_diff` | formula | `(ours − theirs) / |theirs| × 100` |
+| `ratio_needed` | formula | `theirs / ours` — the multiplier to close the gap |
+| `contraction` | the run | near 0 means the posterior IS your prior |
+| `delta` | formula | `ln(ratio) / contraction` — how far the data wants to move, log units |
+| `current_prior_mean` | the run | the implied median your prior file produces |
+| `suggested_prior_mean` | formula | `current × ratio^(1/(1−contraction))` — **write this back into the prior file** |
+| `implied_benchmark_beta` | formula | their contribution expressed on YOUR axis |
+| `effective_scaled_sum`, `dv_scale_used` | the run | the inputs the formulas use |
+| `verdict` | formula | what to do about this row |
+
+**How to read it — the summary block to the right first.** It reports the median
+`delta` and its IQR, and turns that into a sentence:
+
+- **`delta` clusters** (IQR < 0.1) → one global constraint is pushing every
+  driver the same way, usually a free region intercept the benchmark does not
+  have. Correcting prior means one at a time will **not** hold: the next refit
+  re-imposes the same shortfall on the corrected numbers. Fix the structure
+  (`model.include_intercept`, `model.alpha_prior_sd`) first.
+- **`delta` scatters** → the gaps really are per-feature. Column K is the fix.
+
+`verdict` per row distinguishes the cases: `prior-driven` (contraction < 0.2 —
+write column K back), `data disagrees` (contraction > 0.5 — decide whether to
+impose or accept), and `UNIDENTIFIED` (contraction ≤ 0 — structural, no prior
+fixes it).
+
+> The sheet replaces the old `bias_diagnosis.py`. A benchmark never arrives in a
+> fixed schema, so a script that reads one is guessing at the join; a sheet with
+> the formulas already in it needs only a paste, and every intermediate quantity
+> is visible.
+
 ### The three charts
 
 | File | Shows |
@@ -1033,7 +1174,8 @@ min train 12, and shorter chains. An explicit value always wins.
 | `cv_coefficient_stability.csv` | The raw fold-wise coefficient medians |
 | 🆕 `cv_stability_by_region.csv` | Spread of those medians, per feature × region |
 | `cv_stability_ranking.csv` | Features ranked by instability |
-| `cv_report.md` | The headline readout |
+| 🆕 `cv_scorecard.csv` | **One row summarising the run — the unit of model comparison** |
+| `cv_report.md` | The headline readout, including the selection rule |
 | `cv_accuracy_by_fold.png` | Test wMAPE per fold, per region |
 | `stability/<feature>.png` | Coefficient medians across folds, one line per region |
 | `fold_k/sampling_log.json` | Per-fold run manifest |
@@ -1146,6 +1288,52 @@ stable here — because the prior, not the data, is holding it still. Read this
 file next to `contraction` in `02_convergence`: stable **and** contracted is a
 real result; stable **and** uncontracted just means you fixed it by hand.
 
+### 🆕 `cv_scorecard.csv` — how you choose between models
+
+One row per run. This is what you compare when you have two candidate models.
+
+| Column | Meaning |
+|---|---|
+| `run_name` | which run |
+| `admissible` | **a gate, not a score** — false if any fold had R-hat > 1.05 or a divergence, or predictive coverage outside 70–98% |
+| `why_not` | why it was disqualified |
+| `folds_signature` | `cadence/horizon/folds/min_train` — two runs with different signatures are **not comparable** and `select_model` refuses to rank them |
+| `wmape_pct_mean` | mean test wMAPE across folds |
+| `wmape_pct_sd` | spread across folds |
+| **`wmape_pct_se`** | **the number that decides ties** — `sd/√folds` |
+| `crps_mean`, `coverage_90_pred_pct_mean`, `r2_within_region_mean` | the other test metrics |
+| `coef_instability_median_pct` | median cross-fold relative sd of the coefficients |
+| `n_unstable_features` | how many are above 50% |
+| `n_parameters` | for the parsimony tiebreak |
+
+**The selection rule**, applied by `select_model` / `compare_cv_runs`:
+
+1. **Admissibility is a gate.** An unconverged or badly calibrated run is
+   excluded outright. Convergence is not tradeable against accuracy.
+2. **Accuracy, but only beyond the noise.** Candidates within **one standard
+   error** of the best wMAPE are declared TIED. Picking the numerically smallest
+   number out of a cluster that differs by less than the fold-to-fold spread is
+   selecting on noise.
+3. **Coefficient stability breaks the tie.** The deliverable is a decomposition,
+   not a forecast: among equally accurate models take the one whose coefficients
+   move least across folds.
+4. **Parsimony breaks what remains.**
+
+```python
+from cross_validation import compare_cv_runs
+compare_cv_runs(["outputs/candidate_a", "outputs/candidate_b"])
+```
+
+When several candidates tie, it also reports **paired per-fold wins** — how many
+folds each beat the leader on. Paired beats unpaired here because every
+candidate saw the same windows, so fold-level wins are far more informative than
+overlapping means.
+
+> **CV cannot tell you the decomposition is right.** It measures prediction and
+> stability. A model can predict well and attribute wrongly — that is exactly
+> what an omitted confounder does. Nothing in this folder substitutes for an
+> experiment.
+
 ### `cv_report.md`
 
 The headline readout — cadence and fold geometry, mean test wMAPE ± sd,
@@ -1167,7 +1355,9 @@ re-running the 6-minute fit.
 
 ## Triage checklist
 
-0. 🆕 **`00_warnings/00_INDEX.md`** — any `high` category first. A pinned prior
+0. 🆕 **`00_warnings/00_INDEX.md`** — any `high` category first, then
+   **`01_data/collinearity_summary.csv`** — a `severe` verdict means the
+   coefficients below cannot be read individually. A pinned prior
    or a feature collinear with the intercept explains most "that number looks
    wrong" questions before you open anything else.
 1. **`02_convergence/convergence_report.txt`** — R-hat < 1.01, ESS > 400, tree

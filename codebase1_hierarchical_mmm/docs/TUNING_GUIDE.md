@@ -40,6 +40,11 @@ actually ran.
 
 ### Start from the warnings
 
+> **Building a model from scratch, rather than fixing one?** Read
+> `METHODOLOGY.md` first - it is the order of operations (which variables to add
+> when, what to check before each addition, how to set priors with no benchmark
+> to reverse-engineer). This guide is the reference for what each lever does.
+
 Every run writes `00_warnings/00_INDEX.md`: the run's own warnings grouped by
 category, each document naming the affected features and the fix. Read the
 `high` rows before diagnosing anything by hand — `prior_pins_coefficient` and
@@ -432,13 +437,13 @@ still sums to the fitted value.
 
 | Symptom | Most likely cause | Lever |
 |---|---|---|
-| Contribution too high/low vs a target, `contraction < 0.2` | it *is* your prior | `global_prior_mean` (§1.1) |
+| Contribution too high/low vs a target, `contraction < 0.2` | it *is* your prior | `global_prior_mean` (§1.1) - paste the target into `benchmark_comparison.xlsx` and read column K |
 | Too high/low, `contraction > 0.5` | the data disagrees | tighten `global_prior_sd` to impose, or accept (§1.3) |
 | `mean_shift` > 2 prior sd | **prior-data conflict** | check `dv_scale` units first (§4), then the prior |
 | Sign is wrong | free feature, wrong-signed mean | `sign_constraint`, or negate the mean (§1.4) |
 | `contraction ≤ 0` | unidentified / duplicate column | structural — §3 |
 | High R-hat, saturated tree depth, divergences | level variable collinear with intercept | `center_mode=mean` (§4.2) |
-| Offsetting ± contributions between two features | mutual collinearity | `center_mode`, or merge them |
+| Offsetting ± contributions between two features | mutual collinearity | check `01_data/collinearity_pairs.csv` + `04_fit/posterior_correlation.csv`, then `center_mode` or merge (METHODOLOGY §3) |
 | `baseline_core_pct` very negative, features > 100% | redundant free intercept | `alpha_prior_sd=0.05` (§2.1) |
 | Intercept alone claims most of sales (`mu_alpha` ≈ 0.9 on a mean-1.0 KPI) | a free level is out-competing every driver | `alpha_prior_sd=0.05`, then `include_intercept: false` (§2.2) |
 | Intercept rows drown the contraction report | nuisance parameter, not a driver | `output.report_intercept: false` (§2.2) |
@@ -556,6 +561,6 @@ beta_g              = mu + tau·z_g                — hierarchical
 | change the counterfactual | `contribution_reference` |
 | change the units | `dv_scale`, `scale_mode` |
 
-**Related:** `config.yaml` (every setting + its default) · `OUTPUTS_GUIDE.md` (every file and column) ·
+**Related:** `METHODOLOGY.md` (how to build the model in the first place) · `MERIDIAN_ASSUMPTIONS.md` · `config.yaml` (every setting + its default) · `OUTPUTS_GUIDE.md` (every file and column) ·
 `docs/understanding_prior_sd_conversion.md` · `docs/when_cneter_is_not_1.md` ·
 `../CLAUDE.md` (run history and decisions already made)

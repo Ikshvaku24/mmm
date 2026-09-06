@@ -139,6 +139,10 @@ output:
   model_input_summary: true
   # 01_data: kpi_by_region.png
   data_plots: true
+  # 01_data: VIF, Belsley condition number and correlated column pairs, measured on the MODEL's
+  # design matrix (intercept + Fourier + trend + features), per region. Pre-fit: what the DATA
+  # can separate
+  collinearity: true
   # 01_data: what each written prior means as a coefficient distribution
   prior_summary: true
   # 02_convergence: prior_posterior_contraction.png
@@ -155,6 +159,10 @@ output:
   forest_plots: true
   # 04_fit: row-level actual / fitted / residual
   actual_vs_predicted: true
+  # 04_fit: linearity, homoscedasticity, autocorrelation, residual tails and influence, plus
+  # which coefficient pairs are trading off in the posterior. Post-fit: what the MODEL could
+  # separate
+  assumption_checks: true
   # 04_fit: fit and residual charts
   fit_plots: true
   # 05_contributions: the vendor-style volume + % table
@@ -165,6 +173,10 @@ output:
   contribution_math: true
   # 05_contributions: components -> fitted -> actual
   contribution_reconciliation: true
+  # 05_contributions: benchmark_comparison.xlsx - paste a benchmark contribution into one column
+  # and %diff, the ratio, delta and the corrected global_prior_mean recalculate live. Needs
+  # contribution_math
+  benchmark_comparison: true
   # 05_contributions: contribution bars and stacked decomposition
   contribution_plots: true
   # 'none' | 'week' | 'year' | 'mat' - reporting blocks in contribution_summary
