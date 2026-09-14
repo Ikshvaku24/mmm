@@ -138,12 +138,139 @@ def summary_formulas(first: int, last: int) -> list:
 
 
 # --------------------------------------------------------------------------- #
+# optional: a benchmark that reports COMBINED variables
+# --------------------------------------------------------------------------- #
+MAPPING_DOC = """Optional benchmark mapping file (CSV or XLSX).
+
+A vendor deck routinely reports one line where the model carries several
+columns - "Digital" covering four placements, or one "Samples" number where the
+model splits mat1/mat2. Comparing those row by row is meaningless: each of our
+rows is short, and the shortfall is an artefact of the split, not a finding.
+
+Give the run a mapping and the sheet groups our features first, so ONE of our
+rows equals ONE of the benchmark's:
+
+    feature,benchmark_group
+    btl_expert-samples_premium_mat1,Samples Premium
+    btl_expert-samples_premium_mat2,Samples Premium
+    media__digital-social_...,Digital
+
+Rules:
+  * a feature absent from the mapping keeps its own name and is compared alone;
+  * grouping is within a region - the sum is over the features in that group in
+    that region, never across regions;
+  * `our_contribution` for a grouped row is the SUM of its members' volumes;
+  * `current_prior_mean` and `contraction` cannot be summed, so a grouped row
+    reports the volume-weighted average of each and names the members. The
+    corrected prior mean in column K then applies to the group as a whole - you
+    scale every member by the same ratio, which preserves their relative split.
+
+Point at it with `data.benchmark_mapping` in config.yaml.
+"""
+
+MAPPING_FEATURE_HINTS = ("feature", "variable", "our_feature", "model_variable")
+MAPPING_GROUP_HINTS = ("benchmark_group", "group", "benchmark", "vendor_group",
+                       "maps_to", "vendor_variable")
+
+
+def _sniff(cols, hints, exclude=()) -> str | None:
+    """Find a column by name. Mapping files come from people, not schemas."""
+    low = {str(c).strip().lower(): c for c in cols if c not in exclude}
+    for h in hints:                       # exact match first
+        if h in low:
+            return low[h]
+    for h in hints:                       # then substring
+        for k, c in low.items():
+            if h in k:
+                return c
+    return None
+
+
+def load_mapping(path: str) -> dict:
+    """Read feature -> benchmark_group. Returns {} when `path` is falsy."""
+    if not path:
+        return {}
+    if not os.path.exists(path):
+        raise SystemExit(
+            f"benchmark_mapping file not found: {path}. Remove "
+            "`data.benchmark_mapping` from the settings file, or fix the path.")
+    df = pd.read_csv(path) if str(path).lower().endswith(".csv") \
+        else pd.read_excel(path)
+    f = _sniff(df.columns, MAPPING_FEATURE_HINTS)
+    g = _sniff(df.columns, MAPPING_GROUP_HINTS, exclude={f})
+    if f is None or g is None:
+        raise SystemExit(
+            f"{path}: need a feature column and a benchmark_group column; "
+            f"found {list(df.columns)}. Expected headers like "
+            "'feature,benchmark_group'.")
+    out = {}
+    for _, r in df.iterrows():
+        feat, grp = str(r[f]).strip(), str(r[g]).strip()
+        if feat and grp and feat.lower() != "nan" and grp.lower() != "nan":
+            out[feat] = grp
+    print(f"[benchmark] mapping: {len(out)} features -> "
+          f"{len(set(out.values()))} benchmark groups ({path})")
+    return out
+
+
+def apply_mapping(table: pd.DataFrame, mapping: dict) -> pd.DataFrame:
+    """Collapse the sheet to one row per region x benchmark group.
+
+    Volumes and SUM(x) add. Coefficient-like quantities do not, so they are
+    volume-weighted - and `members` records what went in, because a grouped row
+    that does not say what it contains is a number nobody can check.
+    """
+    if not mapping:
+        return table
+    t = table.copy()
+    t["benchmark_group"] = t["feature"].map(mapping).fillna(t["feature"])
+    if (t["benchmark_group"] == t["feature"]).all():
+        return table                      # mapping matched nothing useful
+
+    w = t["our_contribution"].fillna(0.0).abs()
+    t["_w"] = np.where(w.to_numpy() > 0, w.to_numpy(), 1e-12)
+    rows = []
+    for (region, grp), g in t.groupby(["region", "benchmark_group"], sort=False):
+        wsum = float(g["_w"].sum())
+
+        def wavg(col):
+            v = pd.to_numeric(g[col], errors="coerce")
+            ok = v.notna()
+            return (float((v[ok] * g["_w"][ok]).sum() / g["_w"][ok].sum())
+                    if ok.any() and g["_w"][ok].sum() > 0 else np.nan)
+
+        members = list(g["feature"])
+        rows.append({
+            "region": region,
+            "feature": grp,
+            "pillar": g["pillar"].iloc[0] if "pillar" in g.columns else "",
+            "our_contribution": float(
+                pd.to_numeric(g["our_contribution"], errors="coerce").sum()),
+            FILL_COL: np.nan,
+            "contraction": wavg("contraction"),
+            "current_prior_mean": wavg("current_prior_mean"),
+            "effective_scaled_sum": float(pd.to_numeric(
+                g["effective_scaled_sum"], errors="coerce").sum()),
+            "dv_scale_used": wavg("dv_scale_used"),
+            "n_members": len(members),
+            "members": " + ".join(members) if len(members) > 1 else "",
+        })
+        del wsum
+    out = pd.DataFrame(rows)
+    for name in COMPUTED:
+        out[name] = ""
+    cols = [c for c, _ in COLUMNS] + ["n_members", "members"]
+    return out[cols].sort_values(["region", "feature"])
+
+
+# --------------------------------------------------------------------------- #
 # assembling the run's own numbers
 # --------------------------------------------------------------------------- #
 def build_table(decomp, pdata, outdir_root: str = None,
                 math_df: pd.DataFrame = None,
                 contraction_df: pd.DataFrame = None,
-                prior_df: pd.DataFrame = None) -> pd.DataFrame:
+                prior_df: pd.DataFrame = None,
+                mapping: dict = None) -> pd.DataFrame:
     """One row per region x feature, with every input column filled and the
     computed columns left empty (the formulas go in at write time)."""
     if math_df is None:
@@ -164,10 +291,23 @@ def build_table(decomp, pdata, outdir_root: str = None,
         c = contraction_df
         if "role" in c.columns:
             c = c[c["role"].astype(str).str.startswith("coefficient")]
-        if {"name", "contraction"} <= set(c.columns):
+        # Prefer the rows the contraction report marks `use_for_delta` - the
+        # ONE parameter family per feature whose contraction the delta formula
+        # is valid on (the log-scale Normal, not the exp-transformed
+        # deterministic). Falling back to a mean over every family would mix
+        # two different quantities.
+        if "use_for_delta" in c.columns:
+            sel = c[c["use_for_delta"].astype(str).str.lower().isin(
+                ("true", "1", "yes"))]
+            if len(sel):
+                c = sel
+        fcol = "feature" if "feature" in c.columns else None
+        if fcol is None and "name" in c.columns:
             c = c.assign(feature=c["name"].astype(str).str.split(" @ ").str[0]
                          .str.strip())
-            agg = c.groupby("feature", as_index=False)["contraction"].mean()
+            fcol = "feature"
+        if fcol and "contraction" in c.columns:
+            agg = c.groupby(fcol, as_index=False)["contraction"].mean()
             out = out.drop(columns=["contraction"]).merge(agg, on="feature",
                                                           how="left")
 
@@ -188,7 +328,8 @@ def build_table(decomp, pdata, outdir_root: str = None,
     out[FILL_COL] = np.nan
     for name in COMPUTED:
         out[name] = ""
-    return out[[c for c, _ in COLUMNS]].sort_values(["region", "feature"])
+    out = out[[c for c, _ in COLUMNS]].sort_values(["region", "feature"])
+    return apply_mapping(out, mapping or {})
 
 
 # --------------------------------------------------------------------------- #
@@ -214,9 +355,15 @@ def write_benchmark_sheet(table: pd.DataFrame, outdir: str) -> str:
         return _write_formula_csv(table, outdir)
 
 
+def _sheet_columns(table: pd.DataFrame) -> list:
+    """Declared columns, plus the grouping columns when a mapping was used."""
+    names = [c for c, _ in COLUMNS]
+    return names + [c for c in ("n_members", "members") if c in table.columns]
+
+
 def _rows_with_formulas(table: pd.DataFrame):
     """Yield each data row as a list of cell values, formulas substituted in."""
-    names = [c for c, _ in COLUMNS]
+    names = _sheet_columns(table)
     for i, (_, row) in enumerate(table.iterrows()):
         r = i + 2                      # +1 for the header, +1 for 1-based
         f = formulas_for_row(r)
@@ -235,7 +382,7 @@ def _write_formula_csv(table: pd.DataFrame, outdir: str) -> str:
     import csv
 
     path = os.path.join(outdir, "benchmark_comparison.csv")
-    names = [c for c, _ in COLUMNS]
+    names = _sheet_columns(table)
     first, last = 2, len(table) + 1
     with open(path, "w", encoding="utf-8", newline="") as fh:
         w = csv.writer(fh)
@@ -261,7 +408,7 @@ def _write_xlsx(table: pd.DataFrame, outdir: str) -> str:
     wb = Workbook()
     ws = wb.active
     ws.title = "comparison"
-    names = [c for c, _ in COLUMNS]
+    names = _sheet_columns(table)
     ws.append(names)
     fill_idx = names.index(FILL_COL) + 1
     hdr = Font(bold=True)
@@ -300,7 +447,10 @@ def _write_xlsx(table: pd.DataFrame, outdir: str) -> str:
     doc.append(["column", "meaning"])
     doc.cell(row=1, column=1).font = hdr
     doc.cell(row=1, column=2).font = hdr
-    for i, (name, meaning) in enumerate(COLUMNS, start=2):
+    extra_doc = [("n_members", "how many model features this benchmark row sums"),
+                 ("members", "which ones - a grouped row must say what it contains")]
+    for i, (name, meaning) in enumerate(
+            list(COLUMNS) + [e for e in extra_doc if e[0] in names], start=2):
         doc.cell(row=i, column=1, value=name)
         doc.cell(row=i, column=2, value=meaning)
     doc.column_dimensions["A"].width = 26
@@ -310,8 +460,10 @@ def _write_xlsx(table: pd.DataFrame, outdir: str) -> str:
 
 
 def write_benchmark_comparison(decomp, pdata, outdir: str,
-                               math_df=None, run_root: str = None) -> str:
+                               math_df=None, run_root: str = None,
+                               mapping_path: str = None) -> str:
     """Called by the pipeline: assemble and write the sheet."""
+    mapping = load_mapping(mapping_path) if mapping_path else {}
     contraction_df = prior_df = None
     if run_root:
         cp = os.path.join(run_root, "02_convergence",
@@ -322,7 +474,8 @@ def write_benchmark_comparison(decomp, pdata, outdir: str,
         if os.path.exists(pp):
             prior_df = pd.read_csv(pp)
     table = build_table(decomp, pdata, math_df=math_df,
-                        contraction_df=contraction_df, prior_df=prior_df)
+                        contraction_df=contraction_df, prior_df=prior_df,
+                        mapping=mapping)
     path = write_benchmark_sheet(table, outdir)
     print(f"[benchmark] paste the benchmark into column "
           f"{_letters()[FILL_COL]} of {os.path.basename(path)} "

@@ -662,7 +662,8 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 # --------------------------------------------------------------------------
 def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                         top_n: int = 20, out_cfg: OutputConfig | None = None,
-                        coef: pd.DataFrame | None = None) -> pd.DataFrame:
+                        coef: pd.DataFrame | None = None,
+                        benchmark_mapping: str | None = None):
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
     G = len(pdata.region_names)
@@ -677,20 +678,16 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     spec_by_name = {s.name: s for specs in pdata.buckets.values() for s in specs}
     method_by_feature = {r.feature: r.method
                          for r in pdata.x_scale_table.itertuples(index=False)}
+    base_feats = set(decomp.baseline_features or ())
 
-    base_feats = set(decomp.baseline_features)
-
-    # Row set, and how the parts add up:
+    # Three kinds of row, and the distinction matters when summing:
     #   __baseline__       = __baseline_core__ + every baseline feature
     #   total sales        = __baseline__ + every incremental feature
     # Baseline features therefore appear TWICE - once inside __baseline__ and
-    # once on their own row - which is what makes the baseline expandable. The
-    # `group` column says which block a row belongs to, so nothing is summed
-    # twice by accident.
+    # once on their own row (group = baseline_part) so the base can be
+    # expanded. Filter on `group` before adding anything up.
     items = [("__baseline__", decomp.baseline_totals, "baseline_total")]
     if base_feats and decomp.core_totals is not None:
-        # only worth a row when there is something to expand: with no baseline
-        # features the core IS the baseline
         items.append(("__baseline_core__", decomp.core_totals, "baseline_part"))
     items += [(n, t, "baseline_part" if n in base_feats else "incremental")
               for n, t in decomp.contrib_totals.items()]
@@ -698,28 +695,29 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
     rows = []
     for name, tot, group in items:
         spec = spec_by_name.get(name)
+        # "" (not False) on a baseline row: it has no spec, so "is the
+        # coefficient sign-constrained?" has no answer there.
         constrained = "" if spec is None else spec.sign != "free"
-        # A CENTRED feature contributes deviations from its own average level, not
-        # an increment over zero: a positive coefficient can still show a negative
-        # total (most weeks sit below the average). Say so, or the sign of the
-        # contribution reads as a contradiction of the sign of the coefficient.
+        # What the contribution is measured AGAINST. A centred feature is
+        # measured versus its own average, not versus zero, which is why such a
+        # feature can report ~0% while its coefficient is large.
         vs = ("" if spec is None else
-              ("feature average" if method_by_feature.get(name) == "center_scale"
-               else "zero"))
-        port = tot.sum(axis=1)  # (S,)
+              "feature average"
+              if method_by_feature.get(name) == "center_scale" else "zero")
+        port = tot.sum(axis=1)
         for region, vals, denom, n_per in (
                 [("__portfolio__", port, total_actual, n_periods_total)]
                 + [(r, tot[:, g], actual_by_region[g], n_periods_by_region[g])
                    for g, r in enumerate(pdata.region_names)]):
             st = _stats(vals)
             row = {"feature": name, "region": region, "group": group,
+                   # __baseline__ / __baseline_core__ have no spec and are
+                   # the base; a feature flagged baseline=1 rolls up there too.
                    "pillar": ("Baseline" if spec is None or spec.baseline
                               else (spec.pillar or "")),
                    **st,
-                   "sign_constrained": constrained, "contribution_vs": vs,
-                   # the same numbers as median/hdi_*, named for what they are:
-                   # a VOLUME in KPI units over the whole window. Everything in
-                   # this file is a volume; the percentage is derived from it.
+                   "sign_constrained": constrained,
+                   "contribution_vs": vs,
                    "volume": st["median"],
                    "volume_hdi_low": st["hdi_low"],
                    "volume_hdi_high": st["hdi_high"],
@@ -727,45 +725,45 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                    "avg_volume_per_period": (float(st["median"]) / n_per
                                              if n_per else np.nan),
                    "actual_volume": float(denom),
-                   "share_of_actual_pct": float(np.median(vals) / denom * 100)}
-            # Reported for every row. A sign-constrained COEFFICIENT cannot
-            # cross zero, but its CONTRIBUTION can (a centred feature sitting
-            # below its average contributes negatively), so unlike the
-            # coefficient report these are not vacuous even when constrained.
-            row["evidence_basis"] = ("contribution sign (the coefficient is "
-                                     "sign-constrained, the contribution is not)"
-                                     if constrained is True else
-                                     "contribution sign")
+                   "share_of_actual_pct": float(
+                       np.median(vals) / denom * 100) if denom else np.nan}
+            # A sign-constrained COEFFICIENT cannot cross zero; the resulting
+            # CONTRIBUTION still can, because the scaled feature can be
+            # negative once it is centred.
+            row["evidence_basis"] = (
+                "contribution sign (the coefficient is sign-constrained, the "
+                "contribution is not)" if constrained else "contribution sign")
             rows.append(row)
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_totals.csv"), index=False)
 
-    # ---- pillar roll-up (the format vendor decks report in) -----------------
-    # __baseline__ carries the whole base, so roll up baseline_total + the
-    # incremental features and skip baseline_part rows to avoid double counting.
+    # pillar roll-up: baseline_total + incremental only, so nothing is
+    # double-counted (baseline_part rows are already inside __baseline__)
     roll = df[df["group"].isin(["baseline_total", "incremental"])].copy()
     roll["pillar"] = roll["pillar"].replace("", "Unassigned")
-    pil = (roll.groupby(["pillar", "region"])
-           [["median", "volume", "share_of_actual_pct"]]
-           .sum().reset_index()
-           .sort_values(["region", "share_of_actual_pct"], ascending=[True, False]))
+    pil = (roll.groupby(["pillar", "region"])[
+        ["median", "volume", "share_of_actual_pct"]]
+        .sum().reset_index()
+        .sort_values(["region", "share_of_actual_pct"],
+                     ascending=[True, False]))
     pil.to_csv(os.path.join(outdir, "contribution_by_pillar.csv"), index=False)
 
-    # ---- reconciliation outputs (volume table, weekly series, arithmetic) ----
-    write_contribution_diagnostics(decomp, pdata, outdir, out_cfg, coef)
+    write_contribution_diagnostics(decomp, pdata, outdir, out_cfg, coef,
+                                   benchmark_mapping=benchmark_mapping)
     if not out_cfg.contribution_plots:
         return df
 
-    # portfolio bar chart with uncertainty: incremental drivers only, since the
-    # baseline parts are not switchable levers and dwarf everything else
-    port = df[(df["region"] == "__portfolio__") & (df["group"] == "incremental")]
-    port = port.reindex(port["median"].abs().sort_values(ascending=False).index).head(top_n)
+    port = df[(df["region"] == "__portfolio__")
+              & (df["group"] == "incremental")]
+    port = port.reindex(port["median"].abs().sort_values(
+        ascending=False).index).head(top_n)
     fig, ax = plt.subplots(figsize=figsize(9, max(3, 0.35 * len(port) + 1.4)))
     ypos = np.arange(len(port))
     ax.barh(ypos, port["median"],
             xerr=[port["median"] - port["hdi_low"],
                   port["hdi_high"] - port["median"]],
-            capsize=2, color=np.where(port["median"] >= 0, "tab:blue", "tab:red"),
+            capsize=2,
+            color=np.where(port["median"] >= 0, "tab:blue", "tab:red"),
             label="median contribution (bar), 90% HDI (whisker)")
     ax.set_yticks(ypos)
     ax.set_yticklabels(port["feature"], fontsize=8)
@@ -775,22 +773,23 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
              "contribution volume (KPI units, summed over the whole window)",
              "feature",
              "Incremental contribution by feature - portfolio "
-             "(median, 90% HDI)", legend=True, legend_fontsize=7)
-    units_note(fig, "Blue = positive, red = negative. Volumes are summed over "
-                    "every period and region. What each is measured AGAINST "
-                    "depends on contribution_reference - see the "
-                    "contribution_vs column of contribution_totals.csv "
-                    "(a centred feature is measured vs its own average, "
-                    "not vs zero).")
+             "(median, 90% HDI)",
+             legend=True, legend_fontsize=7)
+    units_note(fig,
+               "Blue = positive, red = negative. Volumes are summed over every "
+               "period and region. What each is measured AGAINST depends on "
+               "contribution_reference - see the contribution_vs column of "
+               "contribution_totals.csv (a centred feature is measured vs its "
+               "own average, not vs zero).")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "contribution_bars.png"))
 
-    # what the baseline is made of (only when something was folded into it)
     if base_feats:
         bp = df[(df["region"] == "__portfolio__")
                 & (df["group"] == "baseline_part")]
         bp = bp.reindex(bp["median"].abs().sort_values(ascending=False).index)
-        fig, ax = plt.subplots(figsize=figsize(9, max(2.5, 0.4 * len(bp) + 1.4)))
+        fig, ax = plt.subplots(
+            figsize=figsize(9, max(2.5, 0.4 * len(bp) + 1.4)))
         ypos = np.arange(len(bp))
         ax.barh(ypos, bp["median"],
                 xerr=[bp["median"] - bp["hdi_low"],
@@ -806,19 +805,16 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                  "contribution volume (KPI units, summed over the whole window)",
                  "baseline component",
                  "Baseline expanded: what makes up the base "
-                 "(median, 90% HDI)", legend=True, legend_fontsize=7)
-        units_note(fig, "__baseline_core__ is the region intercept + "
-                        "seasonality + trend; the other rows are features "
-                        "flagged baseline=1. Together these are the "
-                        "__baseline__ block, not additional to it.")
+                 "(median, 90% HDI)",
+                 legend=True, legend_fontsize=7)
+        units_note(fig,
+                   "__baseline_core__ is the region intercept + seasonality + "
+                   "trend; the other rows are features flagged baseline=1. "
+                   "Together these are the __baseline__ block, not additional "
+                   "to it.")
         fig.tight_layout()
         save_fig(fig, os.path.join(outdir, "baseline_breakdown.png"))
 
-    # ---- portfolio weekly decomposition -------------------------------------
-    # Two versions: "collapsed" shows the baseline as one block (the business
-    # view: base vs what marketing added); "expanded" opens the baseline into
-    # core + baseline features. Baseline features are excluded from the
-    # collapsed stack because they are already inside the baseline block.
     dts = pd.Series(pdata.dates.values)
     actual_weekly = pd.Series(pdata.y_orig, index=dts).groupby(level=0).sum()
     incremental = [n for n in decomp.contrib_median if n not in base_feats]
@@ -836,24 +832,26 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 
         fig, ax = plt.subplots(figsize=figsize(12, 5.5))
         stack_cols = [base_col] + pos
-        ax.stackplot(weekly.index, [weekly[c].clip(lower=0) for c in stack_cols],
+        ax.stackplot(weekly.index, [weekly[c].clip(lower=0)
+                                    for c in stack_cols],
                      labels=stack_cols, alpha=0.85)
         if neg:
-            ax.stackplot(weekly.index, [weekly[c].clip(upper=0) for c in neg],
+            ax.stackplot(weekly.index,
+                         [weekly[c].clip(upper=0) for c in neg],
                          labels=[f"{c} (negative)" for c in neg], alpha=0.85)
-        ax.plot(actual_weekly.index, actual_weekly.values, color="black", lw=1.2,
-                label="actual KPI")
+        ax.plot(actual_weekly.index, actual_weekly.values, color="black",
+                lw=1.2, label="actual KPI")
         ax.axhline(0, color="grey", lw=0.8)
         ax.legend(fontsize=7, ncol=3, loc="upper left")
         annotate(ax, "date (period start)",
                  "contribution volume (KPI units, all regions summed)", title)
         ax.tick_params(axis="x", rotation=30, labelsize=8)
-        units_note(fig, "Bands stack to the fitted KPI; the black line is "
-                        "actual, so the gap between the stack top and the line "
-                        "is model error. Negative contributions are drawn "
-                        "below zero rather than netted off, so the visible "
-                        "stack height exceeds the fitted value wherever a "
-                        "driver is pulling sales down.")
+        units_note(fig,
+                   "Bands stack to the fitted KPI; the black line is actual, "
+                   "so the gap between the stack top and the line is model "
+                   "error. Negative contributions are drawn below zero rather "
+                   "than netted off, so the visible stack height exceeds the "
+                   "fitted value wherever a driver is pulling sales down.")
         fig.tight_layout()
         save_fig(fig, os.path.join(outdir, fname))
 
@@ -870,8 +868,7 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 
 
 def prior_predictive_plot(idata, pdata: PreparedData, outdir: str) -> None:
-    """Sanity check: does the model *before seeing data* generate KPI values on
-    the right scale? (Meridian: prior sampling step.)"""
+    """Do the priors alone generate data that looks like the KPI?"""
     if not has_group(idata, "prior_predictive"):
         return
     ppd = get_group(idata, "prior_predictive")
@@ -888,9 +885,10 @@ def prior_predictive_plot(idata, pdata: PreparedData, outdir: str) -> None:
              "density (normalised, so the two are comparable)",
              "Prior predictive check - are the priors on the right scale?",
              legend=True, legend_fontsize=8)
-    units_note(fig, "The prior band should COVER the actual distribution and be "
-                    "somewhat wider. Much wider = priors too vague; narrower or "
-                    "offset = priors fight the data, which shows up later as "
-                    "prior-data conflict in prior_posterior_contraction.csv.")
+    units_note(fig,
+               "The prior band should COVER the actual distribution and be "
+               "somewhat wider. Much wider = priors too vague; narrower or "
+               "offset = priors fight the data, which shows up later as "
+               "prior-data conflict in prior_posterior_contraction.csv.")
     fig.tight_layout()
     save_fig(fig, os.path.join(outdir, "prior_predictive_check.png"))

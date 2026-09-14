@@ -44,8 +44,8 @@ from dataclasses import fields
 
 import yaml
 
-from config import (CVConfig, ModelConfig, OutputConfig, RunConfig,
-                    SamplerConfig, load_feature_config)
+from config import (AssumptionConfig, CVConfig, ModelConfig, OutputConfig,
+                    RunConfig, SamplerConfig, load_feature_config)
 
 # --------------------------------------------------------------------------- #
 # section table: yaml key -> dataclass, and the fields that are NOT settings
@@ -55,13 +55,15 @@ SECTIONS = {
     "run": RunConfig,
     "sampler": SamplerConfig,
     "output": OutputConfig,
+    "assumptions": AssumptionConfig,
     "cv": CVConfig,
 }
 
 # `features` is built from the prior CSV, not written in the YAML
 EXCLUDED = {"model": ("features",)}
 
-DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format")
+DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format",
+             "benchmark_mapping")
 
 
 @dataclasses.dataclass
@@ -72,6 +74,7 @@ class Settings:
     run: RunConfig
     sampler: SamplerConfig
     output: OutputConfig
+    assumptions: AssumptionConfig
     cv: CVConfig
     source_path: str = ""
 
@@ -97,6 +100,11 @@ HELP: dict[str, dict[str, str]] = {
         "sheet": "Excel sheet name (null = first sheet). Ignored for .csv/.parquet",
         "feature_priors": "the feature/prior table - the list of modelled columns",
         "date_format": "explicit strptime format for the date column (null = infer)",
+        "benchmark_mapping": ("OPTIONAL csv/xlsx mapping our features to the benchmark's "
+                              "combined variables (feature,benchmark_group). When the vendor "
+                              "reports one line where we carry several columns, the benchmark "
+                              "sheet sums ours first so one row compares to one row. "
+                              "null = compare feature by feature"),
     },
     "model": {
         "likelihood": "'normal' | 'student_t'. student_t is robust to promo/holiday spikes",
@@ -182,6 +190,33 @@ HELP: dict[str, dict[str, str]] = {
         "fig_dpi": "resolution of every chart. 160 stays legible pasted into a deck",
         "fig_scale": "multiplies every figure size. Raise for projection, lower to fit a page",
     },
+    "assumptions": {
+        "vif_warn": "VIF flagged as moderate. Textbook 5 (Meridian uses 1000 - see MERIDIAN_ASSUMPTIONS.md)",
+        "vif_bad": "VIF flagged as severe. Textbook 10",
+        "cond_warn": "Belsley condition number, moderate",
+        "cond_bad": "Belsley condition number, severe. This is what catches a feature that duplicates the intercept",
+        "pair_warn": "|corr| between design columns to report. SET 0 TO LIST EVERY PAIR",
+        "pair_bad": "|corr| above which a pair is called severe",
+        "vif_top_k": "how many culprits to name per feature ('explained by A, B and C'). 0 = off",
+        "corr_heatmap": "write 01_data/collinearity_heatmap_<region>.png",
+        "heatmap_max_features": "above this many features a heatmap is unreadable; the highest-VIF ones are kept",
+        "post_corr_warn": "|corr| between coefficient DRAWS - the pair is trading off",
+        "post_corr_bad": "...severe",
+        "dw_lo": "Durbin-Watson lower bound. Below this = positive residual autocorrelation",
+        "dw_hi": "Durbin-Watson upper bound",
+        "linearity_max_corr": "|corr(residual, fitted)| above which the functional form is questioned",
+        "hetero_ratio_max": "sd(resid) in the top third of fitted values / the bottom third",
+        "acf_max": "|autocorrelation| at lags 2/4/13",
+        "skew_max": "|skew| of the standardised residuals",
+        "kurtosis_max": "excess kurtosis before student_t is recommended",
+        "influence_sd": "|standardised residual| counted as an influential point",
+        "exogeneity_max_lags": "cross-correlate each feature against the residual over +/- this many periods",
+        "exogeneity_warn": "|cross-correlation| to flag, floored at 2/sqrt(n) on short panels",
+        "confound_warn": "|corr(treatment, control)| - Meridian's bar, also floored at 2/sqrt(n)",
+        "ppp_fail": "aggregate posterior predictive p-value below which the total is implausible",
+        "neg_baseline_review": "P(baseline < 0) that triggers a review",
+        "neg_baseline_fail": "P(baseline < 0) that fails",
+    },
     "cv": {
         "enabled": ("run expanding-window cross-validation after the main fit. Off by default: "
                     "every fold is a FULL refit, so a 5-fold CV costs roughly 5x the headline "
@@ -204,6 +239,7 @@ SECTION_BLURB = {
     "run": "Data handling, the KPI scale (= the unit your priors live in) and run bookkeeping.",
     "sampler": "MCMC settings. Nothing here changes the model, only how well it is explored.",
     "output": "Which files each stage writes. The CORE tables are always written.",
+    "assumptions": "Thresholds for every collinearity and assumption check. Widen or narrow here, not in code.",
     "cv": "Expanding-window cross-validation, used only by cross_validation.run_cv().",
 }
 
@@ -256,7 +292,7 @@ def load_settings(path: str, features=None) -> Settings:
 
     data = dict(raw.get("data") or {})
     _check_keys(data, set(DATA_KEYS), "data")
-    for k in ("input_path", "feature_priors"):
+    for k in ("input_path", "feature_priors", "benchmark_mapping"):
         if data.get(k):
             data[k] = _resolve_path(data[k], base_dir)
 
@@ -322,6 +358,7 @@ DEFAULT_DATA = {
     "sheet": None,
     "feature_priors": "feature_priors.csv",
     "date_format": None,
+    "benchmark_mapping": None,
 }
 
 HEADER = """\
@@ -464,7 +501,9 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     panel = load_panel(settings) if df is None else df
     result = run(panel, settings.model, settings.run, settings.sampler,
                  save_trace=save_trace, out_cfg=settings.output,
-                 cv_cfg=settings.cv, extra_warnings=caught)
+                 cv_cfg=settings.cv, extra_warnings=caught,
+                 assumption_cfg=settings.assumptions,
+                 benchmark_mapping=settings.data.get("benchmark_mapping"))
     if record_settings:
         dump_settings(settings, os.path.join(result["output_dir"], "01_data",
                                              "resolved_config.yaml"))

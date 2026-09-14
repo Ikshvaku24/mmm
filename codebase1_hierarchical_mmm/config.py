@@ -311,11 +311,14 @@ class FeatureSpec:
     prior_mean: float | None = None    # population prior location (magnitude if signed)
     prior_sd: float | None = None      # population prior sd (log-scale if signed)
     regional_sd: float | None = None   # prior scale of cross-region heterogeneity
-    center: bool = False               # signed features: centre+scale instead of
-                                       # mean-of-positives. REQUIRED for always-on
-                                       # level variables (distribution, price index,
-                                       # ACV) - see the module docstring. Ignored for
-                                       # sign="free", which is always centred.
+    center: bool = False               # DEPRECATED - use `center_mode` instead.
+                                       # Kept only so prior files written before
+                                       # center_mode existed still load: a 1 here
+                                       # maps to center_mode="mean" and warns.
+                                       # Two columns meaning the same thing is
+                                       # how `center=1` silently became a no-op
+                                       # in v7, when an explicit center_mode
+                                       # column won and overwrote it.
     pooling: str | None = None         # "hierarchical" | "independent" | "global"
     baseline: bool = False             # fold into the BASELINE instead of reporting
                                        # as an incremental effect (always-on business
@@ -388,10 +391,28 @@ class FeatureSpec:
                 )
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
-        s.center = bool(s.center) or s.sign == "free"   # free is always centred
-        # explicit centre/scale modes win; otherwise fall back to the legacy
-        # behaviour driven by `center`, so existing prior files are unchanged
-        s.center_mode = ("mean" if s.center else "none") if s.center_mode is None             else str(s.center_mode).strip().lower()
+        # `center_mode` is the only setting. `center` is accepted for old files
+        # and translated here, with a warning when both are present, because a
+        # silent disagreement between them is exactly the v7 failure: an
+        # explicit center_mode won and the center=1 the analyst had set did
+        # nothing at all.
+        legacy = bool(s.center)
+        if s.center_mode is None:
+            s.center_mode = "mean" if (legacy or s.sign == "free") else "none"
+            if legacy:
+                warnings.warn(
+                    f"{s.name}: `center` is deprecated - it has been read as "
+                    "center_mode='mean'. Replace the `center` column with "
+                    "`center_mode` in the prior file; keeping both is how a "
+                    "center=1 silently becomes a no-op.")
+        else:
+            s.center_mode = str(s.center_mode).strip().lower()
+            if legacy and s.center_mode != "mean":
+                warnings.warn(
+                    f"{s.name}: the prior file sets BOTH center=1 and "
+                    f"center_mode={s.center_mode!r}. center_mode wins, so "
+                    "center=1 does nothing here. Delete the `center` column.")
+        s.center = s.center_mode == "mean"     # keep the alias consistent
         if s.center_mode not in VALID_CENTER:
             raise ValueError(
                 f"{s.name}: center_mode must be one of {VALID_CENTER}, "
@@ -582,8 +603,12 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
       variable, hierarchical, sign_constraint,
       global_prior_mean, global_prior_sd, regional_sd_prior
     Optional columns:
-      center   (0/1) 1 for always-on level variables (distribution, price index,
-               ACV) so they are centred rather than only scaled.
+      center_mode  "none" | "mean". Use "mean" for always-on LEVEL variables
+               (distribution, price index, ACV) so they are centred rather than
+               only scaled. Pair it with contribution_reference="zero" or the
+               reported contribution collapses to ~0.
+               (A legacy `center` 0/1 column is still read and mapped to this,
+               with a deprecation warning. Do not write both.)
       pooling  "hierarchical" | "independent" | "global". Defaults to
                hierarchical/global from the `hierarchical` column.
       baseline (0/1) 1 to fold the feature into the baseline instead of
@@ -991,6 +1016,79 @@ class OutputConfig:
 
     def enabled(self) -> list[str]:
         return [f for f in self._FLAGS if getattr(self, f)]
+
+
+@dataclass
+class AssumptionConfig:
+    """Every threshold the assumption and collinearity checks use.
+
+    They live here rather than as module constants so a modeller can widen or
+    narrow any of them from `config.yaml` without editing code - e.g. set
+    `pair_warn: 0.0` to dump the FULL correlation matrix instead of only the
+    flagged pairs.
+
+    The defaults are the classical econometric ones, deliberately much tighter
+    than Meridian's (which errors only at VIF 1000 / correlation 0.999, on the
+    view that priors regularise everything short of numerical degeneracy). See
+    docs/MERIDIAN_ASSUMPTIONS.md.
+    """
+    # ---- collinearity (pre-fit, on the model's design matrix) -------------
+    vif_warn: float = 5.0            # textbook "moderate"
+    vif_bad: float = 10.0            # textbook "severe"
+    cond_warn: float = 10.0          # Belsley condition number
+    cond_bad: float = 30.0
+    pair_warn: float = 0.8           # |corr| between design columns to report.
+                                     # Set 0 to list EVERY pair
+    pair_bad: float = 0.95
+    vif_top_k: int = 3               # how many culprits to name per feature -
+                                     # "this is explained by A, B and C"
+    corr_heatmap: bool = True        # 01_data/collinearity_heatmap_<region>.png
+    heatmap_max_features: int = 40   # above this a heatmap is unreadable; the
+                                     # highest-VIF features are kept
+    # ---- identifiability (post-fit) ---------------------------------------
+    post_corr_warn: float = 0.7      # |corr| between coefficient DRAWS
+    post_corr_bad: float = 0.9
+    # ---- residual assumptions ---------------------------------------------
+    dw_lo: float = 1.5               # Durbin-Watson acceptable band
+    dw_hi: float = 2.5
+    linearity_max_corr: float = 0.2  # |corr(residual, fitted)|
+    hetero_ratio_max: float = 1.5    # sd(resid) top third / bottom third
+    acf_max: float = 0.3             # |autocorrelation| at lags 2/4/13
+    skew_max: float = 1.0
+    kurtosis_max: float = 1.0        # excess kurtosis, under a Normal likelihood
+    influence_sd: float = 3.0        # |standardised residual| counted as extreme
+    # ---- structural checks (adopted from Meridian) ------------------------
+    exogeneity_max_lags: int = 4     # cross-correlate feature vs residual over
+                                     # +/- this many periods. Lag 0 is ~0 BY
+                                     # CONSTRUCTION for an included regressor,
+                                     # so the leads and lags are the real test
+    exogeneity_warn: float = 0.2     # |cross-correlation| to flag. Raised to
+                                     # 2/sqrt(n) automatically on short panels
+    confound_warn: float = 0.1       # |corr(treatment, control)| - Meridian's
+                                     # PotentialBiasCheck bar. Also floored at
+                                     # 2/sqrt(n)
+    ppp_fail: float = 0.05           # aggregate posterior predictive p-value
+    neg_baseline_review: float = 0.2  # P(baseline < 0)
+    neg_baseline_fail: float = 0.8
+
+    def __post_init__(self):
+        for name in ("vif_warn", "vif_bad", "cond_warn", "cond_bad",
+                     "hetero_ratio_max", "influence_sd"):
+            if getattr(self, name) <= 0:
+                raise ValueError(f"{name} must be > 0")
+        for name in ("pair_warn", "pair_bad", "post_corr_warn", "post_corr_bad",
+                     "linearity_max_corr", "acf_max", "exogeneity_warn",
+                     "confound_warn", "ppp_fail", "neg_baseline_review",
+                     "neg_baseline_fail"):
+            v = getattr(self, name)
+            if not 0.0 <= v <= 1.0:
+                raise ValueError(f"{name} must be between 0 and 1, got {v}")
+        if self.dw_lo >= self.dw_hi:
+            raise ValueError("dw_lo must be below dw_hi")
+        if self.vif_top_k < 0 or self.heatmap_max_features < 2:
+            raise ValueError("vif_top_k >= 0 and heatmap_max_features >= 2")
+        if self.exogeneity_max_lags < 0:
+            raise ValueError("exogeneity_max_lags must be >= 0")
 
 
 @dataclass

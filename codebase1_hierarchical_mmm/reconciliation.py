@@ -712,7 +712,8 @@ def write_contribution_math(decomp, pdata, outdir: str,
 
 def write_contribution_diagnostics(decomp, pdata, outdir: str,
                                    out_cfg: OutputConfig | None = None,
-                                   coef: pd.DataFrame | None = None) -> dict:
+                                   coef: pd.DataFrame | None = None,
+                                   benchmark_mapping: str | None = None) -> dict:
     """Every optional 05_contributions file the OutputConfig asks for."""
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
@@ -746,5 +747,6 @@ def write_contribution_diagnostics(decomp, pdata, outdir: str,
             from benchmark import write_benchmark_comparison
             written["benchmark_comparison"] = write_benchmark_comparison(
                 decomp, pdata, outdir, math_df=math_df,
-                run_root=os.path.dirname(os.path.abspath(outdir)))
+                run_root=os.path.dirname(os.path.abspath(outdir)),
+                mapping_path=benchmark_mapping)
     return written

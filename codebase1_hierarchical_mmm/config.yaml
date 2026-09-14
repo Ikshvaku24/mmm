@@ -35,6 +35,11 @@ data:
   feature_priors: feature_priors.csv
   # explicit strptime format for the date column (null = infer)
   date_format: null
+  # OPTIONAL csv/xlsx mapping our features to the benchmark's combined variables
+  # (feature,benchmark_group). When the vendor reports one line where we carry several columns,
+  # the benchmark sheet sums ours first so one row compares to one row. null = compare feature
+  # by feature
+  benchmark_mapping: null
 
 
 # --------------------------------------------------------------------------
@@ -193,6 +198,63 @@ output:
   fig_dpi: 160
   # multiplies every figure size. Raise for projection, lower to fit a page
   fig_scale: 1.4
+
+
+# --------------------------------------------------------------------------
+# Thresholds for every collinearity and assumption check. Widen or narrow here, not in code.
+# --------------------------------------------------------------------------
+assumptions:
+  # VIF flagged as moderate. Textbook 5 (Meridian uses 1000 - see MERIDIAN_ASSUMPTIONS.md)
+  vif_warn: 5.0
+  # VIF flagged as severe. Textbook 10
+  vif_bad: 10.0
+  # Belsley condition number, moderate
+  cond_warn: 10.0
+  # Belsley condition number, severe. This is what catches a feature that duplicates the
+  # intercept
+  cond_bad: 30.0
+  # |corr| between design columns to report. SET 0 TO LIST EVERY PAIR
+  pair_warn: 0.8
+  # |corr| above which a pair is called severe
+  pair_bad: 0.95
+  # how many culprits to name per feature ('explained by A, B and C'). 0 = off
+  vif_top_k: 3
+  # write 01_data/collinearity_heatmap_<region>.png
+  corr_heatmap: true
+  # above this many features a heatmap is unreadable; the highest-VIF ones are kept
+  heatmap_max_features: 40
+  # |corr| between coefficient DRAWS - the pair is trading off
+  post_corr_warn: 0.7
+  # ...severe
+  post_corr_bad: 0.9
+  # Durbin-Watson lower bound. Below this = positive residual autocorrelation
+  dw_lo: 1.5
+  # Durbin-Watson upper bound
+  dw_hi: 2.5
+  # |corr(residual, fitted)| above which the functional form is questioned
+  linearity_max_corr: 0.2
+  # sd(resid) in the top third of fitted values / the bottom third
+  hetero_ratio_max: 1.5
+  # |autocorrelation| at lags 2/4/13
+  acf_max: 0.3
+  # |skew| of the standardised residuals
+  skew_max: 1.0
+  # excess kurtosis before student_t is recommended
+  kurtosis_max: 1.0
+  # |standardised residual| counted as an influential point
+  influence_sd: 3.0
+  # cross-correlate each feature against the residual over +/- this many periods
+  exogeneity_max_lags: 4
+  # |cross-correlation| to flag, floored at 2/sqrt(n) on short panels
+  exogeneity_warn: 0.2
+  # |corr(treatment, control)| - Meridian's bar, also floored at 2/sqrt(n)
+  confound_warn: 0.1
+  # aggregate posterior predictive p-value below which the total is implausible
+  ppp_fail: 0.05
+  # P(baseline < 0) that triggers a review
+  neg_baseline_review: 0.2
+  # P(baseline < 0) that fails
+  neg_baseline_fail: 0.8
 
 
 # --------------------------------------------------------------------------

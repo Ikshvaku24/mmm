@@ -64,12 +64,18 @@ import os
 import numpy as np
 import pandas as pd
 
-# thresholds, in one place so the report and the docs cannot drift
-VIF_WARN, VIF_BAD = 5.0, 10.0
-COND_WARN, COND_BAD = 10.0, 30.0        # Belsley condition index
-PAIR_WARN, PAIR_BAD = 0.8, 0.95         # |correlation| between design columns
-POST_WARN, POST_BAD = 0.7, 0.9          # |correlation| between coefficient draws
-DW_LO, DW_HI = 1.5, 2.5                 # Durbin-Watson acceptable band
+# Every threshold lives on config.AssumptionConfig so a modeller can widen or
+# narrow it from config.yaml without editing code (e.g. pair_warn: 0 dumps the
+# FULL correlation matrix). The module-level names below are the defaults and
+# are what the functions fall back to when no config is passed.
+from config import AssumptionConfig            # noqa: E402
+
+_DEF = AssumptionConfig()
+VIF_WARN, VIF_BAD = _DEF.vif_warn, _DEF.vif_bad
+COND_WARN, COND_BAD = _DEF.cond_warn, _DEF.cond_bad
+PAIR_WARN, PAIR_BAD = _DEF.pair_warn, _DEF.pair_bad
+POST_WARN, POST_BAD = _DEF.post_corr_warn, _DEF.post_corr_bad
+DW_LO, DW_HI = _DEF.dw_lo, _DEF.dw_hi
 
 
 # --------------------------------------------------------------------------- #
@@ -124,7 +130,8 @@ def _aux_r2(y: np.ndarray, others: np.ndarray, centred: bool) -> float:
     return min(max(r2, 0.0), 1.0 - 1e-12)
 
 
-def vif(M: np.ndarray, names: list, has_intercept: bool) -> pd.DataFrame:
+def vif(M: np.ndarray, names: list, has_intercept: bool,
+        top_k: int = 3) -> pd.DataFrame:
     """Variance inflation per column - reported TWO ways, on purpose.
 
     `vif` is the textbook one: R^2 of the column against the others with the
@@ -166,9 +173,47 @@ def vif(M: np.ndarray, names: list, has_intercept: bool) -> pd.DataFrame:
             dup = "a shared constant level"
         else:
             dup = ""
-        rows.append({"column": name, "r2_vs_others": r2_c, "vif": v_c,
-                     "vif_uncentred": v_u, "duplicates": dup})
+        row = {"column": name, "r2_vs_others": r2_c, "vif": v_c,
+               "vif_uncentred": v_u, "duplicates": dup}
+        # WHICH columns is it collinear with? A VIF number alone says "this is
+        # explained by the others" and leaves you to find out by which. Rank
+        # the other columns by their STANDARDISED coefficient in the auxiliary
+        # regression - |b_k| * sd(x_k) / sd(y_j) - which is how much of this
+        # column each of them actually accounts for, not merely how correlated
+        # they are pairwise (three columns can be pairwise-innocent and jointly
+        # explain a fourth).
+        # Only for a column that is ACTUALLY collinear. Every column has some
+        # largest auxiliary coefficient; naming one for an independent feature
+        # would read as an accusation where there is nothing to answer for.
+        if top_k and np.isfinite(v_c) and v_c >= VIF_WARN:
+            row.update(_top_correlates(y, others,
+                                       [n for n in names if n != name],
+                                       top_k))
+        elif top_k:
+            row.update({"explained_by": "", "explained_by_weights": ""})
+        rows.append(row)
     return pd.DataFrame(rows)
+
+
+def _top_correlates(y, others, other_names, top_k: int) -> dict:
+    """The `top_k` columns that most account for `y`, with their weights."""
+    out = {"explained_by": "", "explained_by_weights": ""}
+    if others.size == 0 or not len(other_names):
+        return out
+    try:
+        beta, *_ = np.linalg.lstsq(others, y, rcond=None)
+    except np.linalg.LinAlgError:
+        return out
+    sd_y = float(y.std()) or 1.0
+    contrib = np.abs(np.asarray(beta).ravel()[:len(other_names)]
+                     * others.std(axis=0)[:len(other_names)]) / sd_y
+    order = np.argsort(contrib)[::-1][:top_k]
+    order = [i for i in order if np.isfinite(contrib[i]) and contrib[i] > 0.01]
+    if not order:
+        return out
+    out["explained_by"] = " + ".join(str(other_names[i]) for i in order)
+    out["explained_by_weights"] = " + ".join(f"{contrib[i]:.2f}" for i in order)
+    return out
 
 
 def condition_index(M: np.ndarray) -> tuple[float, np.ndarray]:
@@ -203,18 +248,19 @@ def correlation_pairs(M: np.ndarray, names: list,
         if rows else pd.DataFrame(columns=["column_a", "column_b", "correlation"]))
 
 
-def collinearity(pdata, model_cfg) -> dict:
+def collinearity(pdata, model_cfg, acfg: "AssumptionConfig" = None) -> dict:
     """Pre-fit collinearity, per region, on the model's own design."""
+    acfg = acfg or _DEF
     has_i = bool(getattr(model_cfg, "include_intercept", True))
     vifs, pairs, summary = [], [], []
     for g, rname in enumerate(pdata.region_names):
         M, names = design_matrix(pdata, model_cfg, region=g)
         if M.shape[0] <= 2:
             continue
-        v = vif(M, names, has_i)
+        v = vif(M, names, has_i, top_k=acfg.vif_top_k)
         v.insert(0, "region", rname)
         vifs.append(v)
-        p = correlation_pairs(M, names)
+        p = correlation_pairs(M, names, acfg.pair_warn)
         if len(p):
             p.insert(0, "region", rname)
             pairs.append(p)
@@ -228,11 +274,13 @@ def collinearity(pdata, model_cfg) -> dict:
             "condition_number": cond,
             "max_vif": mx, "max_vif_uncentred": mxu,
             "worst_column": (str(worst["column"]) if worst is not None else ""),
-            "n_vif_over_10": int((v["vif"] > VIF_BAD).sum()),
+            "worst_explained_by": (str(worst.get("explained_by", ""))
+                                   if worst is not None else ""),
+            "n_vif_over_10": int((v["vif"] > acfg.vif_bad).sum()),
             "n_duplicating_intercept": int(
                 (v["duplicates"] == "the intercept/level").sum()),
-            "n_pairs_over_0.8": int(len(p)),
-            "verdict": _collin_verdict(cond, max(mx, mxu)),
+            "n_pairs_flagged": int(len(p)),
+            "verdict": _collin_verdict(cond, max(mx, mxu), acfg),
         })
     return {
         "summary": pd.DataFrame(summary),
@@ -241,19 +289,90 @@ def collinearity(pdata, model_cfg) -> dict:
     }
 
 
-def _collin_verdict(cond: float, max_vif: float) -> str:
-    if not np.isfinite(cond) or cond > COND_BAD or max_vif > VIF_BAD:
+def _collin_verdict(cond: float, max_vif: float,
+                    acfg: "AssumptionConfig" = None) -> str:
+    acfg = acfg or _DEF
+    if not np.isfinite(cond) or cond > acfg.cond_bad or max_vif > acfg.vif_bad:
         return "severe"
-    if cond > COND_WARN or max_vif > VIF_WARN:
+    if cond > acfg.cond_warn or max_vif > acfg.vif_warn:
         return "moderate"
     return "ok"
+
+
+def correlation_heatmap(pdata, model_cfg, outdir: str,
+                        acfg: "AssumptionConfig" = None) -> list:
+    """One correlation heatmap per region, over the model's design columns.
+
+    A table of flagged pairs tells you which pairs crossed a line; a heatmap
+    tells you the STRUCTURE - whether you have one bad pair or a whole block of
+    variables that move together, which is a different problem with a different
+    fix (drop one vs. collapse the block into a pillar).
+
+    Capped at `heatmap_max_features` columns, keeping the highest-VIF ones,
+    because a 65x65 grid of numbers is not a diagnostic.
+    """
+    acfg = acfg or _DEF
+    if not acfg.corr_heatmap:
+        return []
+    import matplotlib.pyplot as plt
+
+    from plotting import figsize, save_fig
+
+    written = []
+    has_i = bool(getattr(model_cfg, "include_intercept", True))
+    for g, rname in enumerate(pdata.region_names):
+        M, names = design_matrix(pdata, model_cfg, region=g)
+        if M.shape[0] <= 2 or M.shape[1] < 2:
+            continue
+        keep = list(range(len(names)))
+        if len(names) > acfg.heatmap_max_features:
+            v = vif(M, names, has_i, top_k=0)
+            rank = (v.set_index("column")["vif"].reindex(names)
+                    .fillna(0.0).to_numpy())
+            keep = sorted(np.argsort(rank)[::-1][:acfg.heatmap_max_features])
+        sub, subn = M[:, keep], [names[i] for i in keep]
+        sd = sub.std(axis=0)
+        live = sd > 0
+        if live.sum() < 2:
+            continue
+        C = np.corrcoef(sub[:, live], rowvar=False)
+        lab = [subn[i] for i in np.where(live)[0]]
+        lab = [(x[:38] + "..") if len(x) > 40 else x for x in lab]
+        n = len(lab)
+        fig, ax = plt.subplots(figsize=figsize(max(6, n * 0.34),
+                                               max(5, n * 0.30)))
+        im = ax.imshow(C, cmap="RdBu_r", vmin=-1, vmax=1)
+        ax.set_xticks(range(n)); ax.set_yticks(range(n))
+        ax.set_xticklabels(lab, rotation=90, fontsize=6)
+        ax.set_yticklabels(lab, fontsize=6)
+        if n <= 25:
+            for i in range(n):
+                for j in range(n):
+                    if i != j and abs(C[i, j]) >= acfg.pair_bad:
+                        ax.text(j, i, f"{C[i, j]:.2f}", ha="center",
+                                va="center", fontsize=5, color="white")
+        fig.colorbar(im, ax=ax, shrink=0.7, label="Pearson correlation")
+        ax.set_title(f"Design-matrix correlation - {rname}\n"
+                     f"(features + intercept + seasonality + trend, "
+                     f"training window)", fontsize=9)
+        fig.tight_layout()
+        path = os.path.join(outdir, f"collinearity_heatmap_{_safe(rname)}.png")
+        save_fig(fig, path)
+        plt.close("all")
+        written.append(path)
+    return written
+
+
+def _safe(name: str) -> str:
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(name))
 
 
 # --------------------------------------------------------------------------- #
 # post-fit: can the FITTED model separate them?
 # --------------------------------------------------------------------------- #
 def posterior_correlation(beta_by_feature: dict, region_names: list,
-                          threshold: float = POST_WARN) -> pd.DataFrame:
+                          threshold: float = POST_WARN,
+                          bad: float = POST_BAD) -> pd.DataFrame:
     """|correlation| between coefficient DRAWS, per region.
 
     This is the check the pre-fit statistics cannot make. Two features whose
@@ -274,7 +393,7 @@ def posterior_correlation(beta_by_feature: dict, region_names: list,
                 if abs(r) >= threshold:
                     rows.append({"region": rname, "feature_a": names[a],
                                  "feature_b": names[b], "posterior_corr": r,
-                                 "verdict": "severe" if abs(r) >= POST_BAD
+                                 "verdict": "severe" if abs(r) >= bad
                                             else "moderate"})
     return (pd.DataFrame(rows).sort_values(
         "posterior_corr", key=lambda s: s.abs(), ascending=False)
@@ -304,8 +423,10 @@ def _row(check, stat, threshold, verdict, means, fix):
 
 
 def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
-                         likelihood: str = "normal") -> pd.DataFrame:
+                         likelihood: str = "normal",
+                         acfg: "AssumptionConfig" = None) -> pd.DataFrame:
     """The classical assumption battery, on one region's residual series."""
+    acfg = acfg or _DEF
     e = np.asarray(actual, dtype=float) - np.asarray(fitted, dtype=float)
     f = np.asarray(fitted, dtype=float)
     n = len(e)
@@ -317,8 +438,9 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
     # 1. functional form: residuals should carry no signal in the fitted value
     r_lin = float(np.corrcoef(e, f)[0, 1]) if e.std() > 0 and f.std() > 0 else 0.0
     out.append(_row(
-        "linearity", round(r_lin, 4), "|corr(resid, fitted)| < 0.2",
-        "ok" if abs(r_lin) < 0.2 else "warn",
+        "linearity", round(r_lin, 4),
+        f"|corr(resid, fitted)| < {acfg.linearity_max_corr}",
+        "ok" if abs(r_lin) < acfg.linearity_max_corr else "warn",
         "Residuals should be unrelated to the fitted value. A pattern means the "
         "response is not linear in the transformed inputs.",
         "Revisit the adstock/saturation transforms upstream, or add the missing "
@@ -338,8 +460,9 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
         # 1.5 rather than 2: an error scale that doubles across the range of
         # fitted values only shows up as ~1.7 between tercile MEANS, so a
         # threshold of 2 misses a genuine doubling.
-        "sd(resid) top third / bottom third < 1.5",
-        "ok" if np.isfinite(ratio) and ratio < 1.5 else "warn",
+        f"sd(resid) top third / bottom third < {acfg.hetero_ratio_max}",
+        "ok" if np.isfinite(ratio) and ratio < acfg.hetero_ratio_max
+        else "warn",
         "Error size should not grow with the level of sales. If it does, the "
         "single sigma per region is wrong and the intervals are miscalibrated - "
         "too wide in quiet weeks, too narrow in peaks.",
@@ -351,8 +474,9 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
     dw = _dw(e)
     ac1 = _acf(e, 1)
     out.append(_row(
-        "independence (Durbin-Watson)", round(dw, 3), f"{DW_LO} - {DW_HI}",
-        "ok" if DW_LO <= dw <= DW_HI else "warn",
+        "independence (Durbin-Watson)", round(dw, 3),
+        f"{acfg.dw_lo} - {acfg.dw_hi}",
+        "ok" if acfg.dw_lo <= dw <= acfg.dw_hi else "warn",
         "2 means no autocorrelation; below 1.5 means consecutive residuals are "
         "positively correlated, so the model is missing something that persists "
         "over time. Every interval is then too narrow, because the effective "
@@ -363,8 +487,9 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
         a = _acf(e, lag)
         if np.isfinite(a):
             out.append(_row(
-                f"autocorrelation lag {lag}", round(a, 4), "|r| < 0.3",
-                "ok" if abs(a) < 0.3 else "warn",
+                f"autocorrelation lag {lag}", round(a, 4),
+                f"|r| < {acfg.acf_max}",
+                "ok" if abs(a) < acfg.acf_max else "warn",
                 f"Correlation between residuals {lag} periods apart. A spike at "
                 "the seasonal lag means the seasonal block is too smooth.",
                 "Raise `fourier_order`, or add explicit period dummies."))
@@ -373,15 +498,15 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
     sk = float(((z - z.mean()) ** 3).mean())
     ku = float(((z - z.mean()) ** 4).mean()) - 3.0
     out.append(_row(
-        "residual skew", round(sk, 3), "|skew| < 1",
-        "ok" if abs(sk) < 1 else "warn",
+        "residual skew", round(sk, 3), f"|skew| < {acfg.skew_max}",
+        "ok" if abs(sk) < acfg.skew_max else "warn",
         "A skewed residual means the model is systematically wrong on one side "
         "- typically under-predicting peaks.",
         "Check for a missing promotional driver; consider modelling log sales."))
-    heavy = ku > 1.0 and likelihood != "student_t"
+    heavy = ku > acfg.kurtosis_max and likelihood != "student_t"
     out.append(_row(
         "residual tails (excess kurtosis)", round(ku, 3),
-        "< 1, or likelihood='student_t'",
+        f"< {acfg.kurtosis_max}, or likelihood='student_t'",
         "warn" if heavy else "ok",
         "Heavy tails mean a few weeks are far outside what a Normal allows. "
         "Under a Normal likelihood those weeks drag every coefficient toward "
@@ -390,9 +515,10 @@ def residual_assumptions(actual: np.ndarray, fitted: np.ndarray,
         "deleting any data."))
 
     # 5. influence
-    big = int((np.abs(z) > 3).sum())
+    big = int((np.abs(z) > acfg.influence_sd).sum())
     out.append(_row(
-        "influential observations", f"{big} of {n} beyond 3sd",
+        "influential observations",
+        f"{big} of {n} beyond {acfg.influence_sd:g}sd",
         f"<= {max(1, int(0.003 * n) + 1)} expected",
         "ok" if big <= max(1, int(0.003 * n) + 1) else "warn",
         "Points this far out move coefficients on their own. Under a Normal "
@@ -416,7 +542,7 @@ NEG_BASELINE_FAIL = 0.8
 
 
 def confounding_pairs(pdata, model_cfg,
-                      threshold: float = CONFOUND_WARN) -> pd.DataFrame:
+                      threshold: float = None) -> pd.DataFrame:
     """Correlation between each INCREMENTAL feature and each BASELINE feature.
 
     Meridian's `PotentialBiasCheck` (analysis/review/checks.py) correlates every
@@ -433,6 +559,7 @@ def confounding_pairs(pdata, model_cfg,
     A flag here is not a defect to fix by editing a prior. It is a statement
     about what the coefficient can mean.
     """
+    threshold = CONFOUND_WARN if threshold is None else threshold
     spec_by_name = {sp.name: sp for specs in pdata.buckets.values() for sp in specs}
     controls = [n for n in pdata.feature_names
                 if getattr(spec_by_name.get(n), "baseline", False)]
@@ -474,6 +601,85 @@ def confounding_pairs(pdata, model_cfg,
                                            "correlation", "flag"]))
 
 
+def exogeneity_cross_correlation(pdata, decomp, acfg: "AssumptionConfig" = None
+                                 ) -> pd.DataFrame:
+    """Cross-correlate every feature against the model's RESIDUAL, at leads and lags.
+
+    This is the actual exogeneity check. The previous `confounding_pairs` is a
+    property of the DESIGN (treatment correlated with control) - useful, but it
+    never touches the error term, so it is not an exogeneity test.
+
+    **Why lag 0 is useless and the other lags are not.** For a regressor that is
+    IN the model, the fitted residual is orthogonal to it almost by
+    construction: the fit drives corr(x_t, e_t) to ~0 whether or not the true
+    error is independent of x. So a contemporaneous correlation of zero proves
+    nothing, and that is exactly why simply correlating a feature with the
+    residual - the obvious test - cannot work.
+
+    What the fit does NOT force to zero is the correlation at OTHER lags:
+
+      k > 0  corr(x_t, e_{t+k})   the feature leads the error. Activity today
+                                  predicts what the model gets wrong later -
+                                  a carryover/adstock length that is wrong, or
+                                  an effect the model has not shaped right.
+      k < 0  corr(x_t, e_{t-k})   the error leads the feature. **This is the
+                                  endogeneity that matters in an MMM**: spend
+                                  responding to how sales have been going -
+                                  budget released after a good quarter, or
+                                  rescue spend after a bad one. The regressor
+                                  is then correlated with the error and the
+                                  coefficient is biased.
+
+    Lag 0 is reported with `by_construction=True` so nobody reads it as
+    evidence. Purely contemporaneous simultaneity - spend set from a forecast
+    of this same week - remains untestable from residuals; it needs an
+    instrument or an experiment.
+    """
+    acfg = acfg or _DEF
+    L = int(acfg.exogeneity_max_lags)
+    fitted = np.median(decomp.yhat_draws, axis=0)
+    rows = []
+    for g, rname in enumerate(pdata.region_names):
+        m = (pdata.region_idx == g) & pdata.train_mask
+        n = int(m.sum())
+        if n < max(10, 3 * L):
+            continue
+        order = np.argsort(pdata.dates.values[m])
+        e = (pdata.y_orig[m] - fitted[m])[order]
+        if e.std() <= 0:
+            continue
+        thr = max(acfg.exogeneity_warn, 2.0 / np.sqrt(n))
+        for name in pdata.feature_names:
+            x = pdata.X[m, pdata.feature_index[name]][order]
+            if x.std() <= 0:
+                continue
+            for k in range(-L, L + 1):
+                if k >= 0:
+                    a, b = (x[:n - k], e[k:]) if k else (x, e)
+                else:
+                    a, b = x[-k:], e[:n + k]
+                if len(a) < 8 or a.std() <= 0 or b.std() <= 0:
+                    continue
+                r = float(np.corrcoef(a, b)[0, 1])
+                flagged = abs(r) >= thr and k != 0
+                rows.append({
+                    "region": rname, "feature": name, "lag": k,
+                    "correlation": round(r, 4), "n_obs": len(a),
+                    "threshold_used": round(thr, 4),
+                    "by_construction": k == 0,
+                    "reading": ("contemporaneous - ~0 BY CONSTRUCTION, proves "
+                                "nothing" if k == 0 else
+                                "feature leads the error (transform/carryover "
+                                "misspecified)" if k > 0 else
+                                "ERROR LEADS THE FEATURE - spend responding to "
+                                "sales. This biases the coefficient"),
+                    "flag": "review" if flagged else "",
+                })
+    cols = ["region", "feature", "lag", "correlation", "n_obs",
+            "threshold_used", "by_construction", "reading", "flag"]
+    return pd.DataFrame(rows, columns=cols)
+
+
 def posterior_predictive_p(decomp, pdata) -> pd.DataFrame:
     """Aggregate posterior predictive p-value, per region and overall.
 
@@ -512,7 +718,8 @@ def posterior_predictive_p(decomp, pdata) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def negative_baseline_probability(decomp, pdata) -> pd.DataFrame:
+def negative_baseline_probability(decomp, pdata,
+                                  acfg: "AssumptionConfig" = None) -> pd.DataFrame:
     """P(total baseline < 0) per region, from the draws we already have.
 
     Meridian's `BaselineCheck` (review 0.2, fail 0.8). A negative baseline means
@@ -522,6 +729,7 @@ def negative_baseline_probability(decomp, pdata) -> pd.DataFrame:
     (baseline_core strongly negative while baseline features exceeded 100%), so
     it belongs in the automated battery rather than being spotted by eye.
     """
+    acfg = acfg or _DEF
     rows = []
     # a diagnostic must never kill a run: a partial/stubbed decomposition just
     # yields no rows rather than an AttributeError
@@ -533,18 +741,26 @@ def negative_baseline_probability(decomp, pdata) -> pd.DataFrame:
         rows.append({
             "region": rname, "p_negative_baseline": round(pneg, 4),
             "median_baseline": float(np.median(np.asarray(base)[:, g])),
-            "verdict": ("fail" if pneg >= NEG_BASELINE_FAIL
-                        else "review" if pneg >= NEG_BASELINE_REVIEW else "ok")})
+            "verdict": ("fail" if pneg >= acfg.neg_baseline_fail
+                        else "review" if pneg >= acfg.neg_baseline_review
+                        else "ok")})
     return pd.DataFrame(rows)
 
 
 # --------------------------------------------------------------------------- #
 # writers
 # --------------------------------------------------------------------------- #
-def write_collinearity(pdata, model_cfg, outdir: str) -> dict:
+def write_collinearity(pdata, model_cfg, outdir: str,
+                       acfg: "AssumptionConfig" = None) -> dict:
     """Pre-fit collinearity files into 01_data/."""
-    res = collinearity(pdata, model_cfg)
+    acfg = acfg or _DEF
+    res = collinearity(pdata, model_cfg, acfg)
     os.makedirs(outdir, exist_ok=True)
+    try:
+        res["heatmaps"] = correlation_heatmap(pdata, model_cfg, outdir, acfg)
+    except Exception as e:  # noqa: BLE001 - a chart must never kill a run
+        print(f"[assumptions] WARNING: correlation heatmap failed: {e}")
+        res["heatmaps"] = []
     res["summary"].to_csv(os.path.join(outdir, "collinearity_summary.csv"),
                           index=False)
     if len(res["vif"]):
@@ -564,8 +780,10 @@ def write_collinearity(pdata, model_cfg, outdir: str) -> dict:
 
 def write_assumptions(decomp, pdata, outdir: str, model_cfg=None,
                       beta_by_feature: dict | None = None,
-                      collin: dict | None = None) -> pd.DataFrame:
+                      collin: dict | None = None,
+                      acfg: "AssumptionConfig" = None) -> pd.DataFrame:
     """Post-fit assumption battery + posterior correlation into 04_fit/."""
+    acfg = acfg or _DEF
     os.makedirs(outdir, exist_ok=True)
     lik = getattr(model_cfg, "likelihood", "normal")
     fitted = np.median(decomp.yhat_draws, axis=0)
@@ -574,7 +792,7 @@ def write_assumptions(decomp, pdata, outdir: str, model_cfg=None,
         m = (pdata.region_idx == g) & pdata.train_mask
         if m.sum() < 5:
             continue
-        t = residual_assumptions(pdata.y_orig[m], fitted[m], lik)
+        t = residual_assumptions(pdata.y_orig[m], fitted[m], lik, acfg)
         t.insert(0, "region", rname)
         frames.append(t)
     tbl = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
@@ -583,18 +801,22 @@ def write_assumptions(decomp, pdata, outdir: str, model_cfg=None,
 
     post = pd.DataFrame()
     if beta_by_feature:
-        post = posterior_correlation(beta_by_feature, pdata.region_names)
+        post = posterior_correlation(beta_by_feature, pdata.region_names,
+                                     acfg.post_corr_warn)
         post.to_csv(os.path.join(outdir, "posterior_correlation.csv"), index=False)
 
-    # the three checks adopted from Meridian
-    conf = confounding_pairs(pdata, model_cfg)
+    # the three checks adopted from Meridian, plus the real exogeneity test
+    conf = confounding_pairs(pdata, model_cfg, acfg.confound_warn)
     conf.to_csv(os.path.join(outdir, "confounding_pairs.csv"), index=False)
+    exo = exogeneity_cross_correlation(pdata, decomp, acfg)
+    exo.to_csv(os.path.join(outdir, "exogeneity_cross_correlation.csv"),
+               index=False)
     ppp = posterior_predictive_p(decomp, pdata)
-    negb = negative_baseline_probability(decomp, pdata)
+    negb = negative_baseline_probability(decomp, pdata, acfg)
     extra = ppp.merge(negb, on="region", how="outer")
     extra.to_csv(os.path.join(outdir, "structural_checks.csv"), index=False)
 
-    _write_readout(tbl, post, collin, outdir, lik, conf, ppp, negb)
+    _write_readout(tbl, post, collin, outdir, lik, conf, ppp, negb, exo, acfg)
     if len(tbl):
         flagged = tbl[tbl["verdict"] != "ok"]
         if len(flagged):
@@ -607,7 +829,8 @@ def write_assumptions(decomp, pdata, outdir: str, model_cfg=None,
 
 
 def _write_readout(tbl, post, collin, outdir, likelihood,
-                   conf=None, ppp=None, negb=None) -> None:
+                   conf=None, ppp=None, negb=None, exo=None, acfg=None) -> None:
+    acfg = acfg or _DEF
     L = ["# Model assumptions", "",
          "Bayesian regression rests on the same structural assumptions as OLS. "
          "They do not invalidate standard errors here - they show up as "
@@ -739,7 +962,45 @@ def _write_readout(tbl, post, collin, outdir, likelihood,
                      f"{r['median_baseline']:,.0f} | **{r['verdict']}** |")
         L.append("")
 
-    L += ["## 5. Exogeneity - the one no statistic can check", "",
+    L += ["### 4d. Exogeneity: feature vs the residual, at leads and lags", ""]
+    if exo is not None and len(exo):
+        flagged = exo[exo["flag"] == "review"]
+        L += ["**This is the exogeneity test.** 4a above is a property of the "
+              "design (treatment correlated with control); this one touches the "
+              "error term.", "",
+              "Correlating a feature with the residual at **lag 0 proves "
+              "nothing** - for a regressor that is in the model the fit drives "
+              "that correlation to ~0 whether or not the true error is "
+              "independent of it. The information is in the other lags:", "",
+              "- **lag > 0** (feature leads the error): activity today predicts "
+              "what the model gets wrong later - usually a carryover/adstock "
+              "length that is wrong.",
+              "- **lag < 0** (error leads the feature): **spend responding to "
+              "sales**. Budget released after a good quarter, rescue spend "
+              "after a bad one. This is the endogeneity that biases MMM "
+              "coefficients.", ""]
+        if len(flagged):
+            L += [f"{len(flagged)} feature x lag combinations exceed "
+                  f"|r| = {acfg.exogeneity_warn} (floored at 2/sqrt(n)):", "",
+                  "| region | feature | lag | r | reading |",
+                  "|---|---|---|---|---|"]
+            for _, r in flagged.reindex(
+                    flagged["correlation"].abs().sort_values(
+                        ascending=False).index).head(20).iterrows():
+                L.append(f"| {r['region']} | `{r['feature']}` | {r['lag']:+d} | "
+                         f"{r['correlation']:.3f} | {r['reading']} |")
+            L.append("")
+        else:
+            L += ["Nothing flagged at any non-zero lag.", ""]
+        L += ["Full table (every feature x lag, including the lag-0 rows marked "
+              "`by_construction`): `exogeneity_cross_correlation.csv`.", "",
+              "> Purely **contemporaneous** simultaneity - spend set this week "
+              "from a forecast of this same week - stays untestable from "
+              "residuals. It needs an instrument or an experiment.", ""]
+    else:
+        L += ["Not computed (needs enough training periods per region).", ""]
+
+    L += ["## 5. What no statistic can settle", "",
           "Every check above reads the residuals. None of them can tell you "
           "whether a regressor is correlated with the error, and that is the "
           "assumption marketing-mix models break most often:", "",

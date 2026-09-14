@@ -244,8 +244,73 @@ def _labelled_slices(da_prior, da_post):
                    np.asarray(po.isel({d0: i, d1: j}).values).ravel())
 
 
+# Which parameter family carries the number you multiply a contribution by.
+#
+# For a SIGNED feature the model samples `eta ~ Normal(mu, sigma)` and forms
+# `beta = +/-exp(eta)`. The conjugate identity the whole diagnosis rests on -
+#
+#     mu_post = (1 - contraction) * mu_prior + contraction * mu_likelihood
+#     %diff   = exp(mu_post - mu_prior) - 1
+#
+# - is a statement about a NORMAL parameter, so it holds on `eta` (the log
+# scale) and NOT on `beta`, which is lognormal. Contraction computed on
+# `beta_*` is a different quantity and must not be fed into the delta formula.
+#
+# So exactly one family per feature is marked `use_for_delta`:
+#
+#   pooling      sign     sampled parameter        scale
+#   global       signed   glogbeta_<bucket>        log      <- use this
+#   global       free     gbeta_<bucket>           natural  <- use this
+#   hierarchical signed   mu_logbeta_<bucket>      log      <- use this
+#   hierarchical free     mu_beta_<bucket>         natural  <- use this
+#   independent  signed   logbeta_<bucket>         log      <- use this
+#   independent  free     beta_<bucket>            natural  <- use this
+#
+# `beta_<bucket>` for a global or hierarchical feature is a DETERMINISTIC
+# transform, reported for reference only. Under global pooling it is also
+# identical in every region (one shared coefficient broadcast), which is why
+# those rows used to fill the file with duplicates.
+_DELTA_PREFIXES = ("glogbeta_", "gbeta_", "mu_logbeta_", "mu_beta_",
+                   "logbeta_")
+_LOG_SCALE_PREFIXES = ("glogbeta_", "mu_logbeta_", "logbeta_", "tau_logbeta_")
+# deterministic transforms of a sampled parameter - reported, never used for delta
+_DERIVED_PREFIXES = ("beta_", "pop_beta_", "region_prior_offset_",
+                     "alpha_region", "sigma_region")
+
+
+def _use_for_delta(var: str, pooling_of_feature: str | None = None) -> bool:
+    """Is this the one parameter family whose contraction feeds the delta?"""
+    v = str(var)
+    if v.startswith(_DERIVED_PREFIXES) and not v.startswith("logbeta_"):
+        return False
+    return v.startswith(_DELTA_PREFIXES)
+
+
+def _param_scale(var: str) -> str:
+    return "log" if str(var).startswith(_LOG_SCALE_PREFIXES) else "natural"
+
+
+def _split_label(label: str) -> tuple[str, str]:
+    """`_labelled_slices` emits "feature @ region" for 2-D parameters.
+
+    The region half arrives as the raw coordinate repr - "('Core',)" - because
+    the coord is a tuple. Strip that so the column is a plain region name and
+    can be joined against every other output.
+    """
+    lab = str(label)
+    feature, region = (lab.split(" @ ", 1) + [""])[:2] if " @ " in lab \
+        else (lab, "")
+    region = region.strip()
+    if region.startswith("(") and region.endswith(")"):
+        region = region[1:-1]
+    region = region.strip().strip(",").strip()
+    if len(region) >= 2 and region[0] == region[-1] and region[0] in "'\"":
+        region = region[1:-1]
+    return feature.strip(), region
+
+
 def prior_posterior_report(idata, outdir: str, out_cfg=None,
-                           skip_prefixes: tuple = ()) -> None:
+                           skip_prefixes: tuple = (), pdata=None) -> None:
     """How much did the data move each parameter away from its prior?
 
     Two numbers per parameter, answering two different questions:
@@ -267,7 +332,22 @@ def prior_posterior_report(idata, outdir: str, out_cfg=None,
     Contraction alone cannot tell those apart - a parameter can contract hard
     around a value nowhere near its prior mean - which is why both are written.
 
-    Every parameter shared by the prior and posterior groups is reported.
+    THREE columns make the file usable rather than merely complete:
+
+      feature / region      the label split apart, so it joins against every
+                            other output. The raw coordinate arrives as
+                            "feature @ ('Core',)" - the tuple repr is stripped.
+      scale                 `log` or `natural`. The delta arithmetic is a
+                            statement about a Normal parameter, so it only
+                            holds on the log scale for a signed feature.
+      use_for_delta         TRUE on exactly ONE parameter family per feature -
+                            the one you multiply a contribution by. See the
+                            table above _DELTA_PREFIXES.
+
+    Rows for region x feature pairs with no activity in the training window are
+    DROPPED: the contribution there is 0 whatever the coefficient says.
+
+    Every other parameter shared by the prior and posterior groups is reported.
     Earlier versions filtered on a prefix allowlist that silently dropped
     `pooling="global"` coefficients (`gbeta_*`/`glogbeta_*`),
     `pooling="independent"` coefficients (`beta_*`/`logbeta_*`) and
@@ -276,6 +356,16 @@ def prior_posterior_report(idata, outdir: str, out_cfg=None,
     """
     if not has_group(idata, "prior"):
         return
+    # region x feature combinations with no activity in the training window
+    no_support, no_support_all = set(), set()
+    if pdata is not None and getattr(pdata, "x_scale_table", None) is not None:
+        tbl = pdata.x_scale_table
+        if "n_active_train" in tbl.columns:
+            dead = tbl[tbl["n_active_train"] <= 0]
+            no_support = {(str(r.feature), str(r.region))
+                          for r in dead.itertuples(index=False)}
+            per_feature = tbl.groupby("feature")["n_active_train"].max()
+            no_support_all = {str(f) for f, v in per_feature.items() if v <= 0}
     prior = get_group(idata, "prior")
     posterior = get_group(idata, "posterior")
     rows = []
@@ -293,11 +383,16 @@ def prior_posterior_report(idata, outdir: str, out_cfg=None,
             pv, qv = float(np.var(pr)), float(np.var(po))
             p_mean, q_mean = float(np.mean(pr)), float(np.mean(po))
             p_sd = float(np.sqrt(pv))
+            feature, region = _split_label(lab or str(v))
             rows.append({
                 "parameter": f"{v}[{lab}]" if lab else str(v),
                 "variable": str(v),
-                "name": lab or str(v),          # the FEATURE/region name alone
+                "feature": feature,
+                "region": region,
+                "name": lab or str(v),          # kept: the raw coordinate label
                 "role": role,
+                "scale": _param_scale(v),
+                "use_for_delta": _use_for_delta(v),
                 "prior_mean": p_mean,
                 "posterior_mean": q_mean,
                 "prior_sd": p_sd,
@@ -309,9 +404,31 @@ def prior_posterior_report(idata, outdir: str, out_cfg=None,
             })
     if not rows:
         return
-    df = pd.DataFrame(rows).sort_values(["informative", "contraction"],
-                                        ascending=[False, True])
+    df = pd.DataFrame(rows)
+
+    # A feature that never ran in a region contributes exactly 0 there, so its
+    # contraction is a statement about a coefficient that multiplies nothing.
+    # Those rows crowd out the ones that matter, so they are dropped and
+    # counted rather than reported. `support` comes from the scaling table,
+    # which counts activity on the RAW column (after centring every scaled
+    # value is non-zero, so counting X would report full support for a feature
+    # that ran in one week out of ninety-one).
+    n_dropped = 0
+    if no_support:
+        mask = df.apply(
+            lambda r: (r["feature"], r["region"]) in no_support
+            or (r["region"] == "" and r["feature"] in no_support_all),
+            axis=1)
+        n_dropped = int(mask.sum())
+        df = df[~mask]
+
+    df = df.sort_values(["use_for_delta", "informative", "contraction"],
+                        ascending=[False, False, True])
     df.to_csv(os.path.join(outdir, "prior_posterior_contraction.csv"), index=False)
+    if n_dropped:
+        print(f"[diagnostics] contraction: dropped {n_dropped} rows with no "
+              "data support (the feature never ran there, so its contribution "
+              "is 0 regardless of the coefficient)")
 
     inf = df[df["informative"]]
     low = inf[inf["contraction"] < 0.2]

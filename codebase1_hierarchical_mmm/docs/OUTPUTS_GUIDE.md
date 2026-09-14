@@ -62,7 +62,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `model_input_matrix` | `model_input_matrix.csv` | 01 |
 | `model_input_summary` | `model_input_summary.csv` | 01 |
 | `data_plots` | `kpi_by_region.png` | 01 |
-| `collinearity` | `collinearity_summary.csv`, `_vif.csv`, `_pairs.csv` | 01 |
+| `collinearity` | `collinearity_summary.csv`, `_vif.csv`, `_pairs.csv`, `collinearity_heatmap_<region>.png` | 01 |
 | `prior_summary` | `prior_summary.csv` | 01 |
 | *(always, when run from YAML)* | `resolved_config.yaml` | 01 |
 | `contraction_plot` | `prior_posterior_contraction.png` | 02 |
@@ -552,6 +552,48 @@ Bucket suffixes: `h`/`i`/`g` = hierarchical / independent / global pooling;
 
 ### `prior_posterior_contraction.csv`
 
+🆕 **Four columns make this file usable rather than merely complete**, and one
+filter removes rows that could never mean anything:
+
+| Column | Meaning |
+|---|---|
+| `feature` / `region` | the label **split apart**, so it joins against every other output. The raw coordinate arrives as `feature @ ('Core',)` — the tuple repr is stripped |
+| `scale` | `log` or `natural` |
+| `use_for_delta` | **TRUE on exactly ONE parameter family per feature** — the one to multiply a contribution by |
+
+**Which parameter, and why it matters.** For a signed feature the model samples
+`eta ~ Normal(mu, sigma)` and forms `beta = ±exp(eta)`. The identity the whole
+diagnosis rests on —
+
+```
+mu_post = (1 − contraction)·mu_prior + contraction·mu_likelihood
+%diff   = exp(mu_post − mu_prior) − 1
+```
+
+— is a statement about a **Normal** parameter. It holds on `eta` (the log scale)
+and **not** on `beta`, which is lognormal. So:
+
+| pooling | sign | the parameter to use | scale |
+|---|---|---|---|
+| global | signed | `glogbeta_<bucket>` | log |
+| global | free | `gbeta_<bucket>` | natural |
+| hierarchical | signed | `mu_logbeta_<bucket>` | log |
+| hierarchical | free | `mu_beta_<bucket>` | natural |
+| independent | signed | `logbeta_<bucket>` | log |
+
+`beta_<bucket>` is a **deterministic** transform, reported for reference only.
+Under `pooling=global` it is also identical in every region (one shared
+coefficient broadcast), which is why those rows used to fill the file with
+duplicates. `tau_*` is the cross-region *spread*, not the location, so it is
+never the delta parameter either.
+
+🆕 **Rows with no data support are dropped.** A region × feature pair where the
+feature never ran contributes exactly 0 there, so its contraction describes a
+coefficient that multiplies nothing. The count is printed rather than silently
+hidden.
+
+
+
 | Column | Meaning |
 |---|---|
 | `parameter` | `variable[name]`, e.g. `mu_logbeta_hpos[TDP]` |
@@ -861,6 +903,36 @@ half of all noise pairs. `threshold_used` and `n_obs` record what was applied.
 |---|---|
 | `ppp` | aggregate posterior predictive p-value: how extreme the observed TOTAL is under the posterior predictive. **Fails below 0.05.** Pointwise coverage cannot see a model whose weekly intervals are fine but whose annual total sits in its own tail — which is the shape of a decomposition that reconciles to 100% and is still wrong |
 | `p_negative_baseline` | P(total baseline < 0). Review at 0.2, fail at 0.8. A negative baseline says sales would be negative with no marketing — that is drivers over-claiming with the baseline absorbing the offset, which this project has seen |
+
+**🆕 `exogeneity_cross_correlation.csv`** — **this is the exogeneity test.**
+`confounding_pairs.csv` above is a property of the *design*; it never touches
+the error term. This one cross-correlates every feature against the model's
+**residual** at leads and lags.
+
+| Column | Meaning |
+|---|---|
+| `region`, `feature`, `lag` | the cell. Lag ranges over ±`assumptions.exogeneity_max_lags` |
+| `correlation` | corr(feature at t, residual at t+lag) |
+| `n_obs`, `threshold_used` | the sample and the bar applied (floored at 2/√n) |
+| `by_construction` | TRUE at lag 0 |
+| `reading` | what a flag at this lag means |
+| `flag` | `review` when the bar is crossed at a non-zero lag |
+
+**Why lag 0 is useless and the other lags are not.** For a regressor that is
+*in* the model, the fit drives `corr(x_t, e_t)` to ~0 whether or not the true
+error is independent of it. So the obvious test — correlate the feature with the
+residual — cannot work, and a zero there proves nothing. What the fit does not
+force to zero:
+
+- **lag > 0** (feature leads the error): activity today predicts what the model
+  gets wrong later — usually a carryover/adstock length that is wrong.
+- **lag < 0** (error leads the feature): **spend responding to sales.** Budget
+  released after a good quarter, rescue spend after a bad one. This is the
+  endogeneity that biases MMM coefficients.
+
+Purely **contemporaneous** simultaneity — spend set this week from a forecast of
+this same week — stays untestable from residuals. It needs an instrument or an
+experiment.
 
 **`assumptions_report.md`** pulls all of it together and closes with the
 assumption no statistic can check — **exogeneity**. Spend follows expected

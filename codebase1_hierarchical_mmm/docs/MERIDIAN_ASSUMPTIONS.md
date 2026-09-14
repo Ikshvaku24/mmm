@@ -257,6 +257,65 @@ bottleneck.
 
 ---
 
+## 5b. EDA — the bigger gap, and it matters for codebase 2
+
+Meridian's `model/eda/` is a full pre-fit EDA engine with ~15 checks graded
+ERROR / ATTENTION / INFO. We have adopted the collinearity half. The rest is
+mostly about **data quality and media-specific sanity**, which is exactly what
+codebase 2 will need, because it takes RAW media and learns the transforms —
+so bad media data no longer gets laundered through a preprocessing step
+somebody already eyeballed.
+
+| Meridian check | What it catches | Do we have it? |
+|---|---|---|
+| `check_pairwise_corr` | duplicate columns | ✅ (tighter) |
+| `check_vif` | multicollinearity | ✅ (plus uncentred + condition number) |
+| `check_std` | constant / near-constant variables | ✅ `near_constant_sd`, `min_feature_scale` |
+| `check_variable_geo_time_collinearity` | a variable that is really just time, or really just geo | ⚠️ implicit in the design VIF — **worth adding explicitly** |
+| `check_overall_kpi_invariability` | the KPI itself is constant → no signal | ❌ |
+| `check_data_param_ratio` | observations vs parameters | ❌ **and we need it** |
+| `check_cost_per_media_unit` | cost/impression inconsistent across geos or time | ❌ (needs spend — codebase 2) |
+| cost > 0 with 0 media units, or media units with 0 cost | broken extract | ❌ (codebase 2) |
+| `check_population_corr_raw_media` | media that is just population size | ❌ (no population column here) |
+| outlier detection (IQR-based) | extreme values before they become influential points | ⚠️ post-fit only (`influential observations`) |
+
+### The four worth adding, in order
+
+**1. `data_param_ratio` — observations per parameter.** Cheap, and it is the
+check that would have pre-empted the "Dummy with 5 non-zero region-weeks in 520
+rows" problem. Meridian reports it as INFO; for us it should be a warning when
+the ratio falls below ~10. A hierarchical feature costs `2 + G` parameters, so
+65 features on 5 regions is already ~460 parameters against 520 rows.
+
+**2. `variable ≈ time` / `variable ≈ geo` adjusted R².** Labels *what* a
+collinear feature duplicates, which a VIF number does not. Three lines of
+`lstsq` each.
+
+**3. Pre-fit outlier detection.** We only find influential points *after*
+fitting, by which time they have already moved the coefficients. An IQR scan on
+the raw columns costs nothing and tells you before you fit.
+
+**4. KPI invariability.** Trivial, and it turns a confusing downstream failure
+(everything unidentified) into one clear message.
+
+### For codebase 2 specifically
+
+Codebase 2 learns adstock and Hill in-model from **raw** media, which makes
+three Meridian checks go from nice-to-have to necessary:
+
+- **cost vs media units** — a channel with spend and no impressions (or the
+  reverse) makes an ROI prior meaningless, and Meridian's whole prior system is
+  ROI-based.
+- **cost per media unit stability** — wildly varying CPM across geos usually
+  means the units are not what the column header says.
+- **raw media vs population** — in a geo model, media that scales with
+  population is measuring market size, not marketing.
+
+None of these apply to codebase 1, which receives pre-transformed data with no
+spend column. **They should be built with codebase 2, not retrofitted.**
+
+---
+
 ## 6. The honest summary
 
 Meridian is not more rigorous than us about regression assumptions — it is
@@ -271,7 +330,7 @@ baseline, and derive priors from a vendor decomposition rather than an
 experiment. Our residuals therefore carry more signal, and our priors are less
 trustworthy — so the classical checks earn their place.
 
-Take the three structural checks. Keep our thresholds.
+Take the three structural checks. Keep our thresholds. And when codebase 2 starts on raw media, take the media-quality half of the EDA engine with it (5b).
 
 **Related:** `METHODOLOGY.md` (the staged build) · `TUNING_GUIDE.md` (levers) ·
 `OUTPUTS_GUIDE.md` (files and columns) · `../../Meridian_Core_Model_Flow.md`

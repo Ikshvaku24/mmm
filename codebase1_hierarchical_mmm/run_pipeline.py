@@ -34,8 +34,8 @@ import warnings
 import pandas as pd
 
 from compat import extend_idata, save_idata
-from config import (INTERCEPT_PARAMS, CVConfig, ModelConfig, OutputConfig,
-                    RunConfig, SamplerConfig)
+from config import (INTERCEPT_PARAMS, AssumptionConfig, CVConfig,
+                    ModelConfig, OutputConfig, RunConfig, SamplerConfig)
 from data_prep import prepare_data, write_data_stage_outputs
 from diagnostics import (convergence_report, enforce_convergence,
                          prior_posterior_report, quick_convergence_checks)
@@ -57,10 +57,13 @@ def run(df: pd.DataFrame,
         save_trace: bool = True,
         out_cfg: OutputConfig | None = None,
         cv_cfg: CVConfig | None = None,
-        extra_warnings: list | None = None):
+        extra_warnings: list | None = None,
+        assumption_cfg: AssumptionConfig | None = None,
+        benchmark_mapping: str | None = None):
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
+    assumption_cfg = assumption_cfg or AssumptionConfig()
     root = os.path.join(run_cfg.output_dir, run_cfg.run_name)
     dirs = {k: os.path.join(root, k) for k in
             ["00_warnings", "01_data", "02_convergence", "03_coefficients",
@@ -93,7 +96,8 @@ def run(df: pd.DataFrame,
                 "dv_center='mean', or keep the intercept.")
 
         result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
-                             dirs, root, save_trace)
+                             dirs, root, save_trace, assumption_cfg,
+                             benchmark_mapping)
 
     # Warnings raised while the CONFIG was being read happen before this
     # function is reached (load_feature_config runs in the caller), so the
@@ -116,7 +120,7 @@ def run(df: pd.DataFrame,
 
 
 def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
-                save_trace):
+                save_trace, assumption_cfg=None, benchmark_mapping=None):
     """The five reporting stages. Split out so `run` can wrap them all in one
     warning-capture block without indenting the whole body twice."""
     print("[1/5] preparing data")
@@ -124,7 +128,8 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     write_data_stage_outputs(pdata, dirs["01_data"], out_cfg)
     # Pre-fit collinearity: a property of the DATA, so it is computed before any
     # sampling and its verdict is valid whatever the priors turn out to do.
-    collin = (write_collinearity(pdata, model_cfg, dirs["01_data"])
+    collin = (write_collinearity(pdata, model_cfg, dirs["01_data"],
+                                 assumption_cfg)
               if out_cfg.collinearity else None)
 
     print("[2/5] building + sampling model")
@@ -137,7 +142,7 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     convergence_report(idata, dirs["02_convergence"])
     prior_posterior_report(idata, dirs["02_convergence"], out_cfg,
                            skip_prefixes=() if out_cfg.report_intercept
-                           else INTERCEPT_PARAMS)
+                           else INTERCEPT_PARAMS, pdata=pdata)
     prior_predictive_plot(idata, pdata, dirs["02_convergence"])
     enforce_convergence(quick_convergence_checks(idata),
                         run_cfg.on_convergence_failure)
@@ -153,12 +158,13 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
         # residuals behave the way the likelihood assumes.
         write_assumptions(decomp, pdata, dirs["04_fit"], model_cfg,
                           beta_draws_by_feature(stack_posterior(idata), pdata),
-                          collin)
+                          collin, assumption_cfg)
 
     print("[5/5] contributions")
     # coef is passed in so contribution_math.csv can print the median
     # coefficient beside the volume it produces, without re-stacking the trace
     contrib = contribution_report(decomp, pdata, dirs["05_contributions"],
+                                  benchmark_mapping=benchmark_mapping,
                                   out_cfg=out_cfg, coef=coef)
 
     if save_trace:
