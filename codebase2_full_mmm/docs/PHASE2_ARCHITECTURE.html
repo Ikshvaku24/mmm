@@ -1,0 +1,902 @@
+<title>Codebase 2 Blueprint</title>
+<meta name="description" content="One-page architecture of the Phase 2 marketing-mix model: raw media in, carryover, lag and saturation learned in-model, codebase 1 infrastructure brought across, ROI priors by default.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #F2F5F7;
+    --surface: #FFFFFF;
+    --surface-2: #F7F9FA;
+    --ink: #16202B;
+    --ink-2: #4B5A69;
+    --rule: #D6DEE5;
+    --rule-strong: #A9B6C2;
+    --baseline: #2F5F98;
+    --baseline-tint: #E2EBF6;
+    --media: #17785F;
+    --media-tint: #DCF0E8;
+    --learned: #8A5A10;
+    --learned-fill: #F5DDAE;
+    --infra: #5E6B78;
+    --infra-tint: #E6EAEE;
+    --alert: #B42318;
+    --alert-tint: #FBE4E1;
+    --font-display: "Barlow Semi Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E141B;
+      --surface: #151D26;
+      --surface-2: #111820;
+      --ink: #E4EBF2;
+      --ink-2: #9DAAB8;
+      --rule: #28333E;
+      --rule-strong: #4A5866;
+      --baseline: #8DB3E3;
+      --baseline-tint: #182739;
+      --media: #5CC9A7;
+      --media-tint: #12302A;
+      --learned: #E7B25A;
+      --learned-fill: #3B2B11;
+      --infra: #9AA6B2;
+      --infra-tint: #1E2831;
+      --alert: #F28B7D;
+      --alert-tint: #3A1B18;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0E141B;
+    --surface: #151D26;
+    --surface-2: #111820;
+    --ink: #E4EBF2;
+    --ink-2: #9DAAB8;
+    --rule: #28333E;
+    --rule-strong: #4A5866;
+    --baseline: #8DB3E3;
+    --baseline-tint: #182739;
+    --media: #5CC9A7;
+    --media-tint: #12302A;
+    --learned: #E7B25A;
+    --learned-fill: #3B2B11;
+    --infra: #9AA6B2;
+    --infra-tint: #1E2831;
+    --alert: #F28B7D;
+    --alert-tint: #3A1B18;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 400 15px/1.55 var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  .sheet { max-width: 1280px; margin: 0 auto; padding: 28px 24px 56px; display: grid; gap: 24px; }
+  h1, h2, h3 { font-family: var(--font-display); color: var(--ink); margin: 0; text-wrap: balance; }
+  h1 { font-weight: 700; font-size: clamp(34px, 4vw, 44px); line-height: 1.02; letter-spacing: -0.005em; }
+  h2 { font-weight: 600; font-size: 22px; line-height: 1.15; }
+  h3 { font-weight: 600; font-size: 16px; line-height: 1.2; }
+  p { margin: 0; }
+  code { font-family: var(--font-mono); font-size: 0.86em; }
+  strong { font-weight: 600; }
+  .eyebrow {
+    font: 600 12px/1.2 var(--font-display);
+    letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2);
+  }
+  .muted { color: var(--ink-2); }
+
+  /* ---- header: title + drawing title block ---- */
+  .head {
+    display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 400px);
+    gap: 24px 36px; align-items: end;
+    padding-bottom: 20px; border-bottom: 2px solid var(--ink);
+  }
+  .head-main { display: grid; gap: 12px; }
+  .lede { font-size: 17px; line-height: 1.5; max-width: 62ch; }
+  .rule-callout {
+    display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+    font-size: 14px; max-width: 68ch;
+  }
+  .rule-tag {
+    font: 600 11.5px/1 var(--font-display); letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--alert); background: var(--alert-tint); padding: 4px 7px; border-radius: 4px;
+  }
+  .title-block {
+    margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+    border: 1.5px solid var(--ink); border-radius: 2px; background: var(--surface);
+  }
+  .title-block > div { padding: 8px 10px; border-top: 1px solid var(--rule-strong); min-width: 0; }
+  .title-block > div:nth-child(-n+2) { border-top: 0; }
+  .title-block > div:nth-child(even) { border-left: 1px solid var(--rule-strong); }
+  .title-block > div.wide { grid-column: 1 / -1; border-left: 0; }
+  .title-block dt {
+    font: 600 10.5px/1.2 var(--font-display); letter-spacing: 0.12em;
+    text-transform: uppercase; color: var(--ink-2);
+  }
+  .title-block dd { margin: 3px 0 0; font-size: 13.5px; line-height: 1.35; overflow-wrap: anywhere; }
+
+  /* ---- colour key ---- */
+  .legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: var(--ink-2); }
+  .legend li { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .sw-base { background: var(--baseline); }
+  .sw-media { background: var(--media); }
+  .sw-learned { background: var(--learned); }
+  .sw-infra { background: var(--infra); }
+  .sw-alert { background: var(--alert); }
+
+  /* ---- bands, figures, panels ---- */
+  .band { display: grid; gap: 12px; }
+  .band-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 6px 24px; }
+  .band-note { color: var(--ink-2); font-size: 14px; max-width: 72ch; }
+  .fig { margin: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 16px 12px; }
+  .fig-scroll { overflow-x: auto; }
+  .fig-svg { display: block; width: 100%; height: auto; min-width: 960px; color: var(--ink); }
+  .fig-svg.fits { min-width: 440px; }
+  figcaption { margin-top: 10px; font-size: 13px; color: var(--ink-2); max-width: 96ch; }
+
+  .grid { display: grid; gap: 24px; align-items: start; }
+  .grid.split { grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); }
+  .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 20px 22px; display: grid; gap: 14px; align-content: start; min-width: 0; }
+  .panel > p { max-width: 70ch; }
+  .panel .fig { border: 0; padding: 0; background: transparent; }
+  .sub { display: grid; gap: 8px; }
+
+  /* ---- SVG marks (page CSS, theme tokens) ---- */
+  .sv-title { font: 600 13px var(--font-display); fill: var(--ink); letter-spacing: 0.01em; }
+  .sv-small { font: 400 11px var(--font-body); fill: var(--ink-2); }
+  .sv-mono, .sv-tick { font: 400 10.5px var(--font-mono); fill: var(--ink-2); }
+  .sv-node { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.2; }
+  .sv-node-gate { fill: var(--alert-tint); stroke: var(--alert); stroke-width: 1.4; }
+  .sv-node-new { fill: var(--surface-2); stroke: var(--ink); stroke-width: 2; }
+  .sv-arrow { stroke: var(--ink-2); stroke-width: 1.4; }
+  .sv-arrowhead { fill: var(--ink-2); }
+  .sv-arrowhead-learned { fill: var(--learned); }
+  .sv-axis { stroke: var(--rule-strong); stroke-width: 1; }
+  .sv-ref { stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+  .sv-bracket { stroke: var(--ink-2); stroke-width: 1.2; }
+  .sv-bar-raw { fill: var(--infra); }
+  .sv-bar-faint { fill: var(--infra-tint); }
+  .sv-bar-learned { fill: var(--learned); }
+  .sv-bar-learned-soft { fill: var(--learned-fill); stroke: var(--learned); stroke-width: 1; }
+  .sv-bar-cut { fill: none; stroke: var(--learned); stroke-width: 1; stroke-dasharray: 2 2; }
+  .sv-line-media { stroke: var(--media); stroke-width: 2; }
+  .sv-line-media-dash { stroke: var(--media); stroke-width: 1.6; stroke-dasharray: 5 4; }
+  .sv-dot-media { fill: var(--media); }
+  .sv-marker-learned { stroke: var(--learned); stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .sv-box-media { fill: var(--media-tint); stroke: var(--media); stroke-width: 1.2; }
+  .sv-box-plain { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.2; }
+  .sv-warn-bar, .sv-zone-off { fill: var(--infra-tint); }
+  .sv-alert-text { fill: var(--alert); }
+  .sv-learned-text { fill: var(--learned); }
+
+  /* ---- tables ---- */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; line-height: 1.4; }
+  th {
+    text-align: left; vertical-align: bottom; padding: 8px 10px 6px;
+    font: 600 11.5px/1.25 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--ink-2); border-bottom: 1px solid var(--rule-strong);
+  }
+  td { padding: 8px 10px; vertical-align: top; border-bottom: 1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom: 0; }
+  .num { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+  /* ---- tags ---- */
+  .tag { display: inline-block; font: 500 11.5px/1.2 var(--font-mono); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+  .t-base { color: var(--baseline); background: var(--baseline-tint); }
+  .t-media { color: var(--media); background: var(--media-tint); }
+  .t-learned { color: var(--learned); background: var(--learned-fill); }
+  .t-infra { color: var(--ink-2); background: var(--infra-tint); }
+  .t-alert { color: var(--alert); background: var(--alert-tint); }
+  .learned { color: var(--learned); font-weight: 600; }
+
+  @media (max-width: 980px) {
+    .head, .grid.split, .grid.two { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media print {
+    body { background: #FFFFFF; }
+    .sheet { padding: 0; }
+    .fig, .panel { break-inside: avoid; }
+  }
+
+  /* ---- model equation ---- */
+  .eq { display: grid; gap: 4px; }
+  .eq-label { font: 600 11.5px/1.2 var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; margin: 8px 0 2px; }
+  .eq-label:first-child { margin-top: 0; }
+  .eq-label.base { color: var(--baseline); }
+  .eq-label.inc { color: var(--media); }
+  .eq-row { display: grid; grid-template-columns: 16px minmax(0, 1fr) minmax(0, 14em); gap: 4px 10px; align-items: baseline; padding: 7px 10px; border-radius: 5px; }
+  .eq-row.base { background: var(--baseline-tint); }
+  .eq-row.inc { background: var(--media-tint); }
+  .eq-row.noise { background: var(--infra-tint); }
+  .eq-op { font-family: var(--font-mono); color: var(--ink-2); text-align: center; }
+  .eq-term { font-family: var(--font-mono); font-size: 13px; overflow-wrap: anywhere; }
+  .eq-what { font-size: 12.5px; color: var(--ink-2); line-height: 1.35; }
+  @media (max-width: 640px) {
+    .eq-row { grid-template-columns: 16px minmax(0, 1fr); }
+    .eq-what { grid-column: 2; }
+  }
+
+  /* ---- the two switches ---- */
+  .matrix { display: grid; grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.3fr) minmax(0, 1.3fr); border: 1px solid var(--rule-strong); border-radius: 8px; overflow: hidden; font-size: 13px; line-height: 1.4; }
+  .matrix > div { padding: 9px 10px; border-top: 1px solid var(--rule); border-left: 1px solid var(--rule); min-width: 0; }
+  .matrix > div:nth-child(-n+3) { border-top: 0; }
+  .matrix > div:nth-child(3n+1) { border-left: 0; }
+  .mx-h { font: 600 11px/1.3 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); background: var(--surface-2); }
+  .mx-base { background: var(--baseline-tint); }
+  .mx-inc { background: var(--media-tint); }
+  .matrix ul { margin: 0; padding-left: 16px; display: grid; gap: 2px; }
+
+  /* ---- ordered steps ---- */
+  .steps { margin: 0; padding: 0; list-style: none; counter-reset: step; display: grid; gap: 6px; }
+  .steps.from-zero { counter-reset: step -1; }
+  .steps li { counter-increment: step; display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 10px; align-items: center; font-size: 14px; }
+  .steps li::before { content: counter(step); font: 500 11.5px/20px var(--font-mono); text-align: center; width: 22px; height: 22px; border-radius: 50%; border: 1px solid var(--rule-strong); color: var(--ink-2); }
+
+  /* ---- roadmap track ---- */
+  .track { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); overflow: hidden; }
+  .track > li { padding: 14px 14px 16px; border-left: 1px solid var(--rule); display: grid; gap: 8px; align-content: start; min-width: 0; }
+  .track > li:first-child { border-left: 0; }
+  .track > li.gate { background: var(--alert-tint); }
+  .phase { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+  .phase b { font: 700 21px/1 var(--font-display); }
+  .phase span { font-size: 12.5px; color: var(--ink-2); }
+  .track ul { margin: 0; padding-left: 16px; font-size: 13px; line-height: 1.45; display: grid; gap: 3px; }
+  .done-when { font-size: 12.5px; color: var(--ink-2); border-top: 1px dashed var(--rule-strong); padding-top: 8px; }
+  @media (max-width: 980px) {
+    .track { grid-template-columns: minmax(0, 1fr); }
+    .track > li { border-left: 0; border-top: 1px solid var(--rule); }
+    .track > li:first-child { border-top: 0; }
+  }
+
+  /* ---- lists, code-like blocks, origins, footer ---- */
+  .plain { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 14px; max-width: 72ch; }
+  .formula, .tree { margin: 0; font: 400 12.5px/1.6 var(--font-mono); white-space: pre; overflow-x: auto; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; color: var(--ink); }
+  .tree { font-size: 12px; }
+  .origin { display: grid; gap: 12px; }
+  .origin > div { display: grid; grid-template-columns: 8.5em minmax(0, 1fr); gap: 6px 12px; align-items: baseline; }
+  .origin h3 { font-size: 14px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 5px; }
+  .foot { display: grid; gap: 18px; padding-top: 20px; border-top: 2px solid var(--ink); }
+  .sources { margin: 0; padding-left: 18px; font-size: 13px; color: var(--ink-2); display: grid; gap: 4px; }
+  @media (max-width: 640px) { .origin > div { grid-template-columns: minmax(0, 1fr); } }
+
+</style>
+
+<main class="sheet">
+  <header class="head">
+    <div class="head-main">
+      <p class="eyebrow">updating production code · Phase 2 · codebase2_full_mmm</p>
+      <h1>Codebase 2 blueprint</h1>
+      <p class="lede">A marketing-mix model that takes <strong>raw</strong> media and learns carryover, lag and saturation inside the model. Codebase 1's scaling, priors, checks and reporting come across first.</p>
+      <p class="rule-callout"><span class="rule-tag">The one rule</span> Raw media in. Never pre-adstocked, never pre-saturated. Feeding transformed media transforms it twice.</p>
+    </div>
+    <dl class="title-block">
+      <div><dt>Status</dt><dd>Blueprint · no code changed</dd></div>
+      <div><dt>Date</dt><dd class="num">2026-09-14</dd></div>
+      <div><dt>Panel</dt><dd>5 retailer accounts × 104 weeks</dd></div>
+      <div><dt>Features (v7)</dt><dd>65, of which 33 transformed</dd></div>
+      <div><dt>Sampler</dt><dd>PyMC model, NumPyro on GPU</dd></div>
+      <div><dt>Media prior</dt><dd>ROI (spend confirmed)</dd></div>
+      <div class="wide"><dt>Full detail</dt><dd><code>codebase2_full_mmm/docs/PHASE2_ARCHITECTURE.md</code></dd></div>
+    </dl>
+  </header>
+
+  <ul class="legend" aria-label="Colour key">
+    <li><span class="swatch sw-base"></span>Baseline</li>
+    <li><span class="swatch sw-media"></span>Incremental media</li>
+    <li><span class="swatch sw-learned"></span>Learned in-model (codebase 1 fixed these by hand)</li>
+    <li><span class="swatch sw-infra"></span>Raw input or infrastructure</li>
+    <li><span class="swatch sw-alert"></span>Gate or risk</li>
+  </ul>
+
+  <section class="band" aria-labelledby="pipe-h">
+    <div class="band-head">
+      <h2 id="pipe-h">One run, end to end</h2>
+      <p class="band-note">Eight stages, each writing its own folder. An ERROR at the EDA gate stops any run that uses ROI priors, because broken spend data makes an ROI prior meaningless.</p>
+    </div>
+    <figure class="fig">
+      <div class="fig-scroll"><svg viewBox="0 0 1240 184" class="fig-svg" role="img" aria-label="Pipeline of eight stages from inputs through an EDA gate that stops on errors, data preparation, priors, fitting, checks, reporting and cross-validation, each with its output folder, and a warnings folder shared by all stages.">
+<defs><marker id="ah-pipe" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="sv-arrowhead"/></marker></defs>
+<rect x="14.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="76.0" y="64.0" class="sv-title" text-anchor="middle">Inputs</text>
+<text x="76.0" y="83.0" class="sv-small" text-anchor="middle">config.yaml, feature</text>
+<text x="76.0" y="97.0" class="sv-small" text-anchor="middle">table, raw data</text>
+<text x="76.0" y="130.0" class="sv-mono" text-anchor="middle">01_data</text>
+<line x1="141.0" y1="77.0" x2="166.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="154.0" y="32.0" class="sv-mono" text-anchor="middle">raw table</text>
+<rect x="170.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node-gate"/>
+<text x="232.0" y="64.0" class="sv-title" text-anchor="middle">EDA gate</text>
+<text x="232.0" y="83.0" class="sv-small" text-anchor="middle">spend and data</text>
+<text x="232.0" y="97.0" class="sv-small" text-anchor="middle">quality checks</text>
+<text x="232.0" y="130.0" class="sv-mono" text-anchor="middle">02_eda</text>
+<text x="232.0" y="145.0" class="sv-small sv-alert-text" text-anchor="middle">ERROR stops the run</text>
+<line x1="297.0" y1="77.0" x2="322.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="310.0" y="32.0" class="sv-mono" text-anchor="middle">passed</text>
+<rect x="326.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="388.0" y="64.0" class="sv-title" text-anchor="middle">Prepare</text>
+<text x="388.0" y="83.0" class="sv-small" text-anchor="middle">scaling, lag tensor,</text>
+<text x="388.0" y="97.0" class="sv-small" text-anchor="middle">collinearity check</text>
+<text x="388.0" y="130.0" class="sv-mono" text-anchor="middle">01_data</text>
+<line x1="453.0" y1="77.0" x2="478.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="466.0" y="32.0" class="sv-mono" text-anchor="middle">scaled arrays</text>
+<rect x="482.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node-new"/>
+<text x="544.0" y="64.0" class="sv-title" text-anchor="middle">Priors</text>
+<text x="544.0" y="83.0" class="sv-small" text-anchor="middle">bounds, and ROI</text>
+<text x="544.0" y="97.0" class="sv-small" text-anchor="middle">turned into β</text>
+<text x="544.0" y="130.0" class="sv-mono" text-anchor="middle">prior_summary</text>
+<line x1="609.0" y1="77.0" x2="634.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="622.0" y="32.0" class="sv-mono" text-anchor="middle">priors</text>
+<rect x="638.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="700.0" y="64.0" class="sv-title" text-anchor="middle">Fit</text>
+<text x="700.0" y="83.0" class="sv-small" text-anchor="middle">one PyMC model,</text>
+<text x="700.0" y="97.0" class="sv-small" text-anchor="middle">NumPyro on GPU</text>
+<text x="700.0" y="130.0" class="sv-mono" text-anchor="middle">trace.nc</text>
+<line x1="765.0" y1="77.0" x2="790.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="778.0" y="32.0" class="sv-mono" text-anchor="middle">trace</text>
+<rect x="794.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="856.0" y="64.0" class="sv-title" text-anchor="middle">Check</text>
+<text x="856.0" y="83.0" class="sv-small" text-anchor="middle">convergence,</text>
+<text x="856.0" y="97.0" class="sv-small" text-anchor="middle">transform checks</text>
+<text x="856.0" y="130.0" class="sv-mono" text-anchor="middle">03 · 04</text>
+<line x1="921.0" y1="77.0" x2="946.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="934.0" y="32.0" class="sv-mono" text-anchor="middle">trusted trace</text>
+<rect x="950.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="1012.0" y="64.0" class="sv-title" text-anchor="middle">Report</text>
+<text x="1012.0" y="83.0" class="sv-small" text-anchor="middle">decomposition, ROI,</text>
+<text x="1012.0" y="97.0" class="sv-small" text-anchor="middle">reconciliation</text>
+<text x="1012.0" y="130.0" class="sv-mono" text-anchor="middle">05 · 06 · 07</text>
+<line x1="1077.0" y1="77.0" x2="1102.0" y2="77.0" class="sv-arrow" fill="none" marker-end="url(#ah-pipe)"/>
+<text x="1090.0" y="32.0" class="sv-mono" text-anchor="middle">same spec</text>
+<rect x="1106.0" y="42.0" width="124.0" height="70.0" rx="6" class="sv-node"/>
+<text x="1168.0" y="64.0" class="sv-title" text-anchor="middle">Validate</text>
+<text x="1168.0" y="83.0" class="sv-small" text-anchor="middle">expanding-window</text>
+<text x="1168.0" y="97.0" class="sv-small" text-anchor="middle">CV, stability</text>
+<text x="1168.0" y="130.0" class="sv-mono" text-anchor="middle">08_cross_validation</text>
+<rect x="14.0" y="154.0" width="1212.0" height="22.0" rx="4" class="sv-warn-bar"/>
+<text x="620.0" y="169.0" class="sv-small" text-anchor="middle">00_warnings: every stage writes here, one document per warning category</text>
+</svg></div>
+      <figcaption>Above each arrow: what the stage hands on. Below each stage: the folder it writes. The heavy outline marks the stage that is new in Phase 2. Priors are bounded there, and ROI priors are turned into coefficients on every draw.</figcaption>
+    </figure>
+  </section>
+
+  <section class="band" aria-labelledby="chain-h">
+    <div class="band-head">
+      <h2 id="chain-h">The transformation chain, one channel</h2>
+      <p class="band-note">Worked with an example flighting of 16 weeks. Every bar and curve is computed, not sketched.</p>
+    </div>
+    <figure class="fig">
+      <div class="fig-scroll"><svg viewBox="0 0 1240 292" class="fig-svg" role="img" aria-label="One media channel, step by step: raw weekly GRPs; divided by the median active week of 130 GRPs; geometric adstock weights with decay 0.6 over lags 0 to 8; the carried-over series; a Hill curve with EC50 0.6; then multiplied by the account coefficient and the KPI scale to give contribution.">
+<defs><marker id="ah-chain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="sv-arrowhead"/></marker></defs>
+<text x="10.0" y="20.0" class="sv-title" text-anchor="start">1 · Raw media</text>
+<text x="10.0" y="37.0" class="sv-small" text-anchor="start">GRPs per week (example)</text>
+<line x1="40.0" y1="58.0" x2="40.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="40.0" y1="212.0" x2="188.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="196.0" y1="135.0" x2="224.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="230.0" y="20.0" class="sv-title" text-anchor="start">2 · Scale</text>
+<text x="230.0" y="37.0" class="sv-small" text-anchor="start">÷ 130 GRPs = 1 typical week</text>
+<line x1="260.0" y1="58.0" x2="260.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="260.0" y1="212.0" x2="408.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="416.0" y1="135.0" x2="444.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="450.0" y="20.0" class="sv-title" text-anchor="start">3 · Adstock weights</text>
+<text x="450.0" y="37.0" class="sv-small" text-anchor="start">α = 0.6 learned, lags 0–8</text>
+<line x1="480.0" y1="58.0" x2="480.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="480.0" y1="212.0" x2="628.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="636.0" y1="135.0" x2="664.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="670.0" y="20.0" class="sv-title" text-anchor="start">4 · Carried over</text>
+<text x="670.0" y="37.0" class="sv-small" text-anchor="start">average of recent weeks</text>
+<line x1="700.0" y1="58.0" x2="700.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="700.0" y1="212.0" x2="848.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="856.0" y1="135.0" x2="884.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="890.0" y="20.0" class="sv-title" text-anchor="start">5 · Saturate</text>
+<text x="890.0" y="37.0" class="sv-small" text-anchor="start">EC50 = 0.6 learned, slope 1</text>
+<line x1="920.0" y1="58.0" x2="920.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="920.0" y1="212.0" x2="1068.0" y2="212.0" class="sv-axis" fill="none"/>
+<rect x="60.1" y="109.3" width="6.0" height="102.7" rx="0" class="sv-bar-raw"/>
+<rect x="69.4" y="75.1" width="6.0" height="136.9" rx="0" class="sv-bar-raw"/>
+<rect x="78.6" y="92.2" width="6.0" height="119.8" rx="0" class="sv-bar-raw"/>
+<rect x="115.6" y="135.0" width="6.0" height="77.0" rx="0" class="sv-bar-raw"/>
+<rect x="124.9" y="117.9" width="6.0" height="94.1" rx="0" class="sv-bar-raw"/>
+<rect x="171.1" y="83.7" width="6.0" height="128.3" rx="0" class="sv-bar-raw"/>
+<rect x="180.4" y="100.8" width="6.0" height="111.2" rx="0" class="sv-bar-raw"/>
+<line x1="37.0" y1="212.0" x2="40.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="34.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="37.0" y1="75.1" x2="40.0" y2="75.1" class="sv-axis" fill="none"/>
+<text x="34.0" y="79.1" class="sv-tick" text-anchor="end">160</text>
+<text x="114.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<rect x="280.1" y="110.5" width="6.0" height="101.5" rx="0" class="sv-bar-raw"/>
+<rect x="289.4" y="76.6" width="6.0" height="135.4" rx="0" class="sv-bar-raw"/>
+<rect x="298.6" y="93.5" width="6.0" height="118.5" rx="0" class="sv-bar-raw"/>
+<rect x="335.6" y="135.8" width="6.0" height="76.2" rx="0" class="sv-bar-raw"/>
+<rect x="344.9" y="118.9" width="6.0" height="93.1" rx="0" class="sv-bar-raw"/>
+<rect x="391.1" y="85.1" width="6.0" height="126.9" rx="0" class="sv-bar-raw"/>
+<rect x="400.4" y="102.0" width="6.0" height="110.0" rx="0" class="sv-bar-raw"/>
+<line x1="260.0" y1="102.0" x2="408.0" y2="102.0" class="sv-ref" fill="none"/>
+<line x1="257.0" y1="212.0" x2="260.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="254.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="257.0" y1="102.0" x2="260.0" y2="102.0" class="sv-axis" fill="none"/>
+<text x="254.0" y="106.0" class="sv-tick" text-anchor="end">1.0</text>
+<text x="334.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<rect x="483.2" y="73.7" width="10.0" height="138.3" rx="0" class="sv-bar-learned"/>
+<rect x="499.7" y="129.0" width="10.0" height="83.0" rx="0" class="sv-bar-learned"/>
+<rect x="516.1" y="162.2" width="10.0" height="49.8" rx="0" class="sv-bar-learned"/>
+<rect x="532.6" y="182.1" width="10.0" height="29.9" rx="0" class="sv-bar-learned"/>
+<rect x="549.0" y="194.1" width="10.0" height="17.9" rx="0" class="sv-bar-learned"/>
+<rect x="565.4" y="201.2" width="10.0" height="10.8" rx="0" class="sv-bar-learned"/>
+<rect x="581.9" y="205.5" width="10.0" height="6.5" rx="0" class="sv-bar-learned"/>
+<rect x="598.3" y="208.1" width="10.0" height="3.9" rx="0" class="sv-bar-learned"/>
+<rect x="614.8" y="209.7" width="10.0" height="2.3" rx="0" class="sv-bar-learned"/>
+<line x1="477.0" y1="212.0" x2="480.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="474.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="477.0" y1="75.1" x2="480.0" y2="75.1" class="sv-axis" fill="none"/>
+<text x="474.0" y="79.1" class="sv-tick" text-anchor="end">0.4</text>
+<text x="488.2" y="228.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="554.0" y="228.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="619.8" y="228.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="554.0" y="243.0" class="sv-tick" text-anchor="middle">lag (weeks)</text>
+<rect x="720.1" y="110.5" width="6.0" height="101.5" rx="0" class="sv-bar-faint"/>
+<rect x="729.4" y="76.6" width="6.0" height="135.4" rx="0" class="sv-bar-faint"/>
+<rect x="738.6" y="93.5" width="6.0" height="118.5" rx="0" class="sv-bar-faint"/>
+<rect x="775.6" y="135.8" width="6.0" height="76.2" rx="0" class="sv-bar-faint"/>
+<rect x="784.9" y="118.9" width="6.0" height="93.1" rx="0" class="sv-bar-faint"/>
+<rect x="831.1" y="85.1" width="6.0" height="126.9" rx="0" class="sv-bar-faint"/>
+<rect x="840.4" y="102.0" width="6.0" height="110.0" rx="0" class="sv-bar-faint"/>
+<polyline points="704.6,212.0 713.9,212.0 723.1,171.0 732.4,132.7 741.6,116.5 750.9,154.7 760.1,177.6 769.4,191.4 778.6,168.9 787.9,148.5 797.1,173.9 806.4,189.6 815.6,199.1 824.9,204.7 834.1,156.4 843.4,134.2" class="sv-line-media" fill="none"/>
+<circle cx="723.1" cy="171.0" r="2.2" class="sv-dot-media"/>
+<circle cx="732.4" cy="132.7" r="2.2" class="sv-dot-media"/>
+<circle cx="741.6" cy="116.5" r="2.2" class="sv-dot-media"/>
+<circle cx="750.9" cy="154.7" r="2.2" class="sv-dot-media"/>
+<circle cx="760.1" cy="177.6" r="2.2" class="sv-dot-media"/>
+<circle cx="769.4" cy="191.4" r="2.2" class="sv-dot-media"/>
+<circle cx="778.6" cy="168.9" r="2.2" class="sv-dot-media"/>
+<circle cx="787.9" cy="148.5" r="2.2" class="sv-dot-media"/>
+<circle cx="797.1" cy="173.9" r="2.2" class="sv-dot-media"/>
+<circle cx="806.4" cy="189.6" r="2.2" class="sv-dot-media"/>
+<circle cx="815.6" cy="199.1" r="2.2" class="sv-dot-media"/>
+<circle cx="824.9" cy="204.7" r="2.2" class="sv-dot-media"/>
+<circle cx="834.1" cy="156.4" r="2.2" class="sv-dot-media"/>
+<circle cx="843.4" cy="134.2" r="2.2" class="sv-dot-media"/>
+<line x1="697.0" y1="212.0" x2="700.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="694.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="697.0" y1="102.0" x2="700.0" y2="102.0" class="sv-axis" fill="none"/>
+<text x="694.0" y="106.0" class="sv-tick" text-anchor="end">1.0</text>
+<text x="774.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<line x1="920.0" y1="135.0" x2="1068.0" y2="135.0" class="sv-ref" fill="none"/>
+<line x1="979.2" y1="56.0" x2="979.2" y2="212.0" class="sv-marker-learned" fill="none"/>
+<text x="983.2" y="66.0" class="sv-tick sv-learned-text" text-anchor="start">EC50</text>
+<polyline points="920.0,212.0 923.0,211.6 925.9,210.5 928.9,208.6 931.8,206.1 934.8,202.9 937.8,199.3 940.7,195.2 943.7,190.8 946.6,186.1 949.6,181.2 952.6,176.2 955.5,171.2 958.5,166.3 961.4,161.4 964.4,156.6 967.4,151.9 970.3,147.4 973.3,143.1 976.2,138.9 979.2,135.0 982.2,131.2 985.1,127.7 988.1,124.3 991.0,121.1 994.0,118.1 997.0,115.2 999.9,112.6 1002.9,110.0 1005.8,107.6 1008.8,105.4 1011.8,103.3 1014.7,101.3 1017.7,99.4 1020.6,97.6 1023.6,95.9 1026.6,94.3 1029.5,92.8 1032.5,91.4 1035.4,90.1 1038.4,88.8 1041.4,87.6 1044.3,86.5 1047.3,85.4 1050.2,84.4 1053.2,83.4 1056.2,82.5 1059.1,81.6 1062.1,80.8 1065.0,80.0 1068.0,79.2" class="sv-line-media-dash" fill="none"/>
+<polyline points="920.0,212.0 923.0,204.7 925.9,198.0 928.9,191.9 931.8,186.3 934.8,181.2 937.8,176.5 940.7,172.1 943.7,168.0 946.6,164.2 949.6,160.7 952.6,157.4 955.5,154.2 958.5,151.3 961.4,148.6 964.4,146.0 967.4,143.6 970.3,141.2 973.3,139.1 976.2,137.0 979.2,135.0 982.2,133.1 985.1,131.3 988.1,129.6 991.0,128.0 994.0,126.4 997.0,125.0 999.9,123.5 1002.9,122.2 1005.8,120.9 1008.8,119.6 1011.8,118.4 1014.7,117.2 1017.7,116.1 1020.6,115.0 1023.6,114.0 1026.6,113.0 1029.5,112.0 1032.5,111.1 1035.4,110.2 1038.4,109.3 1041.4,108.5 1044.3,107.7 1047.3,106.9 1050.2,106.1 1053.2,105.4 1056.2,104.7 1059.1,104.0 1062.1,103.3 1065.0,102.6 1068.0,102.0" class="sv-line-media" fill="none"/>
+<circle cx="956.8" cy="153.0" r="2.4" class="sv-dot-media"/>
+<circle cx="991.1" cy="127.9" r="2.4" class="sv-dot-media"/>
+<circle cx="1005.6" cy="121.0" r="2.4" class="sv-dot-media"/>
+<circle cx="971.4" cy="140.4" r="2.4" class="sv-dot-media"/>
+<circle cx="950.8" cy="159.3" r="2.4" class="sv-dot-media"/>
+<circle cx="938.5" cy="175.3" r="2.4" class="sv-dot-media"/>
+<circle cx="958.7" cy="151.1" r="2.4" class="sv-dot-media"/>
+<circle cx="977.0" cy="136.5" r="2.4" class="sv-dot-media"/>
+<circle cx="954.2" cy="155.6" r="2.4" class="sv-dot-media"/>
+<circle cx="940.1" cy="172.9" r="2.4" class="sv-dot-media"/>
+<circle cx="931.6" cy="186.8" r="2.4" class="sv-dot-media"/>
+<circle cx="926.5" cy="196.7" r="2.4" class="sv-dot-media"/>
+<circle cx="969.9" cy="141.6" r="2.4" class="sv-dot-media"/>
+<circle cx="989.8" cy="128.7" r="2.4" class="sv-dot-media"/>
+<text x="1066.0" y="72.2" class="sv-tick" text-anchor="end">slope 2</text>
+<text x="1066.0" y="117.0" class="sv-tick" text-anchor="end">slope 1</text>
+<line x1="917.0" y1="212.0" x2="920.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="917.0" y1="135.0" x2="920.0" y2="135.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="139.0" class="sv-tick" text-anchor="end">0.5</text>
+<line x1="917.0" y1="58.0" x2="920.0" y2="58.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="62.0" class="sv-tick" text-anchor="end">1</text>
+<text x="920.0" y="228.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="979.2" y="228.0" class="sv-tick" text-anchor="middle">0.6</text>
+<text x="1068.0" y="228.0" class="sv-tick" text-anchor="middle">1.5</text>
+<text x="994.0" y="243.0" class="sv-tick" text-anchor="middle">adstocked, typical weeks</text>
+<rect x="1110.0" y="46.0" width="120.0" height="58.0" rx="6" class="sv-box-media"/>
+<text x="1170.0" y="65.0" class="sv-title" text-anchor="middle">× β</text>
+<text x="1170.0" y="81.0" class="sv-small" text-anchor="middle">per account,</text>
+<text x="1170.0" y="94.0" class="sv-small" text-anchor="middle">from ROI prior</text>
+<rect x="1110.0" y="124.0" width="120.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="1170.0" y="143.0" class="sv-title" text-anchor="middle">× dv_scale</text>
+<text x="1170.0" y="159.0" class="sv-small" text-anchor="middle">back to</text>
+<text x="1170.0" y="172.0" class="sv-small" text-anchor="middle">sales units</text>
+<rect x="1110.0" y="202.0" width="120.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="1170.0" y="221.0" class="sv-title" text-anchor="middle">= contribution</text>
+<text x="1170.0" y="237.0" class="sv-small" text-anchor="middle">sales per week,</text>
+<text x="1170.0" y="250.0" class="sv-small" text-anchor="middle">per account</text>
+<line x1="1076.0" y1="75.0" x2="1104.0" y2="75.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<line x1="1170.0" y1="104.0" x2="1170.0" y2="122.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<line x1="1170.0" y1="182.0" x2="1170.0" y2="200.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+</svg></div>
+      <figcaption>Decay α and EC50 are learned once per channel (or channel family) and shared by all five accounts. Only the coefficient β differs by account. Because the adstock weights sum to 1, step 4 stays on step 2's axis, which is what makes an EC50 of 0.6 mean "0.6 of a typical active week".</figcaption>
+    </figure>
+  </section>
+
+  <section class="grid split" aria-label="The model and its two switches">
+    <article class="panel" aria-labelledby="eq-h">
+      <h2 id="eq-h">The model, per account and week</h2>
+      <p class="muted">Everything is on the scaled axes. A signed coefficient is built as <code>±exp(μ + τ·z)</code>, so its sign can never flip. Each account gets its own coefficient, shrunk toward a shared mean.</p>
+      <div class="eq">
+        <p class="eq-label base">Baseline · summed into __baseline__</p>
+        <div class="eq-row base"><span class="eq-op"></span><span class="eq-term">intercept<sub>g</sub> + trend<sub>g</sub>·t + seasonality(t)</span><span class="eq-what">the core: pooled level, trend, Fourier terms</span></div>
+        <div class="eq-row base"><span class="eq-op">+</span><span class="eq-term">Σ γ<sub>d</sub> · dummy<sub>d</sub></span><span class="eq-what">21 event dummies, one coefficient each</span></div>
+        <div class="eq-row base"><span class="eq-op">+</span><span class="eq-term">Σ β<sub>g</sub> · x̃ (TDP, base price, category volume, category price)</span><span class="eq-what">linear and centred; price enters with sign −</span></div>
+        <div class="eq-row base"><span class="eq-op">−</span><span class="eq-term">β<sub>g</sub> · Adstock<sub class="learned">α</sub>(competitor TV)</span><span class="eq-what">carryover learned, no saturation</span></div>
+        <p class="eq-label inc">Incremental · reported by pillar</p>
+        <div class="eq-row inc"><span class="eq-op">+</span><span class="eq-term">Σ β<sub>g</sub> · Hill<sub class="learned">ec, s</sub>(Adstock<sub class="learned">α, θ</sub>(media))</span><span class="eq-what">TV, digital, e-commerce, influencers, OOH · ROI prior</span></div>
+        <div class="eq-row inc"><span class="eq-op">+</span><span class="eq-term">Σ β<sub>g</sub> · Adstock<sub class="learned">α</sub>(BTL invest)</span><span class="eq-what">Trade pillar · window of 0–4 weeks</span></div>
+        <div class="eq-row inc"><span class="eq-op">+</span><span class="eq-term">Σ β<sub>g</sub> · TPR</span><span class="eq-what">Trade pillar · linear</span></div>
+        <div class="eq-row noise"><span class="eq-op">+</span><span class="eq-term">ε ~ Normal(0, σ<sub>g</sub>) or Student-t</span><span class="eq-what">noise level per account, pooled</span></div>
+      </div>
+      <p class="muted">Meridian writes the same model as <code>tau_g + mu_t + Σ beta_gm·AdstockHill(media) + Σ gamma·controls + Σ gamma·non_media</code> (<code>posterior_sampler.py::_joint_dist_base_logic</code>). Ours differs in three deliberate ways:</p>
+      <ul class="plain">
+        <li>Fourier terms and a trend instead of time knots.</li>
+        <li>Account intercepts are pooled.</li>
+        <li>Price and distribution are reported inside the baseline.</li>
+      </ul>
+    </article>
+
+    <article class="panel" aria-labelledby="mx-h">
+      <h2 id="mx-h">Two independent switches</h2>
+      <p class="muted"><code>baseline</code> decides where a contribution is <em>reported</em>. <code>transform</code> decides how the feature is <em>modelled</em>. Every family sits in exactly one cell.</p>
+      <div class="matrix">
+        <div class="mx-h"></div>
+        <div class="mx-h">Linear<br>transform = none</div>
+        <div class="mx-h">Transformed<br>learned in-model</div>
+        <div class="mx-h">Baseline<br>baseline = 1</div>
+        <div class="mx-base"><ul><li>intercept, trend, seasonality</li><li>TDP / ACV distribution</li><li>base price, sign −</li><li>category volume and price</li><li>event dummies</li></ul></div>
+        <div class="mx-base"><ul><li>Competitor TV: carryover <span class="learned">α</span>, no saturation, sign −</li></ul></div>
+        <div class="mx-h">Incremental<br>baseline = 0</div>
+        <div class="mx-inc"><ul><li>TPR (Trade)</li></ul></div>
+        <div class="mx-inc"><ul><li>TV, digital, e-commerce, influencers, OOH: <span class="learned">α</span> (θ) and Hill <span class="learned">ec, s</span></li><li>BTL invest: <span class="learned">α</span>, no saturation (Trade)</li></ul></div>
+      </div>
+      <div class="sub">
+        <h3>Flags the v7 prior file needs</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>Rows</th><th>Today</th><th>Change to</th></tr></thead>
+          <tbody>
+            <tr><td><code>sales_market_*</code> category volume and price</td><td>baseline 0</td><td><span class="tag t-base">baseline 1</span></td></tr>
+            <tr><td><code>dummy_*</code>, 21 rows</td><td>baseline 0, pillar Baseline</td><td><span class="tag t-base">baseline 1</span></td></tr>
+            <tr><td><code>media_competitor-tv_*</code></td><td>baseline 0</td><td><span class="tag t-base">baseline 1</span> <span class="tag t-learned">geometric</span> <span class="tag t-infra">no Hill</span></td></tr>
+          </tbody>
+        </table></div>
+        <p class="muted">Codebase 1's pillar roll-up already shows the dummies under Baseline. <code>__baseline__</code> follows the flag, not the pillar name, so today they are not in it.</p>
+      </div>
+    </article>
+  </section>
+
+  <section class="grid split" aria-label="Bounds, lag window and priors">
+    <article class="panel" aria-labelledby="mm-h">
+      <h2 id="mm-h">How min and max are set</h2>
+      <p class="muted">Every learned transform parameter lives inside a range. You write the range in business units, and the sampler never leaves it. A pin (<code>fix_*</code>) sets min equal to max, and the parameter stops being sampled.</p>
+      <div class="sub">
+        <h3>Where each bound comes from (first match wins)</h3>
+        <ol class="steps">
+          <li><span><code>fix_*</code> on the feature row: a constant</span></li>
+          <li><span>bounds on the feature row (members of a transform group must agree)</span></li>
+          <li><span><code>transforms.groups</code> in <code>config.yaml</code></span></li>
+          <li><span><code>transforms.defaults</code> in <code>config.yaml</code></span></li>
+          <li><span>Meridian's defaults</span></li>
+        </ol>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Parameter</th><th>Prior within bounds</th><th>Default range</th><th>You write it as</th></tr></thead>
+        <tbody>
+          <tr><td><span class="learned">α</span> decay</td><td>Uniform</td><td class="num">0 – α_max(max_lag)</td><td>half-life in weeks; α = 0.5^(1/h)</td></tr>
+          <tr><td><span class="learned">θ</span> peak lag</td><td>Uniform</td><td class="num">min_lag – min(6, max_lag)</td><td>peak lag in weeks</td></tr>
+          <tr><td><span class="learned">ec</span> EC50</td><td>TruncatedNormal(0.8, 0.8)</td><td class="num">0.1 – 10</td><td>typical weeks, or raw GRPs ÷ median active week</td></tr>
+          <tr><td><span class="learned">s</span> slope</td><td>1.0, or LogNormal(0, 0.35)</td><td class="num">1.0 · 0.56 – 1.78</td><td><code>learn_slope</code>, <code>slope_min</code> / <code>slope_max</code></td></tr>
+        </tbody>
+      </table></div>
+      <figure class="fig">
+        <div class="fig-scroll"><svg viewBox="0 0 560 392" class="fig-svg fits" role="img" aria-label="Top: geometric decay 0.8 spreads its carryover over many lags; a window ending at lag 8 cuts 13.4 percent of it and a window ending at lag 13 cuts 4.4 percent. Bottom: a delayed kernel with decay 0.7 peaking at lag 3, zero below min_lag 1 and nothing beyond max_lag 8.">
+<text x="0.0" y="16.0" class="sv-title" text-anchor="start">What a short window cuts</text>
+<text x="0.0" y="32.0" class="sv-small" text-anchor="start">geometric decay α = 0.8, share of total carryover by lag</text>
+<line x1="46.0" y1="136.0" x2="546.0" y2="136.0" class="sv-axis" fill="none"/>
+<rect x="51.9" y="48.4" width="17.6" height="87.6" rx="0" class="sv-bar-learned"/>
+<rect x="81.3" y="65.9" width="17.6" height="70.1" rx="0" class="sv-bar-learned"/>
+<rect x="110.7" y="79.9" width="17.6" height="56.1" rx="0" class="sv-bar-learned"/>
+<rect x="140.1" y="91.1" width="17.6" height="44.9" rx="0" class="sv-bar-learned"/>
+<rect x="169.5" y="100.1" width="17.6" height="35.9" rx="0" class="sv-bar-learned"/>
+<rect x="198.9" y="107.3" width="17.6" height="28.7" rx="0" class="sv-bar-learned"/>
+<rect x="228.4" y="113.0" width="17.6" height="23.0" rx="0" class="sv-bar-learned"/>
+<rect x="257.8" y="117.6" width="17.6" height="18.4" rx="0" class="sv-bar-learned"/>
+<rect x="287.2" y="121.3" width="17.6" height="14.7" rx="0" class="sv-bar-learned"/>
+<rect x="316.6" y="124.2" width="17.6" height="11.8" rx="0" class="sv-bar-learned-soft"/>
+<rect x="346.0" y="126.6" width="17.6" height="9.4" rx="0" class="sv-bar-learned-soft"/>
+<rect x="375.4" y="128.5" width="17.6" height="7.5" rx="0" class="sv-bar-learned-soft"/>
+<rect x="404.8" y="130.0" width="17.6" height="6.0" rx="0" class="sv-bar-learned-soft"/>
+<rect x="434.2" y="131.2" width="17.6" height="4.8" rx="0" class="sv-bar-learned-soft"/>
+<rect x="463.6" y="132.1" width="17.6" height="3.9" rx="0" class="sv-bar-cut"/>
+<rect x="493.1" y="132.9" width="17.6" height="3.1" rx="0" class="sv-bar-cut"/>
+<rect x="522.5" y="133.5" width="17.6" height="2.5" rx="0" class="sv-bar-cut"/>
+<text x="60.7" y="150.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="178.4" y="150.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="296.0" y="150.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="443.1" y="150.0" class="sv-tick" text-anchor="middle">13</text>
+<text x="531.3" y="150.0" class="sv-tick" text-anchor="middle">16</text>
+<text x="40.0" y="150.0" class="sv-tick" text-anchor="end">lag</text>
+<text x="40.0" y="140.0" class="sv-tick" text-anchor="end">0</text>
+<text x="40.0" y="48.0" class="sv-tick" text-anchor="end">0.2</text>
+<text x="46.0" y="168.0" class="sv-small" text-anchor="start">max_lag = 8 · 13.4% of carryover cut</text>
+<line x1="46.0" y1="175.0" x2="310.7" y2="175.0" class="sv-bracket" fill="none"/>
+<line x1="46.0" y1="171.0" x2="46.0" y2="179.0" class="sv-bracket" fill="none"/>
+<line x1="310.7" y1="171.0" x2="310.7" y2="179.0" class="sv-bracket" fill="none"/>
+<text x="46.0" y="194.0" class="sv-small" text-anchor="start">max_lag = 13 · 4.4% cut</text>
+<line x1="46.0" y1="201.0" x2="457.8" y2="201.0" class="sv-bracket" fill="none"/>
+<line x1="46.0" y1="197.0" x2="46.0" y2="205.0" class="sv-bracket" fill="none"/>
+<line x1="457.8" y1="197.0" x2="457.8" y2="205.0" class="sv-bracket" fill="none"/>
+<text x="0.0" y="222.0" class="sv-title" text-anchor="start">One window, three settings</text>
+<text x="0.0" y="238.0" class="sv-small" text-anchor="start">delayed decay α = 0.7: min_lag and max_lag fixed, peak θ learned</text>
+<rect x="46.0" y="262.0" width="50.0" height="84.0" rx="0" class="sv-zone-off"/>
+<rect x="496.0" y="262.0" width="50.0" height="84.0" rx="0" class="sv-zone-off"/>
+<line x1="46.0" y1="346.0" x2="546.0" y2="346.0" class="sv-axis" fill="none"/>
+<rect x="107.0" y="329.1" width="28.0" height="16.9" rx="0" class="sv-bar-learned"/>
+<rect x="157.0" y="296.8" width="28.0" height="49.2" rx="0" class="sv-bar-learned"/>
+<rect x="207.0" y="275.7" width="28.0" height="70.3" rx="0" class="sv-bar-learned"/>
+<rect x="257.0" y="296.8" width="28.0" height="49.2" rx="0" class="sv-bar-learned"/>
+<rect x="307.0" y="329.1" width="28.0" height="16.9" rx="0" class="sv-bar-learned"/>
+<rect x="357.0" y="343.2" width="28.0" height="2.8" rx="0" class="sv-bar-learned"/>
+<rect x="407.0" y="345.8" width="28.0" height="0.2" rx="0" class="sv-bar-learned"/>
+<rect x="457.0" y="346.0" width="28.0" height="0.0" rx="0" class="sv-bar-learned"/>
+<line x1="96.0" y1="258.0" x2="96.0" y2="346.0" class="sv-marker-learned" fill="none"/>
+<line x1="496.0" y1="258.0" x2="496.0" y2="346.0" class="sv-marker-learned" fill="none"/>
+<text x="101.0" y="256.0" class="sv-mono" text-anchor="start">min_lag = 1</text>
+<text x="491.0" y="256.0" class="sv-mono" text-anchor="end">max_lag = 8</text>
+<text x="71.0" y="360.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="121.0" y="360.0" class="sv-tick" text-anchor="middle">1</text>
+<text x="171.0" y="360.0" class="sv-tick" text-anchor="middle">2</text>
+<text x="221.0" y="360.0" class="sv-tick" text-anchor="middle">3</text>
+<text x="271.0" y="360.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="321.0" y="360.0" class="sv-tick" text-anchor="middle">5</text>
+<text x="371.0" y="360.0" class="sv-tick" text-anchor="middle">6</text>
+<text x="421.0" y="360.0" class="sv-tick" text-anchor="middle">7</text>
+<text x="471.0" y="360.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="40.0" y="360.0" class="sv-tick" text-anchor="end">lag</text>
+<path d="M221.0,366.0 l-5,8 h10 z" class="sv-arrowhead-learned"/>
+<text x="221.0" y="388.0" class="sv-small sv-learned-text" text-anchor="middle">θ = 3, the learned peak</text>
+</svg></div>
+        <figcaption><code>max_lag</code> is the last lag that can carry weight, Meridian's meaning. <code>min_lag</code> is the delay the team applies in preprocessing today: it is fixed and chosen by cross-validation, because NUTS cannot sample an integer. θ is the learned soft lag inside the window.</figcaption>
+      </figure>
+      <div class="sub">
+        <h3>How big the window must be: max_lag = ceil(ln 0.05 ÷ ln α_max − 1)</h3>
+        <div class="table-wrap"><table>
+          <thead><tr><th>max_lag</th><th class="num">3</th><th class="num">4</th><th class="num">6</th><th class="num">8</th><th class="num">13</th></tr></thead>
+          <tbody>
+            <tr><td>largest α, 5% cut</td><td class="num">0.473</td><td class="num">0.549</td><td class="num">0.652</td><td class="num">0.717</td><td class="num">0.807</td></tr>
+            <tr><td>half-life cap</td><td class="num">0.93 wk</td><td class="num">1.16 wk</td><td class="num">1.62 wk</td><td class="num">2.08 wk</td><td class="num">3.24 wk</td></tr>
+          </tbody>
+        </table></div>
+        <p class="muted">Meridian's default window of 8 supports decay only up to 0.717. Beyond that, a larger decay no longer lengthens the carryover: the window cuts it off and flattens what is left. Our starting windows: TV and Competitor TV 13, digital and OOH 8, BTL 4.</p>
+      </div>
+      <div class="sub">
+        <h3>Flags written after the fit</h3>
+        <ul class="plain">
+          <li><span class="tag t-learned">at_lower_bound</span> <span class="tag t-learned">at_upper_bound</span> The bound, not the data, set the value.</li>
+          <li><span class="tag t-learned">ec_vs_p95_active</span> Above about 1, the data never reaches half-saturation, and EC50 trades off with β.</li>
+          <li><span class="tag t-learned">max_post_corr_with_beta</span> Decay and effect size are trading off. Consider pinning decay.</li>
+        </ul>
+      </div>
+    </article>
+
+    <article class="panel" aria-labelledby="pr-h">
+      <h2 id="pr-h">Priors: ROI by default</h2>
+      <p class="muted">Spend exists for paid media, so the prior sits on the number a client or an experiment can actually supply: return per unit of spend.</p>
+      <div class="table-wrap"><table>
+        <thead><tr><th>Route</th><th>Used for</th><th>Default</th></tr></thead>
+        <tbody>
+          <tr><td><span class="tag t-media">ROI</span></td><td>TV, digital, e-commerce, influencers, OOH</td><td class="num">LogNormal(0.2, 0.9)<br>median 1.22 · 90% 0.28–5.37</td></tr>
+          <tr><td><span class="tag t-media">contribution</span></td><td>a paid channel with no usable spend</td><td class="num">Beta(1, 99)</td></tr>
+          <tr><td><span class="tag t-base">coefficient</span></td><td>linear and carryover-only features: TDP, price, category, TPR, dummies, Competitor TV, BTL</td><td>codebase 1 units, unchanged</td></tr>
+        </tbody>
+      </table></div>
+      <div class="sub">
+        <h3>Why ROI is turned into β on every draw</h3>
+        <p>The sum of <code>Hill(Adstock(x))</code> changes whenever decay or EC50 change, so no single coefficient prior can stand for an ROI. Each draw works out which β makes incremental sales equal ROI × spend. Meridian does the same in <code>equations.py::calculate_beta_x</code>.</p>
+        <pre class="formula">incremental = ROI × Σ spend
+R[g]        = dv_scale[g] · Σ_t Hill(Adstock(x̃))[g,t] · revenue_per_unit
+μ           = log(incremental) − log( Σ_g exp(τ·z[g]) · R[g] )
+β[g]        = exp( μ + τ·z[g] )</pre>
+      </div>
+      <div class="sub">
+        <h3>Before the first ROI run</h3>
+        <ul class="plain">
+          <li><strong>KPI in money, or ROI in units.</strong> A volume KPI needs <code>revenue_per_unit</code>, either a number or a price column. Without it the run stops rather than using a default that means nothing.</li>
+          <li><strong>National spend is allocated, not repeated.</strong> The same national budget copied into five accounts makes every ROI five times too low. The spend gate treats this as an ERROR.</li>
+          <li><strong>A sanity band.</strong> Posterior ROI outside 0.5–20 is flagged, following Meridian's <code>ImplausibleROIConfig</code>.</li>
+        </ul>
+      </div>
+      <div class="sub">
+        <h3>ROI prior ladder, weakest to strongest</h3>
+        <ol class="steps from-zero">
+          <li><span>Nothing known: Meridian's default</span></li>
+          <li><span>A target marketing share: one common ROI, ±50%</span></li>
+          <li><span>A vendor or category ROI: ±30%</span></li>
+          <li><span>Your own experiment: ±10–20%</span></li>
+          <li><span>An imposed benchmark: ±2%, labelled as an assumption</span></li>
+        </ol>
+      </div>
+    </article>
+  </section>
+
+  <section class="band" aria-labelledby="roles-h">
+    <div class="band-head">
+      <h2 id="roles-h">Feature roles for our data</h2>
+      <p class="band-note">The 65 columns of <code>feature_priors_v7.csv</code>, grouped into families. These are starting assumptions to confirm. Each window comes from the rule above, applied to the slowest decay the family is allowed.</p>
+    </div>
+    <div class="panel">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Family</th><th>Columns</th><th>Transform</th><th>Lag window</th><th>Decay cap</th><th>Prior</th><th>Reported in</th></tr></thead>
+        <tbody>
+          <tr><td><strong>TV</strong></td><td><span class="num">9</span> · <code>media_tv_*_grps</code></td><td>geometric adstock + Hill</td><td class="num">0–13 wk</td><td class="num">α ≤ 0.807</td><td><span class="tag t-media">ROI</span></td><td><span class="tag t-media">TV</span></td></tr>
+          <tr><td><strong>Digital, e-commerce, influencers</strong></td><td><span class="num">15</span> · impressions, clicks</td><td>geometric adstock + Hill</td><td class="num">0–8 wk</td><td class="num">α ≤ 0.717</td><td><span class="tag t-media">ROI</span></td><td><span class="tag t-media">Online Media</span></td></tr>
+          <tr><td><strong>OOH</strong></td><td><span class="num">2</span> · invest 2024, 2025</td><td>delayed adstock (θ 0–2) + Hill</td><td class="num">0–8 wk</td><td class="num">α ≤ 0.717</td><td><span class="tag t-media">ROI</span> column is spend</td><td><span class="tag t-media">Online Media</span></td></tr>
+          <tr><td><strong>Competitor TV</strong></td><td><span class="num">1</span> · <code>media_competitor-tv_*</code></td><td>geometric adstock, no Hill, sign −</td><td class="num">0–13 wk</td><td class="num">α ≤ 0.807</td><td>coefficient</td><td><span class="tag t-base">Baseline</span></td></tr>
+          <tr><td><strong>BTL invest</strong></td><td><span class="num">6</span> · promotions, shopper</td><td>geometric adstock, no Hill</td><td class="num">0–4 wk</td><td class="num">α ≤ 0.549</td><td>coefficient</td><td><span class="tag t-media">Trade</span></td></tr>
+          <tr><td><strong>TPR</strong></td><td><span class="num">3</span> · <code>trade_tpr_*</code></td><td>linear</td><td class="num">—</td><td class="num">—</td><td>coefficient</td><td><span class="tag t-media">Trade</span></td></tr>
+          <tr><td><strong>Distribution</strong></td><td><span class="num">3</span> · TDP, ACV</td><td>linear, centred</td><td class="num">—</td><td class="num">—</td><td>coefficient</td><td><span class="tag t-base">Baseline</span></td></tr>
+          <tr><td><strong>Base price</strong></td><td><span class="num">3</span> · base price, AVP</td><td>linear, centred, sign −</td><td class="num">—</td><td class="num">—</td><td>coefficient</td><td><span class="tag t-base">Baseline</span></td></tr>
+          <tr><td><strong>Category</strong></td><td><span class="num">2</span> · <code>sales_market_*</code> volume, price</td><td>linear, centred</td><td class="num">—</td><td class="num">—</td><td>coefficient</td><td><span class="tag t-base">Baseline</span></td></tr>
+          <tr><td><strong>Event dummies</strong></td><td><span class="num">21</span> · <code>dummy_*</code></td><td>linear, unscaled</td><td class="num">—</td><td class="num">—</td><td>coefficient, one shared</td><td><span class="tag t-base">Baseline</span></td></tr>
+        </tbody>
+      </table></div>
+      <p class="muted">Every contribution is measured against zero; for price, a "versus its highest level" option is proposed. Transform groups tie decay and EC50 within a family, which cuts transform parameters from 59 to 14. The model already carries 354 parameters against 455 training rows.</p>
+    </div>
+  </section>
+
+  <section class="band" aria-labelledby="road-h">
+    <div class="band-head">
+      <h2 id="road-h">What comes across from codebase 1, in order</h2>
+      <p class="band-note">Codebase 1's infrastructure goes into codebase 2, never the reverse. ROI priors moved forward to P0b because spend is confirmed for paid media.</p>
+    </div>
+    <ol class="track">
+      <li>
+        <p class="phase"><b>P0</b><span>before any real-data run</span></p>
+        <ul>
+          <li>scaling rule: <code>resolve_scaling</code>, centre and scale modes, <code>dv_scale</code></li>
+          <li>prior units and the three pooling modes</li>
+          <li>assumption battery, pre-fit on raw scaled media</li>
+          <li><code>config.yaml</code> and one feature table</li>
+          <li><code>tests_phase2/</code> skeleton</li>
+        </ul>
+        <p class="done-when">Done when the v1 always-on level-variable case passes and the resolved config round-trips.</p>
+      </li>
+      <li class="gate">
+        <p class="phase"><b>P0b</b><span>ROI-ready</span></p>
+        <ul>
+          <li>spend EDA gate</li>
+          <li>ROI prior turned into β in <code>priors.py</code></li>
+          <li>KPI type and <code>revenue_per_unit</code></li>
+          <li>national-spend allocation check</li>
+        </ul>
+        <p class="done-when">Done when a synthetic run recovers a known ROI and the gate stops duplicated spend. The first real-data fit is allowed after this.</p>
+      </li>
+      <li>
+        <p class="phase"><b>P1</b><span>before anyone reads output</span></p>
+        <ul>
+          <li>reconciliation chain, with contribution math adapted</li>
+          <li><code>OutputConfig</code></li>
+          <li>baseline, reference, pillar</li>
+          <li>warning documents, one plotting owner</li>
+          <li>contraction and posterior correlation on transform parameters</li>
+        </ul>
+        <p class="done-when">Done when every reconciliation identity holds on every draw.</p>
+      </li>
+      <li>
+        <p class="phase"><b>P2</b><span>quality of life</span></p>
+        <ul>
+          <li>benchmark sheet on ROI</li>
+          <li>prior charts, cadence presets</li>
+          <li>CV scorecard and model selection</li>
+          <li><code>include_intercept</code>, <code>prob_negligible</code></li>
+        </ul>
+        <p class="done-when">Done when CV chooses <code>min_lag</code> by the one-standard-error rule.</p>
+      </li>
+      <li>
+        <p class="phase"><b>P3</b><span>genuinely new</span></p>
+        <ul>
+          <li>EC50-in-range and bound diagnostics</li>
+          <li>variable ≈ time or account</li>
+          <li>binomial decay, Hill before adstock</li>
+          <li>ROI calibration period, response curves</li>
+        </ul>
+        <p class="done-when">Done when each item ships with its own recovery test.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="grid two" aria-label="Porting details">
+    <article class="panel" aria-labelledby="adapt-h">
+      <h2 id="adapt-h">Adapt, don't copy</h2>
+      <p class="muted">Codebase 1 assumes every column the sampler sees is fixed before sampling. Learned transforms break that in seven places.</p>
+      <ul class="plain">
+        <li><strong>Contribution math.</strong> Σx becomes Σ Hill(Adstock(x)), which changes on every draw. Print it at the posterior median, beside the per-draw totals.</li>
+        <li><strong>Benchmark correction.</strong> It moves onto ROI or contribution share, because there is no longer one coefficient to correct.</li>
+        <li><strong>Collinearity.</strong> Before the fit, check raw scaled media; after the fit, check at the posterior-median transform. Label both.</li>
+        <li><strong>Posterior correlation.</strong> Add decay, EC50 and peak lag against β. A longer carryover with a smaller coefficient draws almost the same line.</li>
+        <li><strong>Contraction.</strong> Add the transform parameters and log-ROI.</li>
+        <li><strong>Media reference.</strong> Media is always measured against zero activity.</li>
+        <li><strong>The exception.</strong> Carryover-only features keep codebase 1's prior arithmetic, because normalised adstock preserves volume. Only saturation breaks it.</li>
+      </ul>
+    </article>
+
+    <article class="panel" aria-labelledby="origin-h">
+      <h2 id="origin-h">Where the code comes from</h2>
+      <div class="origin">
+        <div><h3>Kept from codebase 2</h3><p class="chips"><span class="tag t-infra">transforms.py</span><span class="tag t-infra">transform_report.py</span><span class="tag t-infra">eda.py</span><span class="tag t-infra">synthetic_example.py</span></p></div>
+        <div><h3>Ported from codebase 1</h3><p class="chips"><span class="tag t-infra">settings.py</span><span class="tag t-infra">config.yaml</span><span class="tag t-infra">assumptions.py</span><span class="tag t-infra">diagnostics.py</span><span class="tag t-infra">reconciliation.py</span><span class="tag t-infra">benchmark.py</span><span class="tag t-infra">warnings_report.py</span><span class="tag t-infra">plotting.py</span><span class="tag t-infra">prior_plots.py</span></p></div>
+        <div><h3>Merged from both</h3><p class="chips"><span class="tag t-infra">data_prep.py</span><span class="tag t-infra">model.py</span><span class="tag t-infra">outputs.py</span><span class="tag t-infra">cross_validation.py</span></p></div>
+        <div><h3>Identical already</h3><p class="chips"><span class="tag t-infra">fit.py</span><span class="tag t-infra">compat.py</span></p></div>
+        <div><h3>New</h3><p class="chips"><span class="tag t-learned">priors.py</span><span class="tag t-learned">tests_phase2/</span></p></div>
+      </div>
+      <p class="muted"><code>priors.py</code> resolves every bound, converts business units, and turns ROI into β on each draw. <code>data_prep.py</code> takes codebase 1's scaling rule and guards onto codebase 2's region-by-week panel and lag tensor.</p>
+    </article>
+  </section>
+
+  <section class="grid two" aria-label="Outputs and limits">
+    <article class="panel" aria-labelledby="out-h">
+      <h2 id="out-h">What a run writes</h2>
+      <pre class="tree">outputs/&lt;run_name&gt;/
+├── 00_warnings/          ★ categories: transform_bounds, spend_gate, roi_prior
+├── 01_data/              resolved_config.yaml · model_input_matrix
+│                         ★ prior_summary with ROI priors and bounds
+├── 02_eda/               eda_report.md · cost_consistency · ★ spend_gate.csv
+├── 03_convergence/       ★ contraction incl. decay, EC50, peak lag, log-ROI
+├── 04_transforms/        ★ transform_parameters with bound flags
+│                         adstock_ranges · decay and saturation curves
+├── 05_coefficients/      coefficient_report (codebase 1 columns)
+├── 06_fit/               fit_metrics · structural_checks
+│                         ★ posterior_correlation incl. transforms
+├── 07_contributions/     ★ contribution_math on Σ Hill(Adstock)
+│                         ★ roi_report: prior ROI beside posterior ROI
+└── 08_cross_validation/  cv_scorecard · cv_transform_stability</pre>
+      <p class="muted">★ marks something new or changed in Phase 2. Folder numbers differ from codebase 1 because Phase 2 adds the EDA and transform stages.</p>
+    </article>
+
+    <article class="panel" aria-labelledby="limits-h">
+      <h2 id="limits-h">What Phase 2 does not fix</h2>
+      <ul class="plain">
+        <li><strong>The holdout.</strong> Codebase 1's test <code>r2_within_region</code> is about −0.66. That comes from the baseline specification (trend and too-smooth seasonality in Q4), not from the transforms.</li>
+        <li><strong>Missing data.</strong> The 27-feature retailer datacube has no Category or Competition columns, and no code creates them.</li>
+        <li><strong>Coupon columns.</strong> Every value is about 1e-15. That is a broken extract, and the fix belongs with the datacube owner.</li>
+        <li><strong>Spend allocation.</strong> The gate detects repeated national spend. The allocation rule is a finance decision.</li>
+        <li><strong>Sampling cost.</strong> Learned transforms make the posterior harder to explore. Start at <code>target_accept</code> 0.95.</li>
+        <li><strong>Exogeneity.</strong> Spend that follows expected sales cannot be detected from residuals. Experiments, and ROI priors built on them, are the answer.</li>
+      </ul>
+    </article>
+  </section>
+
+  <footer class="foot" aria-labelledby="gloss-h">
+    <h2 id="gloss-h">Meridian, in MMM terms</h2>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Standard MMM term</th><th>Meridian</th><th>Codebase 2</th></tr></thead>
+      <tbody>
+        <tr><td>Adstock decay (retention rate)</td><td><code>alpha_m</code></td><td><code>adstock_alpha</code></td></tr>
+        <tr><td>Peak lag</td><td>not in Meridian</td><td><code>adstock_theta</code></td></tr>
+        <tr><td>Lag window</td><td><code>max_lag</code> (default 8)</td><td><code>min_lag</code>, <code>max_lag</code></td></tr>
+        <tr><td>Half-saturation point, EC50</td><td><code>ec_m</code></td><td><code>hill_ec</code></td></tr>
+        <tr><td>Saturation shape</td><td><code>slope_m</code></td><td><code>hill_slope</code></td></tr>
+        <tr><td>Media coefficient, per account</td><td><code>beta_gm</code></td><td><code>beta_media</code></td></tr>
+        <tr><td>ROI prior</td><td><code>roi_m</code></td><td><code>roi_prior_mean</code>, <code>roi_prior_sd</code></td></tr>
+        <tr><td>Price, promotion, distribution levers</td><td><code>non_media_treatments</code></td><td>linear features, in the baseline or the Trade pillar</td></tr>
+        <tr><td>Account intercept</td><td><code>tau_g</code></td><td><code>alpha_region</code></td></tr>
+        <tr><td>Trend and seasonality</td><td><code>mu_t</code> (knots)</td><td>Fourier terms and trend</td></tr>
+      </tbody>
+    </table></div>
+    <ul class="sources">
+      <li>Full blueprint with every table and figure: <code>updating production code/codebase2_full_mmm/docs/PHASE2_ARCHITECTURE.md</code></li>
+      <li>Decisions of record: <code>updating production code/CLAUDE.md</code></li>
+      <li>Meridian source: <code>model/posterior_sampler.py</code>, <code>model/adstock_hill.py</code>, <code>model/equations.py</code>, <code>model/prior_distribution.py</code>, <code>analysis/review/configs.py</code></li>
+      <li>Delayed adstock: Jin, Wang, Sun, Chan and Koehler (2017), Google</li>
+    </ul>
+  </footer>
+</main>
