@@ -1,15 +1,16 @@
 # Codebase 2 — Phase 2 architecture blueprint
 
 > **Status:** blueprint, 2026-09-14. **No code has changed yet.** `codebase2_full_mmm/` still
-> predates the v1.5 scaling fix. Do not fit it on client data until the **P0 and P0b** items in
-> §4 are done.
+> predates the v1.5 scaling fix. Do not fit it on client data until the **P0** items in §4 are done.
 >
 > **Decisions of record:** `../../CLAUDE.md` (the Phase 2 brief). **Meridian source:**
 > `../../../meridian/meridian/` (read-only). Every Meridian claim below carries a file pointer.
 > **One-page overview:** `PHASE2_ARCHITECTURE.html` in this folder.
+> **Companions:** `VARIABLE_CREATION.md` (building variables from the raw files) and
+> `EDA_CHECKS.md` (what is checked, and how it differs from codebase 1 and Meridian).
 
 Written for the MMM team. Meridian's vocabulary is translated into standard MMM terms
-throughout: decay (adstock), EC50 (half-saturation), coefficients, random effects, ROI priors,
+throughout: decay (adstock), EC50 (half-saturation), coefficients, random effects, contribution priors,
 baseline.
 
 ## Contents
@@ -26,11 +27,11 @@ baseline.
   - 7. Data preparation
   - 8. The transformation chain
   - 9. How min and max are calculated
-  - 10. Priors: ROI by default
+  - 10. Priors: sales-volume basis
   - 11. Identifiability, sampling, data sufficiency
   - 12. Module architecture
   - 13. Configuration design
-  - 14. EDA stage and spend gate
+  - 14. EDA stage
   - 15. Outputs
   - 16. Validation and tests
   - 17. What Phase 2 does not fix
@@ -59,7 +60,7 @@ Codebase 2 has almost none of it.
 - **31 capabilities** are listed in §2.
 - **7 of them cannot be copied as-is**, because learned transforms break an assumption they rest on
   (§3).
-- **Build order:** P0 → P0b → P1 → P2 → P3 (§4).
+- **Build order:** P0 → P1 → P2 → P3 (§4).
 
 ### Answer 2 — how codebase 2 works
 
@@ -79,17 +80,38 @@ Codebase 2 has almost none of it.
     for you;
   - `max_lag` is derived from the slowest decay you allow;
   - `min_lag` is a fixed delay chosen by cross-validation.
-- **Paid-media priors are on ROI**, Meridian's default idiom. They are converted into a
-  coefficient on every draw, because the transformed media changes on every draw (§10).
-- **A spend EDA gate runs before fitting** (§14).
+- **Priors stay on a sales-volume basis**, as in codebase 1. **No ROI.**
+  - For a saturating channel, the prior is written on its contribution volume (for example the
+    vendor's volume ±20%). It is converted into a coefficient on every draw, because the transformed
+    media changes on every draw (§10).
+  - Every other feature keeps codebase 1's coefficient priors.
+- **Variables are built from the raw files** by a new builder (`VARIABLE_CREATION.md`).
+- **The raw data is checked before fitting** (`EDA_CHECKS.md`).
+- **The region is a setting.** It is the retailer accounts in codebase 1's datacube, and the three
+  sub-brands (Effervescent, Liquid, Tabs) in the running example the other Phase 2 documents share.
 
-### What changed from the brief, and why
+### The work, phase by phase
 
-| Change | Reason |
+| Phase | What happens | Where it is designed |
+|---|---|---|
+| 1. Build variables | raw media, trade, expert and consumption rows → model datacube + variable dictionary | `VARIABLE_CREATION.md` |
+| 2. Check raw data | build checks, raw-data checks, design checks | `EDA_CHECKS.md` |
+| 3. Prepare | scaling, lag tensor, parameter bounds and lag windows | §7, §9 |
+| 4. Fit | one joint model; transforms learned in-model | §5, §8, §10 |
+| 5. Diagnose | convergence, contraction, transform flags, residuals | §11, §15 |
+| 6. Cross-validate | expanding-window refits, scorecard, choosing between specifications | §16 |
+| 7. Report | volume decomposition, reconciliation, benchmark | §15 |
+
+### Decisions of record
+
+| Decision | Date |
 |---|---|
-| ROI priors and the spend EDA checks move from **P3 to P0b** | Spend exists for paid media (confirmed 2026-09-14) |
-| Trade and Competitor TV defaults are fixed (table below) | Confirmed 2026-09-14 |
-| The v7 prior file needs `baseline=1` on `sales_market_*`, `dummy_*` and Competitor TV | The baseline definition above (§5) |
+| Spend exists in every source file. It is used for data checks, and as the metric where a channel has nothing else | 2026-09-14 |
+| **No ROI.** Priors and contributions stay on sales volume. This reverses the ROI default of 2026-09-14 | 2026-09-17 |
+| Trade and Competitor TV defaults (table below) | 2026-09-14 |
+| `baseline=1` on `sales_market_*`, `dummy_*` and Competitor TV, to match the baseline definition (§5) | 2026-09-14 |
+| Competitor media is combined into one variable by default | 2026-09-17 |
+| Pending: what a dummy is in our context; the TPR source (probably trade Price Promotions); the expert file's columns | 2026-09-17 |
 
 The Trade and Competitor TV defaults:
 
@@ -146,8 +168,8 @@ flowchart LR
         M2["Learned decay, lag, EC50, slope<br/>model.py"]
         TR2["Transform report<br/>transform_report.py"]
         E2["EDA stage<br/>eda.py"]
-        N2["NEW priors.py<br/>bounds + ROI inversion"]
-        G2["NEW spend gate<br/>inside eda.py"]
+        N2["NEW priors.py<br/>bounds + volume prior inversion"]
+        G2["NEW variable builder<br/>+ raw-data checks"]
     end
     CB1 ==>|ported into, never the reverse| CB2
     classDef keep fill:#DDF1EA,stroke:#1F8A70,color:#16202B
@@ -187,7 +209,7 @@ How to read it:
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Prior units | `config.py::resolve_prior_params`, `lognormal_sigma`, `lognormal_moments`; `prior_sd_basis`, `prior_mean_basis` | writing `0.2` with `relative` really means ±20%; median vs mean is explicit | `prior_beta_sd` on the raw log scale, no conversion | **port, then reuse for ROI priors** (§10) | P0 |
+| Prior units | `config.py::resolve_prior_params`, `lognormal_sigma`, `lognormal_moments`; `prior_sd_basis`, `prior_mean_basis` | writing `0.2` with `relative` really means ±20%; median vs mean is explicit | `prior_beta_sd` on the raw log scale, no conversion | **port, then reuse for contribution-volume priors** (§10) | P0 |
 | Three pooling modes | `FeatureSpec.pooling`; buckets `h*` / `i*` / `g*` in `model.py::_bucket_betas` | per feature: shrink accounts toward a shared mean, estimate each alone, or share one coefficient | hierarchical or global only | port the `independent` buckets | P0 |
 | Region-specific priors | `RegionPrior`, `validate_region_priors` | override one retailer's prior; a misspelt region stops the run | none | port | P1 |
 | Intercept switch | `ModelConfig.include_intercept`, `INTERCEPT_PARAMS` | vendor-style decomposition with no free intercept | always on | port | P2 |
@@ -206,9 +228,9 @@ How to read it:
 | Collinearity on the design matrix | `assumptions.py::design_matrix`, `vif`, `condition_index`, `correlation_pairs`, `write_collinearity` | what the data can separate, including a column that duplicates the intercept (uncentred VIF + Belsley condition number) | VIF on raw data in `eda.py` | **port + adapt** (§3, item 3) | P0 |
 | Threshold config | `config.py::AssumptionConfig` (25 thresholds) | widen or narrow any check from `config.yaml` | constants in code | port | P0 |
 | Residual battery | `assumptions.py::residual_assumptions` | linearity, Durbin-Watson, heteroscedasticity, tails, influence | none | port | P0 |
-| Structural checks | `confounding_pairs`, `exogeneity_cross_correlation`, `posterior_predictive_p`, `negative_baseline_probability` | the three checks adopted from Meridian, plus feature vs residual at leads and lags | none | port; add Meridian's implausible-ROI band 0.5–20 (§10) | P1 |
+| Structural checks | `confounding_pairs`, `exogeneity_cross_correlation`, `posterior_predictive_p`, `negative_baseline_probability` | the three checks adopted from Meridian, plus feature vs residual at leads and lags | none | port | P1 |
 | Posterior trade-offs | `assumptions.py::posterior_correlation` | which coefficient pairs the model cannot separate | none | **port + adapt**: add decay / EC50 / peak lag vs β | P1 |
-| Contraction bookkeeping | `diagnostics.py::prior_posterior_report`, `_use_for_delta`, `_role_of` | exactly one parameter family per feature feeds the delta arithmetic; separate `feature` and `region` columns | basic contraction table | **port + adapt**: add transform parameters and log-ROI | P1 |
+| Contraction bookkeeping | `diagnostics.py::prior_posterior_report`, `_use_for_delta`, `_role_of` | exactly one parameter family per feature feeds the delta arithmetic; separate `feature` and `region` columns | basic contraction table | **port + adapt**: add transform parameters and log contribution volume | P1 |
 
 ### E. Reporting vocabulary
 
@@ -229,7 +251,7 @@ How to read it:
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Warning documents | `warnings_report.py::collect_warnings`, `write_warning_docs` | `00_warnings/00_INDEX.md` plus one document per category, instead of 65 repeated paragraphs | printed | port; add categories for transform bounds, spend gate and ROI | P1 |
+| Warning documents | `warnings_report.py::collect_warnings`, `write_warning_docs` | `00_warnings/00_INDEX.md` plus one document per category, instead of 65 repeated paragraphs | printed | port; add categories for transform bounds, build checks and raw-data checks | P1 |
 | One figure owner | `plotting.py::set_figure_defaults`, `save_fig`, `annotate`, `units_note` | consistent size, dpi and labels; WSFS-safe saving | local `save_fig` copies | port | P1 |
 | Prior / posterior charts | `prior_plots.py::write_prior_posterior_plots`, `implied_likelihood` | the three-curve chart per parameter | none | port | P2 |
 
@@ -270,8 +292,8 @@ break that. The seven places it matters:
 2. **Benchmark prior correction.**
    - Codebase 1 corrects a prior as `prior_mean = contribution ÷ Σx ÷ dv_scale`. For a Hill channel
      Σx is not fixed, so there is no single coefficient to correct.
-   - The correction moves onto **ROI** (or contribution share), which the model converts into a
-     coefficient per draw (§10).
+   - The correction moves onto **contribution volume**. The benchmark's volume becomes the prior
+     target directly, and the model converts it into a coefficient on every draw (§10).
 3. **`design_matrix` for collinearity.**
    - Pre-fit, measure media on **raw scaled media**. This is what the data can separate before any
      transform.
@@ -282,12 +304,12 @@ break that. The seven places it matters:
    - A longer carryover with a smaller coefficient draws almost the same line. This table is where
      that shows.
 5. **Contraction.**
-   - Add `raw_alpha_*`, `raw_ec_*`, `raw_theta_*`, `raw_slope_*` and the log-ROI.
-   - `use_for_delta` rules: ROI on the log scale is the delta family for ROI-prior channels. Transform
+   - Add `raw_alpha_*`, `raw_ec_*`, `raw_theta_*`, `raw_slope_*` and the log contribution volume.
+   - `use_for_delta` rules: the log contribution volume is the delta family for saturating channels. Transform
      parameters are reported but never feed the delta.
 6. **`contribution_reference` for media.**
-   - A media channel is always measured against **zero activity**. That matches Meridian's ROI
-     numerator (`linear_predictor_counterfactual_difference_media` with no calibration period).
+   - A media channel is always measured against **zero activity**. That is the counterfactual Meridian
+     uses for incremental outcome (`linear_predictor_counterfactual_difference_media` with no calibration period).
    - "Versus mean media" would need the transforms re-run at a counterfactual input, and is not
      offered.
 7. **The exception: carryover-only features** (Competitor TV, BTL invest).
@@ -310,7 +332,7 @@ flowchart LR
         SC2 --> AD2["Adstock<br/>decay learned"]
         AD2 --> H2["Hill<br/>EC50, slope learned"]
         H2 --> B2["x beta"] --> D2["x dv_scale"] --> C2["contribution"]
-        N2["Sum of Hill-Adstock changes every draw<br/>prior set on ROI, converted per draw"]
+        N2["Sum of Hill-Adstock changes every draw<br/>prior set on contribution volume,<br/>converted per draw"]
     end
     classDef learned fill:#F8E3B8,stroke:#B7791F,color:#16202B
     class AD2,H2 learned
@@ -320,25 +342,63 @@ flowchart LR
 
 ## 4. Roadmap
 
-The CLAUDE.md port plan, with ROI priors pulled forward now that spend is confirmed.
+This is the CLAUDE.md port plan, updated for two new pieces of work: the variable builder and the raw-data
+checks.
 
-| Phase | Contents | Done when |
-|---|---|---|
-| **P0** before any real-data run | `resolve_scaling` + centring and scaling modes + `dv_scale*` · prior units · `assumptions.py` (pre-fit on raw scaled media) · `settings.py` + `config.yaml` + the one feature table · `tests_phase2/` skeleton | the v1 test case (always-on level variable) passes in `tests_phase2/` and `resolved_config.yaml` round-trips |
-| **P0b** ROI-ready | spend EDA gate (§14) · ROI prior conversion to β in `priors.py` (§10) · `kpi_type` / `revenue_per_unit` · national-spend allocation check | a synthetic run recovers a known ROI; the gate stops a run with duplicated national spend |
-| **P1** before anyone reads output | `reconciliation.py` (with adapted `contribution_math`) · `OutputConfig` · baseline / reference / pillar · `warnings_report.py` · `plotting.py` · contraction and posterior correlation on transform parameters | every identity in `contribution_reconciliation.csv` holds per draw; bound flags appear in `transform_parameters.csv` |
-| **P2** quality of life | `benchmark.py` (ROI route) · `prior_plots.py` · cadence / `PeriodPlan` · CV scorecard + `select_model` · `include_intercept` · `rope_scaled` / `prob_negligible` · `data_support` | CV compares `min_lag` variants with the one-standard-error rule |
-| **P3** genuinely new | EC50-in-range and bound diagnostics as first-class output · variable ≈ time / geo R² · binomial decay · `hill_before_adstock` · ROI calibration period · response curves · spline (knot) baseline | each ships with its own recovery test |
+**P0: before any real-data run**
+- Contents:
+  - variable builder, Option A, plus build checks (`VARIABLE_CREATION.md`);
+  - raw-data and design checks (`EDA_CHECKS.md` stages B–C);
+  - `resolve_scaling`, with the centring and scaling modes and `dv_scale*`;
+  - prior units, plus the contribution-volume prior conversion (§10);
+  - `settings.py`, `config.yaml` and the one feature table;
+  - `tests_phase2/` skeleton.
+- Done when:
+  - the builder reconciles every source to 0;
+  - the v1 always-on level-variable case passes;
+  - a synthetic run recovers a known contribution volume.
+
+**P1: before anyone reads output**
+- Contents:
+  - variable builder, Option B: splits, value groups, hero / halo, periods;
+  - `reconciliation.py`, with `contribution_math` adapted;
+  - `OutputConfig`;
+  - baseline / reference / pillar;
+  - `warnings_report.py` and `plotting.py`;
+  - contraction, posterior correlation and bound flags on transform parameters.
+- Done when:
+  - every identity in `contribution_reconciliation.csv` holds on every draw;
+  - the v7 variables rebuild from recipes.
+
+**P2: quality of life**
+- Contents:
+  - `benchmark.py`, on volume;
+  - `prior_plots.py`;
+  - cadence / `PeriodPlan`;
+  - CV scorecard and `select_model`;
+  - `include_intercept`;
+  - `rope_scaled` / `prob_negligible`;
+  - `data_support`.
+- Done when: CV compares recipe variants and `min_lag` variants using the one-standard-error rule.
+
+**P3: new or pending**
+- Contents:
+  - dummies, once defined;
+  - the expert source, once its columns are known;
+  - binomial decay;
+  - `hill_before_adstock`;
+  - response curves;
+  - a spline (knot) baseline option.
+- Done when: each item ships with its own recovery test.
 
 **Figure D3. Build order.**
 
 ```mermaid
 flowchart LR
-    P0["P0<br/>scaling, prior units,<br/>assumptions, config"] --> P0B["P0b<br/>spend gate,<br/>ROI to beta, KPI type"]
-    P0B --> P1["P1<br/>reconciliation, outputs,<br/>warnings, plotting"]
+    P0["P0<br/>builder A, raw checks,<br/>scaling, volume priors, config"] --> P1["P1<br/>builder B, reconciliation,<br/>outputs, warnings"]
     P1 --> P2["P2<br/>benchmark, cadence,<br/>CV scorecard"]
-    P2 --> P3["P3<br/>transform diagnostics,<br/>calibration, curves"]
-    P0B -.->|first real-data fit allowed here| RUN["Real-data run"]
+    P2 --> P3["P3<br/>dummies, expert,<br/>optional transforms"]
+    P0 -.->|first real-data fit allowed here| RUN["Real-data run"]
     classDef gate fill:#FBE4E1,stroke:#B42318,color:#16202B
     class RUN gate
 ```
@@ -394,7 +454,7 @@ flowchart TB
         COMP["Competitor TV<br/>learned carryover, no saturation, sign minus"]
     end
     subgraph INC["INCREMENTAL - reported by pillar"]
-        MED["Paid media: TV, digital, e-commerce,<br/>influencers, OOH<br/>carryover + saturation, ROI prior"]
+        MED["Paid media: TV, digital, e-commerce,<br/>influencers, OOH<br/>carryover + saturation, volume prior"]
         BTL["BTL invest<br/>learned carryover, no saturation"]
         TPR["TPR<br/>linear"]
     end
@@ -461,11 +521,11 @@ with the rules in §9.2, from the slowest decay each family is allowed.
 
 | Family (v7 columns) | n | Transform | Saturation | Lag window | Decay cap | Scaling | Sign | Pooling | Prior | `baseline` | Pillar |
 |---|---|---|---|---|---|---|---|---|---|---|---|
-| TV `media_tv_*_grps` | 9 | geometric (delayed if the team expects build-up) | Hill | 0–13 wk | α ≤ 0.807 (half-life ≤ 3.2 wk) | median of active weeks | + | hierarchical | **ROI** | 0 | TV |
-| Digital, e-commerce, influencers `*_impressions`, `*_clicks` | 15 | geometric | Hill | 0–8 wk | α ≤ 0.717 (half-life ≤ 2.1 wk) | median of active weeks | + | hierarchical | **ROI** | 0 | Online Media |
-| OOH `media_ooh_*_invest_2024/2025` | 2 | delayed, θ ∈ [0, 2] | Hill | 0–8 wk | α ≤ 0.717 | median of active weeks | + | hierarchical | **ROI** (the column already is spend) | 0 | Online Media |
+| TV `media_tv_*_grps` | 9 | geometric (delayed if the team expects build-up) | Hill | 0–13 wk | α ≤ 0.807 (half-life ≤ 3.2 wk) | median of active weeks | + | hierarchical | **contribution volume** | 0 | TV |
+| Digital, e-commerce, influencers `*_impressions`, `*_clicks` | 15 | geometric | Hill | 0–8 wk | α ≤ 0.717 (half-life ≤ 2.1 wk) | median of active weeks | + | hierarchical | **contribution volume** | 0 | Online Media |
+| OOH `media_ooh_*_invest_2024/2025` | 2 | delayed, θ ∈ [0, 2] | Hill | 0–8 wk | α ≤ 0.717 | median of active weeks | + | hierarchical | **contribution volume** (metric = spend) | 0 | Online Media |
 | Competitor TV `media_competitor-tv_*` | 1 | geometric | none | 0–13 wk | α ≤ 0.807 | median of active weeks | − | hierarchical | coefficient | **1** | Competition |
-| BTL `btl_*_invest_*` | 6 | geometric | none | 0–4 wk | α ≤ 0.549 (half-life ≤ 1.2 wk) | median of active weeks | + | hierarchical | coefficient (ROI optional) | 0 | Trade |
+| BTL `btl_*_invest_*` | 6 | geometric | none | 0–4 wk | α ≤ 0.549 (half-life ≤ 1.2 wk) | median of active weeks | + | hierarchical | coefficient | 0 | Trade |
 | TPR `sales_brand_*_trade_tpr_*` | 3 | none | — | — | — | mean of positives, or centred if always on | + | hierarchical | coefficient | 0 | Trade |
 | Distribution `…_distribution_tdp_*` (ACV) | 3 | none | — | — | — | centre mean, scale sd | + | hierarchical | coefficient | 1 | Baseline |
 | Base price `…_price_base-price_*` (AVP) | 3 | none | — | — | — | centre mean, scale sd | − | hierarchical | coefficient | 1 | Baseline |
@@ -542,7 +602,8 @@ rather than hiding it.
 2. **National spend.**
    - National media repeats in all 5 accounts. Spend must be **allocated** across accounts (by
      sales or delivery share), not repeated.
-   - Otherwise total spend is 5× too high and every ROI is 5× too low. The spend gate checks this (§14).
+   - Otherwise spend totals and cost-per-unit checks are 5× too high. The builder keeps spend at
+     source level and never multiplies it by the number of regions (`VARIABLE_CREATION.md` §6.4).
 
 ---
 
@@ -557,7 +618,7 @@ One channel, step by step. The code for steps 3 and 4 already exists in `transfo
 | 3. Lag window | only lags `min_lag … max_lag` can carry weight | weights outside the window = 0 | fixed |
 | 4. Adstock | weighted average of the recent weeks; weights sum to 1, so the output stays on the step-2 axis | geometric `w_l ∝ α^l`; delayed `w_l ∝ α^((l−θ)²)` | **α, θ** |
 | 5. Saturation | diminishing returns; 0 at no activity, 0.5 at EC50, approaching 1 | `h = a^s / (a^s + ec^s)`; or skipped when `saturation = none` | **ec, s** |
-| 6. Coefficient | account-specific effect at full saturation, in KPI sd units | `β[g] · h` | **β** (from ROI, §10) |
+| 6. Coefficient | account-specific effect at full saturation, in KPI sd units | `β[g] · h` | **β** (from the volume prior, §10) |
 | 7. Contribution | back to sales units | `β[g] · h · dv_scale[g]` | — |
 
 **Figure D7. The chain, with its priors.**
@@ -574,7 +635,7 @@ flowchart LR
     PT["peak lag theta<br/>delayed adstock only"] -.-> ADS
     PE["EC50 ec<br/>TruncatedNormal within bounds"] -.-> SAT
     PS["slope s<br/>fixed 1 or learned"] -.-> SAT
-    PR["ROI prior<br/>converted every draw"] -.-> COEF
+    PR["contribution-volume prior<br/>converted every draw"] -.-> COEF
     classDef learned fill:#F8E3B8,stroke:#B7791F,color:#16202B
     classDef prior fill:#DDF1EA,stroke:#1F8A70,color:#16202B
     class PA,PT,PE,PS learned
@@ -652,7 +713,7 @@ of active weeks in an example channel.
 | α decay, θ peak lag | carryover shape | once per channel or `transform_group` | 104 weeks cannot identify a carryover shape per account |
 | ec EC50, s slope | saturation shape | once per channel or `transform_group` | same; Meridian also shares them across geos |
 | β | effect size at full saturation | per account, hierarchical log-normal | accounts differ in how strongly they respond |
-| ROI | return per unit of spend | per channel (the prior sits here; β follows from it) | this is what a client can give a prior on |
+| Contribution volume | sales volume the channel delivers | per channel (the prior sits here; β follows from it) | the number a vendor decomposition or benchmark supplies |
 
 ### Differences from Meridian's transforms
 
@@ -713,7 +774,7 @@ A parameter whose min equals its max (a `fix_*` pin) is a constant and is not sa
 | θ peak lag | week in which a delayed effect peaks | Uniform(θ_min, θ_max) | [min_lag, min(6, max_lag)]. Codebase 2 uses `theta_max = 6` | `peak_lag_min` / `peak_lag_max` in weeks | none | `fix_theta` |
 | ec EC50 | adstocked activity at which the response is half its maximum | TruncatedNormal(0.8, 0.8) cut to [ec_min, ec_max]. Meridian `ec_m` | [0.1, 10] typical active weeks | `ec_min` / `ec_max`, with `ec_units: scaled` or `raw` (GRPs, impressions) | raw ÷ median active week | `fix_ec` |
 | s slope | curve shape: 1 = concave, above 1 = S-curve | fixed 1.0 (Meridian `slope_m` = Deterministic(1)). If learned: LogNormal(0, 0.35) cut to [slope_min, slope_max] | fixed 1.0; learned 90% range 0.56–1.78 | `learn_slope`, `slope_min` / `slope_max` | none | `fix_slope` |
-| β coefficient | effect at full saturation, per account | follows from the ROI prior (§10) | above 0 by construction (`exp`) | the ROI prior | per draw | — |
+| β coefficient | effect at full saturation, per account | follows from the contribution-volume prior (§10) | above 0 by construction (`exp`) | the volume prior | per draw | — |
 
 **Half-life to decay**
 
@@ -930,7 +991,7 @@ without lead-in media.
   above EC50, per account, at the posterior median.
 - The saturation-curve x-axis runs from 0 to the largest observed value. Meridian's
   `analysis/analyzer.py::_get_hill_curves_dataframe` also runs 0 → max of scaled media.
-- Response curves at 0–2× spend in steps of 0.2 (Meridian `response_curves`).
+- Meridian also draws response curves at 0–2× spend (`response_curves`). Not planned here.
 - The 90% HDI of every learned parameter.
 - The min and max of the fold medians in `08_cross_validation/cv_transform_stability.csv`.
 
@@ -942,103 +1003,84 @@ without lead-in media.
 
 ---
 
-## 10. Priors: ROI by default
+## 10. Priors: sales-volume basis
 
-Each kind of feature uses one of three routes.
+**No ROI.** Priors and contributions stay in sales volume, the KPI's own units, as in codebase 1.
+Spend is used only for data checks, and as the metric where a channel has nothing else.
 
-| Route | Used for | The prior is on | Default | Why |
+Each kind of feature uses one of two routes.
+
+| Route | Used for | The prior is on | Written as | Why |
 |---|---|---|---|---|
-| **ROI** | paid media with spend: TV, digital, e-commerce, influencers, OOH | incremental sales value per unit of spend | Meridian `roi_m` LogNormal(0.2, 0.9): median 1.22, mean 1.83, 90% range 0.28–5.37 (`model/prior_distribution.py`) | the number a client or an experiment can actually supply |
-| **Contribution share** | a paid channel with no usable spend | share of total sales | Meridian `contribution_m` Beta(1, 99) | same conversion, with total sales as the denominator |
-| **Coefficient** | linear features (TDP, price, category, TPR, dummies) and carryover-only features (Competitor TV, BTL) | β itself, in codebase 1 units | codebase 1 conventions, unchanged | their Σx is fixed (linear) or volume-preserving (carryover only, §3 item 7) |
+| **Contribution volume** | saturating channels: TV, digital, e-commerce, influencers, OOH | the channel's total contribution in sales units over the training window (or its share of total volume) | `prior_contribution_volume` (the median) + `prior_contribution_sd` with `prior_sd_basis` (`relative` 0.2 = ±20%) | `Σ Hill(Adstock(x))` changes on every draw, so no fixed coefficient prior means the same thing from one draw to the next |
+| **Coefficient** | linear features (TDP, price, category, TPR, dummies) and carryover-only features (Competitor TV, BTL) | β itself, in codebase 1 units | codebase 1's columns, unchanged | their Σx is fixed (linear) or volume-preserving (carryover only, §3 item 7), so `contribution ÷ Σx ÷ dv_scale` still holds |
 
-### How an ROI prior becomes a coefficient, on every draw
+### How a volume prior becomes a coefficient, on every draw
 
-The question the model answers is: *given this draw's decay, EC50 and slope, what coefficient
-makes the channel's incremental sales equal ROI × spend?*
+The question the model answers is: *given this draw's decay, EC50 and slope, which coefficient makes
+the channel contribute the prior's volume?*
 
-Meridian answers it inside the model: `model/equations.py::calculate_beta_x` (log-normal branch),
-with denominators from `model/media.py::build_media_tensors`. Codebase 2 does the same in
-`priors.py`:
+This is the same algebra Meridian uses to turn an ROI prior into a coefficient
+(`model/equations.py::calculate_beta_x`, log-normal branch), with the target in units instead of
+money. Meridian's own contribution prior (`contribution_m`) does the same with a share of total outcome
+as the target; `model/media.py::build_media_tensors` uses total outcome as the denominator.
 
 ```
-for each paid channel c, on each posterior draw:
-  h[g,t,c]       = Hill( Adstock( x̃[g,t,c] ) )                        this draw's transformed media
-  R[g,c]         = dv_scale[g] · Σ_t h[g,t,c] · revenue_per_unit[g,t]   sales value per unit of β
-  incremental[c] = ROI[c] · Σ_{g,t} spend[g,t,c]                          what the prior says it returned
-  μ[c]           = log(incremental[c]) − log( Σ_g exp(τ[c] · z[g,c]) · R[g,c] )
-  β[g,c]         = exp( μ[c] + τ[c] · z[g,c] )                            account coefficients, pooled
+for each saturating channel c, on each posterior draw:
+  h[g,t,c]   = Hill( Adstock( x̃[g,t,c] ) )                       this draw's transformed media
+  R[g,c]     = dv_scale[g] · Σ_t h[g,t,c]                         sales units per unit of β
+  V[c]       ~ LogNormal(prior volume, prior sd)                   the sampled contribution volume
+  μ[c]       = log(V[c]) − log( Σ_g exp(τ[c] · z[g,c]) · R[g,c] )
+  β[g,c]     = exp( μ[c] + τ[c] · z[g,c] )                        coefficients per region, pooled
 ```
 
 What follows from this:
-- **ROI is the sampled parameter; β is derived from it.** Contraction is read on log-ROI, which
-  makes it the `use_for_delta` family for these channels.
-- **The posterior ROI is reported directly**, with its prior beside it, in
-  `07_contributions/roi_report.csv`.
-- **Two Meridian review checks become usable** (`analysis/review/configs.py`):
-  - ROI outside 0.5–20 is implausible (`ImplausibleROIConfig`);
-  - the posterior ROI should sit within the prior's quantiles (`ROIConsistencyConfig`).
-- **Spend is summed over the training window.** Meridian's `roi_calibration_period`
-  (`model/spec.py`) can restrict a prior to the weeks an experiment covered. That is P3.
 
-### Writing an ROI prior
+- **V, the contribution volume, is the sampled parameter; β follows from it.** Contraction is read
+  on log V, which is the `use_for_delta` family for these channels.
+- **The posterior volume is reported next to its prior**, in
+  `07_contributions/contribution_prior_vs_posterior.csv`.
+- **Codebase 1's workflow survives.**
+  - Codebase 1 turned the vendor's volumes into coefficient priors as `contribution ÷ Σx ÷ dv_scale`.
+  - Codebase 2 takes the vendor's volume directly, with no division outside the model. The division
+    happens inside, on every draw.
+- **The units machinery is unchanged.** V is positive and log-normal, so `config.resolve_prior_params`
+  and `lognormal_moments` apply as they are. `01_data/prior_summary.csv` prints each prior's implied
+  median, mean and 90% range.
 
-ROI is positive and log-normal, so codebase 1's units machinery applies unchanged.
+### The prior ladder, on volume
 
-| Column | Meaning |
-|---|---|
-| `roi_prior_mean` | the median ROI, or the mean with `prior_mean_basis: mean` |
-| `roi_prior_sd` + `prior_sd_basis` | `relative` 0.5 = ±50%; `log` = the log-scale σ directly |
-
-- `config.resolve_prior_params(roi_prior_mean, roi_prior_sd, sign="positive", …)` returns the
-  LogNormal's (μ, σ).
-- `config.lognormal_moments` prints its median, mean and 90% range in `01_data/prior_summary.csv`.
-
-### The KPI must be in money, or ROI must be in units
-
-| `kpi_type` | What ROI means | What you must supply |
-|---|---|---|
-| `revenue` | sales value per unit of spend | nothing extra |
-| `volume` + `revenue_per_unit` | sales value per unit of spend | a price: a number, or a column such as average price per account-week |
-| `volume` alone | units sold per unit of spend | **explicit ROI priors on that scale.** The Meridian default is meaningless here. Meridian itself ignores its default ROI prior in this case and falls back to a total-media contribution prior (`model/context.py::_validate_roi_priors_non_revenue`). Codebase 2 stops with an error instead |
-
-### The ROI prior ladder
-
-METHODOLOGY §2 moved onto ROI. Climb it only as far as you can name the evidence.
+METHODOLOGY §2, unchanged in spirit. Climb only as far as you can name the evidence.
 
 | Level | What you know | Setting |
 |---|---|---|
-| 0 | only that paid media returns something | Meridian default LogNormal(0.2, 0.9) |
-| 1 | a plausible total marketing share | one common ROI for every channel = `target_share × total sales value ÷ total paid spend`, `relative` sd 0.5 |
-| 2 | a vendor or category ROI | its value, `relative` sd 0.3 |
-| 3 | your own experiment (geo test, switchback) | its value, `relative` sd 0.1–0.2, optionally with a calibration period |
-| 4 | an imposed benchmark | its value, `relative` sd 0.02. **An assumption, not a finding** |
+| 0 | only that media contributes something | V = a small share of total volume (e.g. 1%), `relative` sd 1.0 |
+| 1 | a plausible total marketing share | split `target_share × total volume` across channels by spend share, `relative` sd 0.5 |
+| 2 | a vendor or category decomposition | the vendor's volume, `relative` sd 0.3 |
+| 3 | your own experiment | its volume, `relative` sd 0.1–0.2 |
+| 4 | an imposed benchmark | its volume, `relative` sd 0.02. **An assumption, not a finding** |
 
-Transform priors are covered in §9.1. Linear and carryover-only features keep codebase 1's
-coefficient priors, units and pooling unchanged.
+Level 1 uses spend only to split a total across channels, never as a return on spend. Transform priors
+are covered in §9.1.
 
-**Figure D12. The three prior routes.**
+**Figure D12. The two prior routes.**
 
 ```mermaid
 flowchart LR
-    subgraph RROI["Paid media with spend"]
-        RP["ROI prior<br/>LogNormal"] --> INC["incremental sales<br/>ROI x spend"]
+    subgraph RV["Saturating channels"]
+        VP["Contribution-volume prior<br/>LogNormal, relative sd"] --> TGT["sampled volume V"]
         TRD["this draw's decay,<br/>EC50, slope"] --> PER["sales per unit of beta<br/>dv_scale x Sum Hill-Adstock"]
-        INC --> MU["mu = log incremental<br/>minus log pooled sum"]
+        TGT --> MU["mu = log V<br/>minus log pooled sum"]
         PER --> MU
-        MU --> B1["beta per account"]
+        MU --> B1["beta per region"]
     end
-    subgraph RCON["Paid media without spend"]
-        CP["contribution-share prior<br/>Beta"] --> INC2["incremental sales<br/>share x total sales"]
-        INC2 --> B2["beta per account<br/>same conversion"]
-    end
-    subgraph RCOE["Linear and carryover-only features"]
-        KP["coefficient prior<br/>codebase 1 units"] --> B3["beta per account"]
+    subgraph RC["Linear and carryover-only features"]
+        KP["Coefficient prior<br/>codebase 1 units"] --> B2["beta per region"]
     end
     classDef learned fill:#F8E3B8,stroke:#B7791F,color:#16202B
     classDef prior fill:#DDF1EA,stroke:#1F8A70,color:#16202B
     class TRD learned
-    class RP,CP prior
+    class VP,KP prior
 ```
 
 ---
@@ -1103,26 +1145,27 @@ from codebase 2, amber is new.
 
 ```mermaid
 flowchart TB
-    DRV["run_real_data.py<br/>synthetic_example.py"] --> SET["settings.py<br/>config.yaml + feature table"]
+    BV["build_variables.py - NEW<br/>raw files to datacube"] --> DRV["run_real_data.py<br/>synthetic_example.py"]
+    DRV --> SET["settings.py<br/>config.yaml + feature table"]
     SET --> RUN["run_pipeline.run"]
-    RUN --> EDA["eda.py<br/>data checks + spend gate"]
-    EDA -->|gate passed| PREP["data_prep.py<br/>scaling, lag tensor, spend panel"]
+    RUN --> EDA["eda.py<br/>raw data and design checks"]
+    EDA -->|no ERROR| PREP["data_prep.py<br/>scaling, lag tensor"]
     PREP --> PRE["assumptions.py<br/>pre-fit collinearity"]
-    PRE --> PRI["priors.py - NEW<br/>bounds, conversions, ROI to beta"]
+    PRE --> PRI["priors.py - NEW<br/>bounds, volume prior to beta"]
     PRI --> MOD["model.py + transforms.py<br/>one joint PyMC model"]
     MOD --> FIT["fit.py<br/>NumPyro NUTS on GPU"]
     FIT --> DIA["diagnostics.py<br/>R-hat, ESS, contraction"]
     DIA --> TRR["transform_report.py<br/>parameters, bounds, ranges, curves"]
-    TRR --> OUT["outputs.py<br/>coefficients, decomposition, fit, ROI"]
+    TRR --> OUT["outputs.py<br/>coefficients, decomposition, fit"]
     OUT --> REC["reconciliation.py<br/>audit trail"]
     OUT --> POST["assumptions.py<br/>post-fit battery"]
-    OUT --> BEN["benchmark.py<br/>ROI and contribution correction"]
+    OUT --> BEN["benchmark.py<br/>benchmark volume as prior target"]
     RUN -.->|refits per fold| CV["cross_validation.py<br/>scorecard + transform stability"]
     WARN["warnings_report.py, plotting.py,<br/>prior_plots.py - used by every stage"] -.- RUN
     classDef new fill:#F8E3B8,stroke:#B7791F,color:#16202B
     classDef keep fill:#DDF1EA,stroke:#1F8A70,color:#16202B
     classDef port fill:#E8ECF0,stroke:#6B7684,color:#16202B
-    class PRI new
+    class PRI,BV new
     class EDA,MOD,TRR keep
     class SET,PRE,DIA,REC,POST,BEN,WARN,PREP,OUT,CV,RUN port
 ```
@@ -1131,39 +1174,45 @@ flowchart TB
 |---|---|---|
 | `settings.py`, `config.yaml` | port codebase 1, extend | load and validate the YAML and the one feature table; typo guard; `resolved_config.yaml` |
 | `run_pipeline.py` | port codebase 1 structure, keep codebase 2 stages | stage order, warning capture, output folders |
-| `eda.py` | keep codebase 2, extend | pre-fit data checks and the spend gate (§14) |
-| `data_prep.py` | merge | codebase 1 `resolve_scaling` + guards + `PeriodPlan`, onto codebase 2's `(G,T)` panel, lag tensor (with `min_lag` mask) and spend panel |
-| `priors.py` | **new** | resolve bounds (§9.1); unit conversions; ROI / contribution → β in pytensor, with a numpy twin for tests |
+| `build_variables.py` | **new** | raw files → model datacube, variable dictionary, reconciliation, feature-table draft (`VARIABLE_CREATION.md`) |
+| `eda.py` | keep codebase 2, extend | build, raw-data and design checks before fitting (`EDA_CHECKS.md`) |
+| `data_prep.py` | merge | codebase 1 `resolve_scaling` + guards + `PeriodPlan`, onto codebase 2's `(G,T)` panel, lag tensor (with `min_lag` mask) |
+| `priors.py` | **new** | resolve bounds (§9.1); unit conversions; contribution volume → β in pytensor, with a numpy twin for tests |
 | `transforms.py` | keep codebase 2, extend | adstock and Hill in pytensor and numpy; `min_lag` mask; `saturation = none` |
 | `model.py` | merge | codebase 2 transform block + codebase 1 buckets (three pooling modes, region priors, `include_intercept`) |
 | `fit.py`, `compat.py` | shared, identical | NumPyro / JAX sampling with fallbacks; InferenceData shims |
-| `diagnostics.py` | port codebase 1, extend | convergence, contraction with `use_for_delta` for transform and ROI parameters |
+| `diagnostics.py` | port codebase 1, extend | convergence, contraction with `use_for_delta` for transform parameters and log contribution volume |
 | `transform_report.py` | keep codebase 2, extend | parameter table with bound flags (§9.1), `adstock_ranges.csv`, curves, `transform_identifiability.csv` |
-| `outputs.py` | merge | codebase 1 coefficient semantics and baseline / reference logic, plus codebase 2's numpy replay of the transforms for the decomposition; fit metrics; ROI |
+| `outputs.py` | merge | codebase 1 coefficient semantics and baseline / reference logic, plus codebase 2's numpy replay of the transforms for the decomposition; fit metrics |
 | `reconciliation.py` | port codebase 1, adapt | audit trail; `contribution_math` per §3 item 1 |
 | `assumptions.py` | port codebase 1, adapt | pre- and post-fit batteries; design matrix per §3 item 3 |
-| `benchmark.py` | port codebase 1, adapt | paste-your-benchmark sheet; corrections on ROI or contribution share |
+| `benchmark.py` | port codebase 1, adapt | paste-your-benchmark sheet; the benchmark's volume becomes the prior target |
 | `cross_validation.py` | merge | codebase 1 scorecard and `select_model` + codebase 2 transform stability |
 | `warnings_report.py`, `plotting.py`, `prior_plots.py` | port codebase 1 | warning documents, one figure owner, prior / posterior charts |
-| `synthetic_example.py` | keep codebase 2, extend | recovers known decay, EC50 **and ROI** |
+| `synthetic_example.py` | keep codebase 2, extend | recovers known decay, EC50 **and contribution volume** |
 | `tests_phase2/` | **new** | no-PyMC suite (§16) |
 
 ---
 
 ## 13. Configuration design
 
-Two files, like codebase 1: `config.yaml` for run settings, and **one feature table** for every
-modelled column.
+Three inputs:
+
+| File | What it holds | Written by |
+|---|---|---|
+| `variable_spec.xlsx` | how variables are built (`VARIABLE_CREATION.md`) | drafted by the builder, edited by the analyst |
+| `config.yaml` | run settings | the modeller |
+| **one feature table** | one row per modelled column | drafted by the builder (`feature_table_draft.csv`), edited by the modeller |
 
 ### `config.yaml`
 
-The sections below are new or changed. The rest match codebase 1. Values shown are proposed
-defaults; the group bounds are the §6 starting assumptions.
+The sections below are new or changed; the rest match codebase 1. The values shown are proposed
+defaults, and the group bounds are the §6 starting assumptions.
 
 ```yaml
 data:
-  input_path: input_datacube.xlsx
-  feature_table: feature_table_phase2.csv   # one row per modelled column
+  datacube: model_datacube.csv              # written by build_variables.py
+  feature_table: feature_table_phase2.csv
 
 transforms:
   window_cut: 0.05          # largest share of carryover a lag window may cut (§9.2)
@@ -1178,10 +1227,8 @@ transforms:
     competitor_tv: {transform: geometric, saturation: none, max_lag: 13}
 
 priors:
-  media_prior_type: roi     # roi | contribution | coefficient
-  kpi_type: volume          # revenue | volume
-  revenue_per_unit: null    # a number, or...
-  revenue_per_unit_col: null   # ...a column, e.g. average price per account-week
+  media_prior_type: contribution_volume   # contribution_volume | coefficient
+  volume_window: train                    # the weeks a prior volume refers to
 
 run:
   dv_center: mean
@@ -1196,9 +1243,9 @@ sampler:
   target_accept: 0.95
 
 eda:
-  on_error: fail            # an ERROR finding stops a run that uses ROI priors
-  cost_per_unit_ratio: 3.0
-  min_spend_share_pct: 1.0
+  on_error: fail            # an ERROR finding stops the run (EDA_CHECKS.md)
+  cost_per_unit_iqr: 1.5
+  min_active_weeks: 5
   data_param_ratio_warn: 10
 ```
 
@@ -1219,70 +1266,42 @@ eda:
 | Peak lag | `peak_lag_min`, `peak_lag_max`, `fix_theta` |
 | EC50 | `ec_min`, `ec_max`, `ec_units` (scaled / raw), `fix_ec` |
 | Slope | `learn_slope`, `slope_min`, `slope_max`, `fix_slope` |
-| Spend and prior | `spend_col`, `media_prior_type`, `roi_prior_mean`, `roi_prior_sd`, `contribution_prior_mean`, `contribution_prior_sd` |
+| Prior | `media_prior_type`, `prior_contribution_volume`, `prior_contribution_sd` |
+| Lineage | `spend_col` (checks only), `recipe_id` (links back to `variable_dictionary.csv`) |
 
-**Five example rows, turned sideways.** The spend column name and ROI values are illustrative. Each
-is written in full once, then read across the row.
+**Five example rows, turned sideways.** The prior values are illustrative. Each name is written in
+full once; read across the row.
 
 | Field | TV | BTL invest | TPR | Distribution | Dummy |
 |---|---|---|---|---|---|
-| `variable` | `media_tv_all-plac_otv_all-camp_sub-brand-unattr_grps_Liquid` | `btl_shopper_all-btl_sub-brand-unattr_invest_Liquid` | `sales_brand_all-benefit_trade_tpr_Liquid` | `sales_brand_all-benefit_distribution_tdp_Liquid` | `dummy_dec24_liquid` |
+| `variable` | `media_tv_all-plac_otv_all-camp_sub-brand-unattr_grps` | `btl_shopper_all-btl_sub-brand-unattr_invest` | `sales_brand_all-benefit_trade_tpr` | `sales_brand_all-benefit_distribution_tdp` | `dummy_dec24` |
 | `pooling` / `sign_constraint` | hierarchical / positive | hierarchical / positive | hierarchical / positive | hierarchical / positive | global / free |
 | `transform` / `saturation` | geometric / hill | geometric / none | none | none | none |
 | `transform_group` | tv | btl | — | — | — |
 | lag window | 0–13 (from the group) | 0–4 (from the group) | — | — | — |
-| decay cap | half-life 3.2 wk → α ≤ 0.805 | window cap α ≤ 0.549 | — | — | — |
-| EC50 | blank → 0.1–10 scaled | — (no saturation) | — | — | — |
-| `spend_col` | `<TV spend column>` | — | — | — | — |
-| `media_prior_type` | roi | coefficient | coefficient | coefficient | coefficient |
-| prior values | `roi_prior_mean` 1.2, `roi_prior_sd` 0.5 relative | re-derive on the new axis (§7) | re-derive on the new axis | re-derive on the new axis | v7 value (axis unchanged) |
+| decay cap | half-life 3.2 weeks → α ≤ 0.805 | window cap α ≤ 0.549 | — | — | — |
+| EC50 | blank → 0.1–10 typical weeks | — (no saturation) | — | — | — |
+| `media_prior_type` | contribution_volume | coefficient | coefficient | coefficient | coefficient |
+| prior values | the vendor's TV volume, `prior_contribution_sd` 0.2 `relative` | re-derived on the new axis (§7) | re-derived on the new axis | re-derived on the new axis | the v7 value (axis unchanged) |
 | `center_mode` / `scale_mode` | none / median_positive | none / median_positive | none / mean_positive | mean / sd | none / none |
 | `baseline` / `pillar` | 0 / TV | 0 / Trade | 0 / Trade | 1 / Baseline | 1 / Baseline |
 | `contribution_reference` | zero | zero | zero | zero | auto |
 
 ---
 
-## 14. EDA stage and spend gate
+## 14. EDA stage
 
-The EDA stage runs on the raw long table, before any scaling, and writes to `02_eda/`. Findings are
-graded the way Meridian's EDA engine grades them (`model/eda/eda_engine.py`):
+This stage is designed in its own document, **`EDA_CHECKS.md`**. In short:
 
-- **ERROR** stops a run that uses ROI priors (`eda.on_error: fail`).
-- **ATTENTION** continues, and is written to `00_warnings/`.
-- **INFO** is reported only.
-
-| Check | What it catches | Grade | Source |
+| Stage | Runs on | Examples | Stops the run? |
 |---|---|---|---|
-| Panel gaps, irregular dates | missing account-weeks | ERROR if the KPI is missing | codebase 2 `eda.py` |
-| KPI invariability | a KPI with no variation to explain | ERROR | Meridian `check_overall_kpi_invariability` |
-| Spend with no media units, or units with no spend | a broken extract; ROI becomes meaningless | ERROR for channels with an ROI prior | codebase 2 `cost_consistency.csv`; Meridian `check_cost_per_media_unit` |
-| Cost per unit above 3× the channel median, by account or by week | units that are not what the column header says | ATTENTION | same |
-| **National spend repeated across accounts** | identical media **and** identical spend in every account, so total spend is 5× the real budget | ERROR when ROI priors are on | **new** |
-| Spend share below 1% | a channel too small to learn from; its answer will be the prior | ATTENTION | codebase 2 `media_summary.csv` |
-| Dust columns | every non-zero value ~1e-15, as in the coupon extract | ERROR | codebase 1 `min_feature_scale` |
-| Near-constant always-on column | duplicates the intercept unless centred | ATTENTION | codebase 1 `near_constant_sd`; Meridian `check_std` |
-| Rows per parameter | too many parameters for the data (§11) | ATTENTION below 10 | Meridian `check_data_param_ratio` |
-| Variable ≈ time, or ≈ account | a feature that is really a trend or a fixed effect | INFO | Meridian `check_variable_geo_time_collinearity` (P3 here) |
-| Robust outliers, partial final week | extreme values, before they become influential points | ATTENTION | codebase 2 `outliers.csv` |
-| Raw media vs population | media that only measures market size | not run: the panel has no population column | Meridian `check_population_corr_raw_media` |
+| A. Build checks | the variable build | every raw row assigned once; unit guard; period pieces add back | yes, on ERROR |
+| B. Raw data checks | the model datacube, unscaled | KPI variability; spend vs metric; cost-per-unit outliers; dust; can carryover and saturation be learned | yes, on ERROR |
+| C. Design checks | scaled data, before fitting | correlation; VIF (centred and uncentred); condition number; variable ≈ week or region; rows per parameter | yes, on ERROR (exact duplicates only) |
+| D. Model checks | the posterior | convergence, contraction, residual battery, transform bound flags | reported |
 
-**Figure D14. The gate.**
-
-```mermaid
-flowchart LR
-    RAW["Raw long table<br/>KPI, raw media, spend, drivers"] --> CHK["EDA checks<br/>written to 02_eda"]
-    CHK --> SEV{"Worst grade?"}
-    SEV -->|ERROR, ROI priors on| STOP["Run stops<br/>fix the data, not the model"]
-    SEV -->|ATTENTION| WARN["Continue<br/>listed in 00_warnings"]
-    SEV -->|INFO or none| GO["Continue"]
-    WARN --> PREP["Data preparation"]
-    GO --> PREP
-    classDef stop fill:#FBE4E1,stroke:#B42318,color:#16202B
-    class STOP stop
-```
-
-A data problem is fixed in the data. The coupon columns and a duplicated national budget are both
-extract problems. Code must not work around them.
+`EDA_CHECKS.md` §4 takes each Meridian EDA and review check in turn, with a decision (adopt, adapt, not
+adopted) and the reason.
 
 ---
 
@@ -1291,17 +1310,21 @@ extract problems. Code must not work around them.
 **Figure D15. The output tree.** ★ = new or changed in Phase 2.
 
 ```
+build/                    written by build_variables.py, before any model run
+├── model_datacube.csv · variable_dictionary.csv · feature_table_draft.csv
+└── build_reconciliation.csv · build_report.md
+
 outputs/<run_name>/
 ├── 00_warnings/          00_INDEX.md · <category>.md · all_warnings.csv
-│                         ★ new categories: transform_bounds, spend_gate, roi_prior
+│                         ★ new categories: transform_bounds, build_checks, raw_data
 ├── 01_data/              panel_summary · feature_scaling_stats (incl. media medians)
 │                         model_input_matrix · resolved_config.yaml
-│                         ★ prior_summary: ROI priors and resolved transform bounds
+│                         ★ prior_summary: contribution-volume priors and resolved transform bounds
 │                         collinearity_summary / _vif / _pairs: pre-fit, on raw scaled media
-├── 02_eda/               eda_report.md · panel_gaps · media_summary · cost_consistency · outliers
-│                         ★ spend_gate.csv · ★ data_param_ratio.csv
+├── 02_eda/               eda_report.md · ★ build_checks · ★ raw_checks · ★ cost_per_unit
+│                         ★ learnability
 ├── 03_convergence/       sampling_log.json · convergence_report · posterior_summary_full
-│                         ★ prior_posterior_contraction: adds decay, EC50, peak lag, log-ROI
+│                         ★ prior_posterior_contraction: adds decay, EC50, peak lag, log volume
 ├── 04_transforms/        ★ transform_parameters.csv: adds prior_min / prior_max and bound flags
 │                         adstock_ranges.csv · adstock_decay_curves.png · saturation_curves.png
 │                         ★ transform_identifiability.csv: contraction + correlation with β
@@ -1309,17 +1332,17 @@ outputs/<run_name>/
 ├── 06_fit/               fit_metrics (r2_within_region, __aggregate__) · actual_vs_predicted
 │                         assumption_checks · exogeneity_cross_correlation · confounding_pairs
 │                         ★ posterior_correlation: adds transform parameters
-│                         ★ structural_checks: adds the implausible-ROI band · assumptions_report.md
+│                         structural_checks · assumptions_report.md
 ├── 07_contributions/     contribution_totals · contribution_by_pillar · baseline_breakdown.png
 │                         ★ contribution_math: Σ Hill(Adstock) at the posterior median + per-draw totals
 │                         contribution_reconciliation · contribution_summary · contribution_timeseries
-│                         ★ roi_report: prior ROI beside posterior ROI · benchmark_comparison.xlsx
+│                         ★ contribution_prior_vs_posterior · benchmark_comparison.xlsx
 ├── 08_cross_validation/  cv_scorecard · cv_stability_ranking · cv_transform_stability
 └── trace.nc
 ```
 
-**Folder numbers.** Codebase 2 adds two stages (EDA and transforms), so its folder numbers are kept.
-Against codebase 1:
+**Folder numbers.** Codebase 2 adds two stages (EDA and transforms), so it keeps its own folder
+numbers. Against codebase 1:
 
 | Content | Codebase 1 folder | Codebase 2 folder |
 |---|---|---|
@@ -1329,7 +1352,7 @@ Against codebase 1:
 | Contributions | `05_contributions` | `07_contributions` |
 | Cross-validation | `06_cross_validation` | `08_cross_validation` |
 
-`OUTPUTS_GUIDE.md` needs a codebase 2 edition.
+`OUTPUTS_GUIDE.md` will need a codebase 2 edition.
 
 **The decomposition identity**, exact on every draw:
 
@@ -1342,16 +1365,16 @@ media contribution[g,t]  = β[g] · Hill(Adstock(x̃))[g,t] · dv_scale[g]    re
 linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      shift from contribution_reference
 ```
 
-- Medians of the parts add up only approximately. The gap is reported as `__median_gap__`
-  (codebase 1 rule, unchanged).
-- Baseline features appear twice in `contribution_totals.csv`. Filter on `group` before summing.
+- Medians of the parts add up only approximately; the gap is reported as `__median_gap__`. This is
+  codebase 1's rule, unchanged.
+- Baseline features appear twice in `contribution_totals.csv`, so filter on `group` before summing.
 
 ---
 
 ## 16. Validation and tests
 
 **Synthetic recovery** (`synthetic_example.py`, extended).
-- Generate raw media with known decay, peak lag, EC50 and ROI, with bounds set.
+- Generate raw media with known decay, peak lag, EC50 and contribution volume, with bounds set.
 - Check that every 90% HDI covers the true value.
 - It doubles as the parameter-recovery check on Databricks.
 
@@ -1373,11 +1396,11 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 | Half-life converter | 2 weeks → 0.707; 4 weeks → 0.841 |
 | EC50 units | raw ↔ scaled round-trip at the account median |
 | Bound resolution | the five-step order in §9.1; a pin beats bounds; group members must agree |
-| ROI conversion | at a fixed draw, implied incremental sales equal ROI × spend |
+| Volume prior conversion | at a fixed draw, the implied contribution equals the sampled volume V |
 | Volume preservation | Σ Adstock(x) = Σ x − carryover past the last week |
 | Scaling round-trip | forward then inverse returns the raw column (the codebase 1 `test_v6_scaling` idea) |
 | Decomposition identity | parts sum to fitted on every draw, with references applied |
-| Spend gate | duplicated national spend is an ERROR; spend with no units is an ERROR |
+| Build checks | every raw row assigned once; unit guard; period pieces add back (`EDA_CHECKS.md` stage A) |
 | Config round-trip | `config.yaml` → settings → `resolved_config.yaml` → the same settings |
 
 **Cross-validation.**
@@ -1400,10 +1423,10 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 | Holdout has never worked (`r2_within_region` ≈ −0.66 on test in codebase 1) | a specification problem (trend extrapolation, seasonality too smooth for Q4), not a transform problem | the baseline specification, judged by CV rather than the single Q4 holdout |
 | Category and Competition missing from the 27-feature retailer datacube | no code creates missing data; trend and seasonality absorb it and starve media | the data. The sub-brand panel does carry `sales_market_*` and Competitor TV |
 | Coupon columns, every value ~1e-15 | a broken extract | the datacube owner |
-| Duplicated or unallocated national spend | the gate detects it, but cannot choose the allocation | an allocation rule agreed with finance |
+| Duplicated or unallocated national spend | the build checks detect it, but cannot choose the allocation | an allocation rule agreed with finance |
 | Sampling cost | learned transforms make the posterior geometry harder | GPU, transform groups, pins |
-| Benchmark agreement on a tightly pinned prior | circular: the prior came from the benchmark | ROI priors from experiments; read contraction before quoting agreement |
-| Exogeneity: spend follows expected sales | no residual statistic can test it | geo experiments, and ROI priors calibrated on them |
+| Benchmark agreement on a tightly pinned prior | circular: the prior came from the benchmark | priors from experiments; read contraction before quoting agreement |
+| Exogeneity: spend follows expected sales | no residual statistic can test it | geo experiments, and priors calibrated on them |
 
 ---
 
@@ -1419,8 +1442,8 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 | Saturation on / off | `saturation_spec` | `saturation` |
 | Media coefficient | `beta_m`, `beta_gm` | `pop_beta_media`, `beta_media` |
 | Cross-account spread of a coefficient | `eta_m` | `tau_logbeta_media` |
-| ROI prior | `roi_m` | `roi_prior_mean`, `roi_prior_sd` |
-| Contribution prior | `contribution_m` | `contribution_prior_mean`, `contribution_prior_sd` |
+| ROI prior | `roi_m` | not used: the basis is sales volume |
+| Contribution prior | `contribution_m` (share of outcome) | `prior_contribution_volume`, `prior_contribution_sd` |
 | Controls | `controls`, `gamma_gc` | linear features |
 | Price, promotion and distribution levers | `non_media_treatments`, `gamma_gn` | linear features (`baseline=1` or Trade pillar) |
 | Account intercept | `tau_g` | `alpha_region` |
@@ -1439,15 +1462,15 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 - `model/prior_distribution.py`: every default prior.
 - `model/spec.py`: `max_lag`, `hill_before_adstock`, `media_prior_type`, `roi_calibration_period`.
 - `model/transformers.py`: the KPI, media and control scalers.
-- `model/context.py::_validate_roi_priors_non_revenue`.
 - `model/eda/eda_engine.py`: `check_cost_per_media_unit`, `check_data_param_ratio`,
   `check_variable_geo_time_collinearity`, `check_overall_kpi_invariability`, `check_std`.
 - `analysis/analyzer.py::_get_hill_curves_dataframe`, `response_curves`, `adstock_decay`.
-- `analysis/review/configs.py`: `ImplausibleROIConfig` (0.5–20), `ROIConsistencyConfig`.
+- `analysis/review/configs.py`: review thresholds. `EDA_CHECKS.md` §4 lists what is adopted; the ROI checks are not.
 
 ### This project
 
 - `../../CLAUDE.md`: the Phase 2 brief, run history, decisions not to re-litigate.
+- `VARIABLE_CREATION.md`, `EDA_CHECKS.md`: this folder.
 - `../../codebase1_hierarchical_mmm/docs/`:
   - `METHODOLOGY.md`, `TUNING_GUIDE.md`, `OUTPUTS_GUIDE.md`;
   - `MERIDIAN_ASSUMPTIONS.md`, including the §5b EDA gap list.
