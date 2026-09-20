@@ -9,7 +9,7 @@ comment above it — **that file is the short version of this one**. Regenerate 
 any time with:
 
 ```bash
-python settings.py --write config.yaml
+python -m mmm.core.settings --write config.yaml
 ```
 
 Then run:
@@ -29,7 +29,8 @@ python run_real_data.py config.yaml
 **What is NOT here:** the per-feature priors, signs, pooling, scaling and
 reporting reference. Those are one row per feature in the prior CSV named by
 `data.feature_priors`, because a per-feature table belongs in a table. See
-`TUNING_GUIDE.md` §1 for those columns.
+**`FEATURE_PRIOR_GUIDE.md`** for those columns - and for how to
+GENERATE that file from a vendor decomposition or a spend breakdown.
 
 ---
 
@@ -76,7 +77,11 @@ Paths are relative **to the YAML file**, not the working directory.
 | `sheet` | `null` | Excel sheet name. `null` = first sheet. Ignored for csv/parquet |
 | `feature_priors` | `feature_priors.csv` | the feature/prior table — **the list of modelled columns**. Its `variable` values must match the data column names exactly |
 | `date_format` | `null` | explicit strptime format. `null` = infer |
-| `benchmark_mapping` | `null` | **optional.** Maps our features to a benchmark's combined variables. See "Comparing to a benchmark" below |
+| `benchmark_mapping` | `null` | **optional.** Maps our features to a benchmark's combined variables. Sample: `samples/benchmark_mapping_sample.csv` |
+| `vendor_contribution` | `null` | **optional.** The vendor's contribution per feature (and region). Triggers the pre-model prior builder. Sample: `samples/vendor_contribution_sample.csv` |
+| `pillar_spend` | `null` | **optional.** Used when there is NO vendor contribution: `pillar, feature, feature_spend, pillar_share_pct`. Sample: `samples/pillar_spend_sample.csv` |
+| `dv_aggregation` | `mean` | `mean`/`sum`/`median` — how the KPI is aggregated per region when inverting a contribution. Must match how the vendor expressed theirs |
+| `pre_model_dir` | `null` | where the generated prior file and its calculation workbook go. `null` = `pre_model_outputs/` |
 
 ---
 
@@ -119,7 +124,8 @@ This is the lever for "my baseline is eating the decomposition".
 | `dv_scale` | `sd` | `none`/`sd`/`mean`/`mean_positive`/`max` — **the unit your priors live in** |
 | `dv_scale_scope` | `region` | `region` (own scale each) or `global` (one number for all) |
 | `cadence` | `auto` | `auto`/`weekly`/`monthly` — sets every period count downstream |
-| `holdout_periods` | `0` | last N dates held out per region. `null` = cadence preset (13 weekly / 3 monthly) |
+| `holdout_periods` | `0` | last N dates held out per region, **absolute**. `null` = use `holdout_fraction` / the policy |
+| `holdout_fraction` | `null` | holdout as a **fraction of the panel**, so it follows the data. `null` = the policy default (0.125) |
 | `report_draws` | `400` | posterior draws used for the decomposition and plots |
 | `on_convergence_failure` | `warn` | `warn` or `fail` — `fail` refuses to persist an unconverged fit |
 | `zero_threshold_rel` | `0.0` | snap `abs(v) < this × max abs(v)` to 0. **Use `1.0e-6`** for pre-transformed data whose adstock tail leaves dust |
@@ -145,6 +151,94 @@ Two real failures:
   the mean back → every fitted value inflated by the region mean, MAPE ~100%.
   **Never edit one side of the transform.** Set `dv_center: none` and the stored
   centre becomes 0, which keeps the inverse correct.
+
+---
+
+## The modelling period is FLUID
+
+**A year is always 52 weeks or 12 months — that never scales.** Everything else
+is a fraction of however much data you have, so the same config works on two
+years or five.
+
+| Panel | MAT blocks | holdout | CV horizon | CV min train |
+|---|---|---|---|---|
+| 104 weeks (2 yr) | MAT 1–2 | 13 | 13 | 52 |
+| 156 weeks (3 yr) | MAT 1–3 | 20 | 20 | 78 |
+| 208 weeks (4 yr) | MAT 1–4 | **26** | 26 | 104 |
+| 24 months (2 yr) | MAT 1–2 | 3 | 3 | 12 |
+| 48 months (4 yr) | MAT 1–4 | **6** | 6 | 24 |
+
+Every holdout above is **12.5% of the panel** — the historic 13-of-104 turned
+into a rule. MAT blocks are numbered oldest-first, so **MAT 1 is year 1** and
+MAT N the most recent year; a partial year at the front becomes `Pre-MAT`
+rather than making a block an unequal window.
+
+### Overriding it — three levels of precedence
+
+```
+absolute integer   >   *_fraction   >   the policy
+```
+
+```yaml
+run:
+  holdout_periods: 26        # "26 weeks, always" - the business has fixed it
+# or
+run:
+  holdout_periods: null      # let it follow the data...
+  holdout_fraction: 0.10     # ...at 10% rather than the default 12.5%
+
+cv:
+  horizon: 13                # absolute
+  min_train_fraction: 0.6    # fractional
+```
+
+Setting both an absolute and a fraction warns and uses the absolute.
+
+### Changing the policy itself
+
+The defaults live in `config.PeriodPolicy`: `holdout_frac` 0.125,
+`cv_horizon_frac` 0.125, `cv_min_train_frac` 0.5 (never below one year),
+`cv_n_folds` 5. `make_folds` caps the fold count at however many origins
+actually fit, so asking for 5 on a short panel yields fewer rather than
+inventing data.
+
+---
+
+## The PRE-MODEL step — generating a prior file
+
+If the client gave you a **vendor decomposition** or a **pillar/spend
+breakdown**, you do not write 65 prior means by hand.
+
+```yaml
+data:
+  vendor_contribution: vendor_contribution.csv   # case A
+  benchmark_mapping:   benchmark_map.csv         # if they combine variables
+  dv_aggregation:      mean
+# ---- or ----
+data:
+  pillar_spend: pillar_spend.csv                 # case B
+```
+
+It runs automatically at the front of `run_from_yaml`, or standalone:
+
+```bash
+python -m mmm.data.prior_builder config.yaml
+```
+
+and writes to `pre_model_outputs/`:
+
+| File | What it is |
+|---|---|
+| `feature_priors_sample.csv` | the generated prior file — **review it** |
+| `prior_calculation.xlsx` | every intermediate number, the formula, and a sheet explaining the method |
+| `benchmark_contribution.csv` | the vendor's numbers, canonicalised — used later to **pre-fill column E** of the benchmark sheet so nobody pastes by hand |
+
+**It never overwrites `data.feature_priors`.** A generated prior is a proposal,
+not a decision: point at it yourself once you have read it. Give neither input
+and nothing is generated — the run proceeds as usual.
+
+Full method, including how zero support, negative contributions and combined
+vendor variables are handled: `FEATURE_PRIOR_GUIDE.md` §5.
 
 ---
 
@@ -259,10 +353,12 @@ All 25 thresholds are here so you never edit code to change a flag.
 |---|---|---|
 | `enabled` | `false` | **off by default** — every fold is a full refit, so 5 folds ≈ 5× the run |
 | `cadence` | `auto` | the preset every `null` below is filled from |
-| `horizon` | `null` | test periods per fold (13 weekly / 3 monthly) |
+| `horizon` | `null` | test periods per fold, **absolute** |
+| `horizon_fraction` | `null` | ...or as a fraction of the panel |
 | `n_folds` | `null` | (5 weekly / 3 monthly) |
 | `step` | `null` | spacing between origins (default: horizon) |
-| `min_train_periods` | `null` | (52 weekly / 12 monthly) |
+| `min_train_periods` | `null` | shortest training window, **absolute** |
+| `min_train_fraction` | `null` | ...or as a fraction of the panel |
 | `draws` / `tune` | `null` | override sampler settings for CV speed |
 | `make_plots` | `true` | the CV accuracy and stability charts |
 
@@ -344,6 +440,6 @@ Every run writes `01_data/resolved_config.yaml` — the **effective** settings,
 every default filled in, plus the path of the file it came from. That is the
 record of what actually ran; diff two of them to see what changed between runs.
 
-**Related:** `config.yaml` (the same information, one line per key) ·
+**Related:** `config.yaml` (the same information, one line per key) · `FEATURE_PRIOR_GUIDE.md` (the prior CSV) · `PROJECT_STRUCTURE.md` ·
 `TUNING_GUIDE.md` (which lever to reach for) · `METHODOLOGY.md` (the order to
 build in) · `OUTPUTS_GUIDE.md` (every file and column).

@@ -28,11 +28,11 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
-from compat import get_group, has_group
-from config import ModelConfig, OutputConfig, RunConfig
-from data_prep import PreparedData
-from plotting import annotate, figsize, save_fig, units_note
-from reconciliation import (write_actual_vs_predicted,
+from mmm.core.compat import get_group, has_group
+from mmm.core.config import ModelConfig, OutputConfig, RunConfig
+from mmm.data.data_prep import PreparedData
+from mmm.reporting.plotting import annotate, figsize, save_fig, units_note
+from mmm.reporting.reconciliation import (write_actual_vs_predicted,
                             write_contribution_diagnostics)
 
 
@@ -663,7 +663,8 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                         top_n: int = 20, out_cfg: OutputConfig | None = None,
                         coef: pd.DataFrame | None = None,
-                        benchmark_mapping: str | None = None):
+                        benchmark_mapping: str | None = None,
+                        benchmark_contribution: str | None = None):
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
     G = len(pdata.region_names)
@@ -748,8 +749,10 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                      ascending=[True, False]))
     pil.to_csv(os.path.join(outdir, "contribution_by_pillar.csv"), index=False)
 
-    write_contribution_diagnostics(decomp, pdata, outdir, out_cfg, coef,
-                                   benchmark_mapping=benchmark_mapping)
+    write_contribution_diagnostics(
+        decomp, pdata, outdir, out_cfg, coef,
+        benchmark_mapping=benchmark_mapping,
+        benchmark_contribution=benchmark_contribution)
     if not out_cfg.contribution_plots:
         return df
 

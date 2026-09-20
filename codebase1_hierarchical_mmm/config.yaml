@@ -38,8 +38,22 @@ data:
   # OPTIONAL csv/xlsx mapping our features to the benchmark's combined variables
   # (feature,benchmark_group). When the vendor reports one line where we carry several columns,
   # the benchmark sheet sums ours first so one row compares to one row. null = compare feature
-  # by feature
+  # by feature. Sample: samples/benchmark_mapping_sample.csv
   benchmark_mapping: null
+  # OPTIONAL csv/xlsx of the vendor's contribution per feature (and region). When present the
+  # PRE-MODEL step inverts it into a sample feature-prior file and pre-fills the benchmark
+  # sheet. Sample: samples/vendor_contribution_sample.csv
+  vendor_contribution: null
+  # OPTIONAL csv/xlsx used when there is NO vendor contribution: pillar, feature, feature_spend,
+  # pillar_share_pct. The pre-model step splits each pillar's share of sales across its features
+  # by spend. Sample: samples/pillar_spend_sample.csv
+  pillar_spend: null
+  # how the KPI is aggregated per region when inverting a contribution: mean (default) | sum |
+  # median. Must match how the vendor expressed their number
+  dv_aggregation: mean
+  # where the pre-model step writes the sample prior file and its calculation workbook. null =
+  # pre_model_outputs/
+  pre_model_dir: null
 
 
 # --------------------------------------------------------------------------
@@ -90,8 +104,12 @@ run:
   dv_scale_scope: region
   # 'auto'|'weekly'|'monthly' - sets every period count downstream
   cadence: auto
-  # last N dates held out per region for OOS metrics. null = cadence preset
+  # last N dates held out per region for OOS metrics, as an ABSOLUTE count. null = use
+  # holdout_fraction / the cadence policy
   holdout_periods: 0
+  # holdout as a FRACTION of the panel, so it follows the data: 0.125 is 13 weeks on 2 years and
+  # 26 on 4. Ignored when holdout_periods is an integer. null = the policy default (0.125)
+  holdout_fraction: null
   # posterior draws used for the decomposition and plots
   report_draws: 400
   # 'warn' | 'fail' - 'fail' refuses to persist an unconverged fit
@@ -267,14 +285,20 @@ cv:
   enabled: false
   # 'auto'|'weekly'|'monthly' - the preset every null below is filled from
   cadence: auto
-  # test periods per fold (null -> 13 weekly / 3 monthly)
+  # test periods per fold, ABSOLUTE. null -> horizon_fraction, then the policy (12.5% of the
+  # panel: 13 on a 2-year weekly panel, 26 on 4)
   horizon: null
+  # test periods per fold as a fraction of the panel. null = the policy
+  horizon_fraction: null
   # number of expanding-window folds (null -> 5 weekly / 3 monthly)
   n_folds: null
   # periods between fold origins (null -> horizon)
   step: null
-  # shortest training window (null -> 52 weekly / 12 monthly)
+  # shortest training window, ABSOLUTE. null -> min_train_fraction, then the policy (50% of the
+  # panel, never under one year)
   min_train_periods: null
+  # shortest training window as a fraction of the panel
+  min_train_fraction: null
   # override sampler.draws for CV speed (null -> preset)
   draws: null
   # override sampler.tune for CV speed (null -> preset)

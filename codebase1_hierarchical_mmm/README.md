@@ -9,6 +9,8 @@ Covers goals **1** (GPU/vectorised), **2** (hierarchical), **3** (outputs & metr
 Goals 4/4.2 (in-model transforms + EDA) are deliberately out of scope here — that is
 `codebase2_full_mmm`.
 
+**New here?** `docs/PROJECT_STRUCTURE.md` maps every file to its role.
+
 ## Data contract
 
 One long (stacked) DataFrame — same shape as `input_datacube.xlsx`:
@@ -105,13 +107,13 @@ omitted keys fall back to those defaults, and a **misspelled key stops the run**
 place.
 
 ```python
-from settings import run_from_yaml
+from mmm.core.settings import run_from_yaml
 result = run_from_yaml("config.yaml")
 ```
 
 ```bash
-python settings.py config.yaml            # same thing from a shell
-python settings.py --write config.yaml    # regenerate the annotated template
+python run_real_data.py config.yaml              # same thing from a shell
+python -m mmm.core.settings --write config.yaml  # regenerate the template
 ```
 
 A minimal file is just the lines that differ:
@@ -137,9 +139,9 @@ reproduced without the original file.
 ### From Python
 
 ```python
-from config import (ModelConfig, OutputConfig, RunConfig, SamplerConfig,
-                    load_feature_config)
-from run_pipeline import run
+from mmm.core.config import (ModelConfig, OutputConfig, RunConfig,
+                             SamplerConfig, load_feature_config)
+from mmm.run_pipeline import run
 
 result = run(df, ModelConfig(features=load_feature_config("feature_priors.csv"),
                              fourier_order=2, include_trend=True,

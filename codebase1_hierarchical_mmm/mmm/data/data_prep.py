@@ -14,7 +14,7 @@ a (centre, scale) pair and applies `(v - centre) / scale`:
   - dv:            centre=mean, scale=sd, per region        (Meridian: KPI transformer)
   - signed feats:  centre=none, scale=mean_positive         (Meridian: media transformer -
                    no centering, zero stays zero)
-  - signed feats with center=1: centre=mean, scale=sd       (Meridian: non-media
+  - signed feats, center_mode=mean: centre=mean, scale=sd  (Meridian: non-media
                    treatments transformer) - for always-on LEVEL variables such as
                    distribution or price indices. Scale-only would leave them at
                    ~1.0 every week, i.e. collinear with the region intercept.
@@ -41,8 +41,9 @@ from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-from config import (FeatureSpec, ModelConfig, RunConfig, bucket_features,
-                    resolve_period_plan, validate_region_priors)
+from mmm.core.config import (FeatureSpec, ModelConfig, RunConfig, bucket_features,
+                    resolve_count, resolve_period_plan,
+                    validate_region_priors)
 
 
 def resolve_scaling(v_train: np.ndarray, center_mode: str, scale_mode: str,
@@ -203,8 +204,11 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     # spacing, so a 104-week panel gets 13/52 and a 24-month panel gets 3/12
     # without anyone remembering to change three separate numbers.
     plan = resolve_period_plan(run_cfg.cadence, all_dates)
-    holdout = (plan.holdout_periods if run_cfg.holdout_periods is None
-               else int(run_cfg.holdout_periods))
+    # absolute wins, then a fraction of THIS panel, then the policy default
+    holdout = resolve_count(run_cfg.holdout_periods, run_cfg.holdout_fraction,
+                            plan.n_periods, "holdout_periods")
+    if holdout is None:
+        holdout = plan.holdout_periods
     if holdout >= len(all_dates):
         raise ValueError(
             f"holdout_periods={holdout} but the panel has only "
@@ -273,11 +277,11 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                     dust_counts[spec.name] = int(dust.sum())
                     v = v.copy()
                     v[dust] = 0.0
-        if spec.sign != "free" and not spec.center and (v < 0).any():
+        if spec.sign != "free" and spec.center_mode != "mean" and (v < 0).any():
             warnings.warn(f"{spec.name}: sign-constrained features are scaled "
                           "without centering, which assumes non-negative values - "
                           f"found {(v < 0).sum()} negative entries. If this is a "
-                          "level variable (e.g. a price index), set center=1 for it "
+                          "level variable (e.g. a price index), set center_mode=mean "
                           "in the feature config.")
         X_raw[:, j] = v
         for g in range(G):
@@ -386,7 +390,7 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str,
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    from config import OutputConfig
+    from mmm.core.config import OutputConfig
     out_cfg = out_cfg or OutputConfig()
 
     os.makedirs(outdir, exist_ok=True)
@@ -412,7 +416,7 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str,
 
     # the transformed matrix handed to the sampler, plus its column stats -
     # imported here for the same circular-import reason as save_fig below
-    from reconciliation import write_model_input, write_prior_summary
+    from mmm.reporting.reconciliation import write_model_input, write_prior_summary
     write_model_input(pdata, outdir, out_cfg)
 
     # what the written priors mean once converted to the axis the model samples
@@ -424,7 +428,7 @@ def write_data_stage_outputs(pdata: PreparedData, outdir: str,
 
     # plotting.py has no project imports, so this one IS safe at module level -
     # but it is kept local for symmetry with the rest of the lazy plot imports.
-    from plotting import annotate, figsize, save_fig, units_note
+    from mmm.reporting.plotting import annotate, figsize, save_fig, units_note
 
     ncol = min(4, G)
     nrow = int(np.ceil(G / ncol))

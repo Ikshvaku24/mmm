@@ -68,7 +68,7 @@ import pandas as pd
 # narrow it from config.yaml without editing code (e.g. pair_warn: 0 dumps the
 # FULL correlation matrix). The module-level names below are the defaults and
 # are what the functions fall back to when no config is passed.
-from config import AssumptionConfig            # noqa: E402
+from mmm.core.config import AssumptionConfig            # noqa: E402
 
 _DEF = AssumptionConfig()
 VIF_WARN, VIF_BAD = _DEF.vif_warn, _DEF.vif_bad
@@ -316,7 +316,7 @@ def correlation_heatmap(pdata, model_cfg, outdir: str,
         return []
     import matplotlib.pyplot as plt
 
-    from plotting import figsize, save_fig
+    from mmm.reporting.plotting import figsize, save_fig
 
     written = []
     has_i = bool(getattr(model_cfg, "include_intercept", True))

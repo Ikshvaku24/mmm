@@ -27,7 +27,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 
-from plotting import annotate, figsize, save_fig, units_note
+from mmm.reporting.plotting import annotate, figsize, save_fig, units_note
 
 
 def _kde(x: np.ndarray, grid: np.ndarray) -> np.ndarray:

@@ -29,8 +29,8 @@ import numpy as np
 import pymc as pm
 import pytensor.tensor as pt
 
-from config import ModelConfig
-from data_prep import PreparedData
+from mmm.core.config import ModelConfig
+from mmm.data.data_prep import PreparedData
 
 
 def _region_prior_arrays(specs, region_names, log_scale: bool):

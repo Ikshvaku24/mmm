@@ -288,6 +288,29 @@ the priors implied. The run now warns when `prior_sd < 0.05`.
 
 ---
 
+## 🆕 `pre_model_outputs/` — before the model runs at all
+
+Written only when `data.vendor_contribution` or `data.pillar_spend` is set.
+
+| File | Contents |
+|---|---|
+| `feature_priors_sample.csv` | a generated prior file — **a proposal, not a decision**. Review it, then point `data.feature_priors` at it |
+| `prior_calculation.xlsx` | sheet 1 the working (one row per feature × region, every intermediate number and the formula); sheet 2 the resulting means; sheet 3 the method in prose |
+| `benchmark_contribution.csv` | the vendor's numbers in canonical shape, used to pre-fill column E of the benchmark sheet |
+
+**How to read the calculation sheet.** Every row shows
+`contribution / support / dv_agg` with the actual numbers substituted, so a
+prior mean can be checked rather than believed. `usable` and `skipped_because`
+say why any cell was left out — almost always zero support, which means the
+feature never ran in that region and contributes nothing there whatever its
+coefficient. `n_regions_used` is the divisor of the average, and it is **not**
+the region count.
+
+Method, and the handling of negative contributions, disagreeing signs and
+combined vendor variables: `FEATURE_PRIOR_GUIDE.md` §5.
+
+---
+
 ## 🆕 `00_warnings` — what the run objected to
 
 Almost every check in this codebase fires **per feature**. With 65 features,

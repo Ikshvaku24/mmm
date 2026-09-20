@@ -37,7 +37,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-from config import (PERIOD_PRESETS, OutputConfig,
+from mmm.core.config import (PERIODS_PER_YEAR, OutputConfig,
                     lognormal_moments)
 
 BASELINE_CORE = "__baseline_core__"
@@ -55,7 +55,7 @@ def _mat_periods(pdata, out_cfg) -> int | None:
     """
     cad = str(getattr(out_cfg, "cadence", "auto") or "auto").lower()
     if cad in ("weekly", "monthly"):
-        return PERIOD_PRESETS[cad].mat_periods
+        return PERIODS_PER_YEAR[cad]
     plan = getattr(pdata, "plan", None)
     return getattr(plan, "mat_periods", None) if plan is not None else None
 
@@ -69,25 +69,32 @@ def period_labels(dates, mode: str = "mat",
             week-by-week volume and % report; the price is one block per date,
             so contribution_summary.csv grows by a factor of ~n_dates.
     "year"  calendar year
-    "mat"   TWO moving-annual-total blocks anchored on the LAST date, the cut
-            used by the vendor decomposition in snapshots/true_output/:
-              MAT 2  the most recent 52 periods
-              MAT 1  the 52 periods before those
-            On the real panel (104 weeks, 2024-01-07 … 2025-12-28) that is
-            MAT 1 = 2024 and MAT 2 = 2025 exactly.
+    "mat"   ONE moving-annual-total block PER YEAR of data, anchored on the
+            LAST date and numbered oldest-first:
 
-            Panels that are not exactly 104 periods:
-              longer   anything older than the last 104 goes to its own
-                       "Pre-MAT" block rather than being folded into MAT 1,
-                       which would make MAT 1 an unequal window
-              shorter  there is no full year to roll, so the data is split in
-                       half: MAT 1 = older half, MAT 2 = recent half. An odd
-                       period goes to MAT 1, keeping the recent block clean.
+              MAT 1   the earliest whole year
+              MAT 2   the next one
+              ...
+              MAT N   the most recent year
+
+            A year is always 52 weeks or 12 months - that never scales. How
+            MANY blocks you get does: two years give MAT 1 + MAT 2 (the cut the
+            vendor decomposition in snapshots/true_output/ uses), four years
+            give MAT 1..MAT 4.
+
+            Panels that are not a whole number of years:
+              remainder  anything older than the last N whole years goes to its
+                         own "Pre-MAT" block rather than being folded into
+                         MAT 1, which would make MAT 1 an unequal window
+              under a year  there is no full year to roll, so the data is split
+                         in half: MAT 1 = older half, MAT 2 = recent half. An
+                         odd period goes to MAT 1, keeping the recent block
+                         clean.
             `n_periods` in contribution_summary.csv always states the block
             length, so an unequal split is never silent.
 
             The period length is inferred from the observed date spacing, so a
-            monthly panel rolls 12 + 12 rather than 52 + 52.
+            monthly panel rolls 12 at a time rather than 52.
     """
     dts = pd.DatetimeIndex(pd.to_datetime(pd.Series(np.asarray(dates))))
     if mode == "none":
@@ -114,17 +121,22 @@ def period_labels(dates, mode: str = "mat",
                                    .astype("timedelta64[D]").astype(float)))
         per_year = max(1, int(round(365.25 / gap_days))) if gap_days > 0 else n
 
-    if n >= 2 * per_year:
-        mat2 = per_year               # most recent full year
-        mat1 = per_year               # the year before it
-    else:
-        mat2 = n // 2                 # no full year to roll - split in half,
-        mat1 = n - mat2               # the odd period going to the older block
-
     lab = np.empty(n, dtype=object)
-    lab[:] = "Pre-MAT"                # only survives when n > mat1 + mat2
-    lab[n - mat1 - mat2: n - mat2] = "MAT 1"
-    lab[n - mat2:] = "MAT 2"
+    n_blocks = int(n // per_year)
+    if n_blocks >= 1:
+        # as many WHOLE years as fit, numbered oldest-first so MAT 1 is the
+        # first year of the panel. Whatever is left at the front is Pre-MAT.
+        lab[:] = "Pre-MAT"
+        covered = n_blocks * per_year
+        for k in range(n_blocks):
+            lo = n - covered + k * per_year
+            lab[lo: lo + per_year] = f"MAT {k + 1}"
+    else:
+        # under a year: no block to roll, so split in half with the odd period
+        # going to the older block
+        mat2 = n // 2
+        lab[:n - mat2] = "MAT 1"
+        lab[n - mat2:] = "MAT 2"
     return pd.Series(lab, index=uniq).reindex(dts).to_numpy(dtype=object)
 
 
@@ -713,7 +725,8 @@ def write_contribution_math(decomp, pdata, outdir: str,
 def write_contribution_diagnostics(decomp, pdata, outdir: str,
                                    out_cfg: OutputConfig | None = None,
                                    coef: pd.DataFrame | None = None,
-                                   benchmark_mapping: str | None = None) -> dict:
+                                   benchmark_mapping: str | None = None,
+                                   benchmark_contribution: str | None = None) -> dict:
     """Every optional 05_contributions file the OutputConfig asks for."""
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
@@ -744,9 +757,10 @@ def write_contribution_diagnostics(decomp, pdata, outdir: str,
                 "switched off - skipping the benchmark sheet. Set "
                 "output.contribution_math: true to get it.")
         else:
-            from benchmark import write_benchmark_comparison
+            from mmm.reporting.benchmark import write_benchmark_comparison
             written["benchmark_comparison"] = write_benchmark_comparison(
                 decomp, pdata, outdir, math_df=math_df,
                 run_root=os.path.dirname(os.path.abspath(outdir)),
-                mapping_path=benchmark_mapping)
+                mapping_path=benchmark_mapping,
+                contrib_path=benchmark_contribution)
     return written

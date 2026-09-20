@@ -1,0 +1,1150 @@
+<title>Codebase 2 Blueprint</title>
+<meta name="description" content="Phase 2 marketing-mix model, phase by phase: build variables from raw files, check the data, prepare, fit a model that learns carryover and saturation, diagnose, cross-validate, and report in units sold. One worked example throughout.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Semi+Condensed:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+  :root {
+    --ground: #F2F5F7;
+    --surface: #FFFFFF;
+    --surface-2: #F7F9FA;
+    --ink: #16202B;
+    --ink-2: #4B5A69;
+    --rule: #D6DEE5;
+    --rule-strong: #A9B6C2;
+    --baseline: #2F5F98;
+    --baseline-tint: #E2EBF6;
+    --media: #17785F;
+    --media-tint: #DCF0E8;
+    --learned: #8A5A10;
+    --learned-fill: #F5DDAE;
+    --infra: #5E6B78;
+    --infra-tint: #E6EAEE;
+    --alert: #B42318;
+    --alert-tint: #FBE4E1;
+    --font-display: "Barlow Semi Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+    --font-body: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground: #0E141B;
+      --surface: #151D26;
+      --surface-2: #111820;
+      --ink: #E4EBF2;
+      --ink-2: #9DAAB8;
+      --rule: #28333E;
+      --rule-strong: #4A5866;
+      --baseline: #8DB3E3;
+      --baseline-tint: #182739;
+      --media: #5CC9A7;
+      --media-tint: #12302A;
+      --learned: #E7B25A;
+      --learned-fill: #3B2B11;
+      --infra: #9AA6B2;
+      --infra-tint: #1E2831;
+      --alert: #F28B7D;
+      --alert-tint: #3A1B18;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --ground: #0E141B;
+    --surface: #151D26;
+    --surface-2: #111820;
+    --ink: #E4EBF2;
+    --ink-2: #9DAAB8;
+    --rule: #28333E;
+    --rule-strong: #4A5866;
+    --baseline: #8DB3E3;
+    --baseline-tint: #182739;
+    --media: #5CC9A7;
+    --media-tint: #12302A;
+    --learned: #E7B25A;
+    --learned-fill: #3B2B11;
+    --infra: #9AA6B2;
+    --infra-tint: #1E2831;
+    --alert: #F28B7D;
+    --alert-tint: #3A1B18;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--ground);
+    color: var(--ink);
+    font: 400 15px/1.55 var(--font-body);
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--baseline); text-underline-offset: 2px; }
+  a:focus-visible { outline: 2px solid var(--learned); outline-offset: 2px; border-radius: 2px; }
+  .sheet { max-width: 1280px; margin: 0 auto; padding: 28px 24px 64px; display: grid; gap: 30px; }
+  h1, h2, h3 { font-family: var(--font-display); color: var(--ink); margin: 0; text-wrap: balance; }
+  h1 { font-weight: 700; font-size: clamp(34px, 4vw, 46px); line-height: 1.02; }
+  h2 { font-weight: 600; font-size: 25px; line-height: 1.12; }
+  h3 { font-weight: 600; font-size: 12px; line-height: 1.2; letter-spacing: 0.11em; text-transform: uppercase; color: var(--ink-2); }
+  p { margin: 0; }
+  code { font-family: var(--font-mono); font-size: 0.86em; overflow-wrap: anywhere; }
+  strong { font-weight: 600; }
+  .eyebrow { font: 600 12px/1.2 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); }
+  .muted { color: var(--ink-2); }
+
+  /* ---- header ---- */
+  .head { display: grid; grid-template-columns: minmax(0, 1fr) minmax(280px, 410px); gap: 24px 36px; align-items: end; padding-bottom: 22px; border-bottom: 2px solid var(--ink); }
+  .head-main { display: grid; gap: 12px; }
+  .lede { font-size: 17px; line-height: 1.5; max-width: 64ch; }
+  .rule-callout { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline; font-size: 14px; max-width: 70ch; }
+  .rule-tag { font: 600 11.5px/1 var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--alert); background: var(--alert-tint); padding: 4px 7px; border-radius: 4px; }
+  .title-block { margin: 0; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1.5px solid var(--ink); border-radius: 2px; background: var(--surface); }
+  .title-block > div { padding: 8px 10px; border-top: 1px solid var(--rule-strong); min-width: 0; }
+  .title-block > div:nth-child(-n+2) { border-top: 0; }
+  .title-block > div:nth-child(even) { border-left: 1px solid var(--rule-strong); }
+  .title-block > div.wide { grid-column: 1 / -1; border-left: 0; }
+  .title-block dt { font: 600 10.5px/1.2 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); }
+  .title-block dd { margin: 3px 0 0; font-size: 13.5px; line-height: 1.35; overflow-wrap: anywhere; }
+
+  .legend { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 13px; color: var(--ink-2); }
+  .legend li { display: flex; align-items: center; gap: 8px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .sw-base { background: var(--baseline); }
+  .sw-media { background: var(--media); }
+  .sw-learned { background: var(--learned); }
+  .sw-infra { background: var(--infra); }
+  .sw-alert { background: var(--alert); }
+
+  /* ---- the running example ---- */
+  .example { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 18px 22px; display: grid; gap: 12px; }
+  .example-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 4px 20px; }
+  .example-grid { margin: 0; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 28px; }
+  .example-grid div { min-width: 0; }
+  .example-grid dt { font: 600 11px/1.2 var(--font-display); letter-spacing: 0.1em; text-transform: uppercase; color: var(--ink-2); }
+  .example-grid dd { margin: 3px 0 0; font-size: 14px; line-height: 1.45; }
+
+  /* ---- phase rail ---- */
+  .rail { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+  .rail li { background: var(--surface); min-width: 0; }
+  .rail a { display: grid; gap: 4px; align-content: start; height: 100%; padding: 12px 12px 14px; color: var(--ink); text-decoration: none; }
+  .rail a:hover { background: var(--surface-2); }
+  .rail .n { font: 700 22px/1 var(--font-display); color: var(--ink-2); }
+  .rail .t { font: 600 15.5px/1.15 var(--font-display); }
+  .rail .s { font-size: 12.5px; line-height: 1.35; color: var(--ink-2); }
+
+  /* ---- phases ---- */
+  .phase { display: grid; grid-template-columns: 66px minmax(0, 1fr); gap: 0 18px; padding-top: 22px; border-top: 2px solid var(--ink); }
+  .phase-num { font: 700 54px/0.9 var(--font-display); color: var(--ink); }
+  .phase-main { display: grid; gap: 18px; min-width: 0; }
+  .phase-head { display: grid; gap: 5px; }
+  .phase-head p { color: var(--ink-2); font-size: 16px; max-width: 72ch; }
+  .phase-grid { display: grid; grid-template-columns: minmax(0, 7fr) minmax(0, 5fr); gap: 22px; align-items: start; }
+  .what { display: grid; gap: 14px; min-width: 0; }
+  .what ul { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 14.5px; max-width: 72ch; }
+  .from { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+  .from .eyebrow { margin-right: 4px; }
+  .ex { background: var(--surface); border: 1px dashed var(--rule-strong); border-radius: 8px; padding: 14px 16px; display: grid; gap: 10px; min-width: 0; font-size: 14px; }
+  .ex-label { font: 600 11.5px/1.2 var(--font-display); letter-spacing: 0.12em; text-transform: uppercase; color: var(--ink-2); }
+  .ex ul { margin: 0; padding-left: 18px; display: grid; gap: 6px; }
+  .doc-link { font-size: 13.5px; color: var(--ink-2); }
+
+  /* ---- figures ---- */
+  .fig { margin: 0; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 16px 12px; }
+  .fig-scroll { overflow-x: auto; }
+  .fig-svg { display: block; width: 100%; height: auto; min-width: 960px; color: var(--ink); }
+  .fig-svg.fits { min-width: 440px; }
+  .fig.narrow { max-width: 680px; }
+  figcaption { margin-top: 10px; font-size: 13px; color: var(--ink-2); max-width: 100ch; }
+
+  /* ---- SVG marks: page CSS, theme tokens ---- */
+  .sv-colhead { font: 600 11.5px var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; fill: var(--ink-2); }
+  .sv-title { font: 600 13px var(--font-display); fill: var(--ink); letter-spacing: 0.01em; }
+  .sv-small { font: 400 11px var(--font-body); fill: var(--ink-2); }
+  .sv-mono, .sv-tick { font: 400 10.5px var(--font-mono); fill: var(--ink-2); }
+  .sv-big { font: 700 30px var(--font-display); fill: var(--ink); }
+  .sv-onbar { font: 500 11px var(--font-mono); fill: var(--surface); }
+  .sv-box-plain, .sv-node { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.2; }
+  .sv-box-media { fill: var(--media-tint); stroke: var(--media); stroke-width: 1.2; }
+  .sv-box-base { fill: var(--baseline-tint); stroke: var(--baseline); stroke-width: 1.2; }
+  .sv-box-learned { fill: var(--learned-fill); stroke: var(--learned); stroke-width: 1.4; }
+  .sv-box-none { fill: none; stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 4 4; }
+  .sv-box-prior { fill: var(--surface-2); stroke: var(--ink-2); stroke-width: 1; stroke-dasharray: 5 3; }
+  .sv-arrow { stroke: var(--ink-2); stroke-width: 1.4; }
+  .sv-arrow-dash { stroke: var(--ink-2); stroke-width: 1.3; stroke-dasharray: 4 3; }
+  .sv-arrowhead { fill: var(--ink-2); }
+  .sv-arrowhead-learned { fill: var(--learned); }
+  .sv-axis { stroke: var(--rule-strong); stroke-width: 1; }
+  .sv-ref { stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+  .sv-bracket { stroke: var(--ink-2); stroke-width: 1.2; }
+  .sv-bar-raw, .sv-bar-train { fill: var(--infra); }
+  .sv-bar-test { fill: var(--media); }
+  .sv-bar-unused { fill: none; stroke: var(--rule-strong); stroke-width: 1; stroke-dasharray: 3 3; }
+  .sv-bar-faint, .sv-zone-off { fill: var(--infra-tint); }
+  .sv-bar-learned { fill: var(--learned); }
+  .sv-bar-learned-soft { fill: var(--learned-fill); stroke: var(--learned); stroke-width: 1; }
+  .sv-bar-cut { fill: none; stroke: var(--learned); stroke-width: 1; stroke-dasharray: 2 2; }
+  .sv-line-media { stroke: var(--media); stroke-width: 2; }
+  .sv-line-media-dash { stroke: var(--media); stroke-width: 1.6; stroke-dasharray: 5 4; }
+  .sv-dot-media { fill: var(--media); }
+  .sv-marker-learned { stroke: var(--learned); stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .sv-learned-text { fill: var(--learned); }
+  .sv-swatch-learned { fill: var(--learned-fill); stroke: var(--learned); stroke-width: 1.2; }
+  .sv-swatch-media { fill: var(--media-tint); stroke: var(--media); stroke-width: 1.2; }
+  .sv-swatch-base { fill: var(--baseline-tint); stroke: var(--baseline); stroke-width: 1.2; }
+
+  /* ---- tables ---- */
+  .table-wrap { overflow-x: auto; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; line-height: 1.4; }
+  th { text-align: left; vertical-align: bottom; padding: 8px 10px 6px; font: 600 11.5px/1.25 var(--font-display); letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink-2); border-bottom: 1px solid var(--rule-strong); }
+  td { padding: 8px 10px; vertical-align: top; border-bottom: 1px solid var(--rule); }
+  tbody tr:last-child td { border-bottom: 0; }
+  .num { font-family: var(--font-mono); font-size: 12.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  td.num, th.num { text-align: right; }
+  .ex table { font-size: 13px; }
+  .ex td, .ex th { padding: 6px 8px; }
+
+  /* ---- tags ---- */
+  .tag { display: inline-block; font: 500 11.5px/1.25 var(--font-mono); padding: 2px 6px; border-radius: 4px; white-space: nowrap; }
+  .t-base { color: var(--baseline); background: var(--baseline-tint); }
+  .t-media { color: var(--media); background: var(--media-tint); }
+  .t-learned { color: var(--learned); background: var(--learned-fill); }
+  .t-infra { color: var(--ink-2); background: var(--infra-tint); }
+  .t-alert { color: var(--alert); background: var(--alert-tint); }
+  .learned { color: var(--learned); font-weight: 600; }
+
+  .formula, .tree { margin: 0; font: 400 12.5px/1.6 var(--font-mono); white-space: pre; overflow-x: auto; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--rule); border-radius: 6px; color: var(--ink); }
+
+  /* ---- closing blocks ---- */
+  .block { display: grid; gap: 16px; padding-top: 22px; border-top: 2px solid var(--ink); }
+  .block-head { display: grid; gap: 5px; }
+  .block-head p { color: var(--ink-2); font-size: 16px; max-width: 76ch; }
+  .panel { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 18px 20px; min-width: 0; }
+  .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
+  .cards.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .card { background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; padding: 16px 18px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+  .card-title { font: 600 17px/1.2 var(--font-display); color: var(--ink); }
+  .card p { font-size: 14px; }
+  .track { list-style: none; margin: 0; padding: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); border-radius: 8px; overflow: hidden; }
+  .track > li { background: var(--surface); padding: 14px 16px 16px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+  .track > li.gate { background: var(--alert-tint); }
+  .phase-tag { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 8px; }
+  .phase-tag b { font: 700 21px/1 var(--font-display); }
+  .phase-tag span { font-size: 12.5px; color: var(--ink-2); }
+  .track ul { margin: 0; padding-left: 16px; font-size: 13px; line-height: 1.45; display: grid; gap: 3px; }
+  .plain { margin: 0; padding-left: 18px; display: grid; gap: 8px; font-size: 14px; }
+  .foot { display: grid; gap: 10px; padding-top: 20px; border-top: 2px solid var(--ink); font-size: 13px; color: var(--ink-2); }
+  .foot ul { margin: 0; padding-left: 18px; display: grid; gap: 4px; }
+
+  @media (max-width: 1000px) {
+    .head, .phase-grid { grid-template-columns: minmax(0, 1fr); }
+    .rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .example-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .cards, .cards.four, .track { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  @media (max-width: 640px) {
+    .phase { grid-template-columns: minmax(0, 1fr); }
+    .phase-num { font-size: 38px; }
+    .rail, .example-grid, .cards, .cards.four, .track { grid-template-columns: minmax(0, 1fr); }
+  }
+  @media print {
+    body { background: #FFFFFF; }
+    .sheet { padding: 0; }
+    .fig, .card, .ex, .panel { break-inside: avoid; }
+  }
+</style>
+
+<main class="sheet">
+  <header class="head">
+    <div class="head-main">
+      <p class="eyebrow">updating production code · Phase 2 · codebase2_full_mmm · planning</p>
+      <h1>Codebase 2 blueprint</h1>
+      <p class="lede">From raw media, trade and sales files to a decomposition in units sold, in seven phases with one worked example. Carryover, lag and saturation are learned inside the model. Codebase 1's scaling, priors, checks and reporting come across unchanged where they still apply.</p>
+      <p class="rule-callout"><span class="rule-tag">The one rule</span> Raw media in. Never pre-adstocked, never pre-saturated.</p>
+    </div>
+    <dl class="title-block">
+      <div><dt>Status</dt><dd>Planning · no code changed</dd></div>
+      <div><dt>Date</dt><dd class="num">2026-09-17</dd></div>
+      <div><dt>Basis</dt><dd>Sales volume · no ROI</dd></div>
+      <div><dt>Example</dt><dd>3 sub-brands × 104 weeks</dd></div>
+      <div><dt>Sampler</dt><dd>PyMC model, NumPyro on GPU</dd></div>
+      <div><dt>Pending</dt><dd>Dummies · TPR source · expert columns</dd></div>
+      <div class="wide"><dt>Detail documents (codebase2_full_mmm/docs/)</dt><dd><code>PHASE2_ARCHITECTURE.md</code> · <code>VARIABLE_CREATION.md</code> · <code>EDA_CHECKS.md</code></dd></div>
+    </dl>
+  </header>
+
+  <ul class="legend" aria-label="Colour key">
+    <li><span class="swatch sw-base"></span>Baseline</li>
+    <li><span class="swatch sw-media"></span>Incremental media and trade</li>
+    <li><span class="swatch sw-learned"></span>Learned in the model (codebase 1 fixed these by hand)</li>
+    <li><span class="swatch sw-infra"></span>Raw input or infrastructure</li>
+    <li><span class="swatch sw-alert"></span>Stops the run</li>
+  </ul>
+
+  <section class="example" aria-labelledby="ex-h">
+    <div class="example-head">
+      <h2 id="ex-h">The example used on this page</h2>
+      <p class="muted">Numbers are illustrative. The same example runs through <code>VARIABLE_CREATION.md</code> and <code>EDA_CHECKS.md</code>.</p>
+    </div>
+    <dl class="example-grid">
+      <div><dt>Regions</dt><dd>Our brand's three sub-brands: <strong>Effervescent, Liquid, Tabs</strong>. Each sub-brand's sales is one series in one joint model.</dd></div>
+      <div><dt>Calendar</dt><dd>104 weeks: 91 to train, 13 held out.</dd></div>
+      <div><dt>KPI</dt><dd><code>Units EQ</code> from the consumption file, in units sold, per sub-brand-week.</dd></div>
+      <div><dt>Media</dt><dd>TV GRPs (open and pay TV), video and social impressions, search clicks, OOH spend.</dd></div>
+      <div><dt>Trade</dt><dd>Price Promotions and Shopper spend, monthly, by retailer.</dd></div>
+      <div><dt>Baseline drivers</dt><dd>TDP, base price, category volume and price, competitor TV. Dummies are pending.</dd></div>
+    </dl>
+  </section>
+
+  <nav aria-label="Phases">
+    <ol class="rail">
+      <li><a href="#p1"><span class="n">1</span><span class="t">Build variables</span><span class="s">raw rows → model datacube</span></a></li>
+      <li><a href="#p2"><span class="n">2</span><span class="t">Check raw data</span><span class="s">stop bad data before it reaches the model</span></a></li>
+      <li><a href="#p3"><span class="n">3</span><span class="t">Prepare</span><span class="s">scale, set bounds and lag windows</span></a></li>
+      <li><a href="#p4"><span class="n">4</span><span class="t">Fit</span><span class="s">one joint model learns everything</span></a></li>
+      <li><a href="#p5"><span class="n">5</span><span class="t">Diagnose</span><span class="s">can we trust this fit?</span></a></li>
+      <li><a href="#p6"><span class="n">6</span><span class="t">Cross-validate</span><span class="s">does it hold on unseen weeks?</span></a></li>
+      <li><a href="#p7"><span class="n">7</span><span class="t">Report</span><span class="s">units sold, by driver</span></a></li>
+    </ol>
+  </nav>
+
+  <!-- ============================== PHASE 1 ============================== -->
+  <section class="phase" id="p1" aria-labelledby="p1-h">
+    <div class="phase-num" aria-hidden="true">1</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p1-h">Build variables</h2>
+        <p>The vendor's variables do not exist in any raw file; they were made by filtering, grouping and cutting the media, trade and sales extracts. A builder now does that, fast by default and free when needed.</p>
+      </div>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Profile, automatically:</strong> for each channel, its active weeks, which metrics are non-zero, its spend, and the values of every column that could split it.</li>
+            <li><strong>Option A:</strong> one variable per channel. The analyst only confirms the metric: TV → GRPs, search → clicks, OOH → spend.</li>
+            <li><strong>Option B, recipes:</strong> split a channel by any columns, merge or drop values, add words such as hero or halo, place it on sub-brands, and cut it by period.</li>
+            <li><strong>Consumption:</strong>
+              <ul>
+                <li>our brand's <code>Units EQ</code> becomes the KPI;</li>
+                <li>competitor or category volume, base price and TDP become baseline drivers;</li>
+                <li>base price is Value ÷ Units when there is no price fact;</li>
+                <li>TDP is weighted distribution + numeric distribution.</li>
+              </ul>
+            </li>
+            <li><strong>Competitor media</strong> is combined into one variable.</li>
+            <li><strong>Every raw row lands in exactly one variable</strong>, or is excluded with a reason. A reconciliation file proves it.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">nothing: new step</span></p>
+          <p class="doc-link">Designed in <code>VARIABLE_CREATION.md</code>.</p>
+        </div>
+        <aside class="ex" aria-label="Phase 1 in the example">
+          <p class="ex-label">In the example</p>
+          <p>A TV recipe: split by open / pay TV and by <code>sub_brand</code>, metric <code>grps</code>, region rule <strong>hero / halo</strong>. One week, with 120 GRPs attributed to Effervescent and 80 GRPs of brand-level TV:</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Variable</th><th class="num">Efferv.</th><th class="num">Liquid</th><th class="num">Tabs</th></tr></thead>
+            <tbody>
+              <tr><td><code>…effervescent_hero_grps</code></td><td class="num">120</td><td class="num">0</td><td class="num">0</td></tr>
+              <tr><td><code>…effervescent_halo_grps</code></td><td class="num">0</td><td class="num">120</td><td class="num">120</td></tr>
+              <tr><td><code>…unattr_grps</code> <span class="tag t-infra">shared</span></td><td class="num">80</td><td class="num">80</td><td class="num">80</td></tr>
+            </tbody>
+          </table></div>
+          <p>OOH spend is cut by year into <code>…_invest_2024</code> and <code>…_invest_2025</code>. The two add back to the whole every week, and the builder checks this.</p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 2 ============================== -->
+  <section class="phase" id="p2" aria-labelledby="p2-h">
+    <div class="phase-num" aria-hidden="true">2</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p2-h">Check the raw data</h2>
+        <p>Codebase 1 saw only finished variables, so problems in the raw extracts were invisible. Now we build the variables ourselves and learn the transforms from raw activity, so both can fail in ways they could not before.</p>
+      </div>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>A · Build checks:</strong> every row is counted once; GRPs are never added to impressions; period pieces add back to the whole.</li>
+            <li><strong>B · Raw data checks:</strong> the KPI varies; spend matches the metric; cost-per-unit outliers (Meridian's rule); dust columns; variables with fewer than 5 active weeks.</li>
+            <li><strong>New in Phase 2: can the data teach the transforms?</strong> Carryover needs weeks off air. Saturation needs weeks well above a typical week.</li>
+            <li><strong>C · Design checks, before fitting:</strong> correlation; VIF, centred and uncentred; condition number; variable ≈ week or sub-brand; rows per parameter.</li>
+            <li><strong>Grades:</strong> ERROR stops the run; ATTENTION goes to <code>00_warnings</code>; INFO is only reported.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">min_feature_scale</span><span class="tag t-infra">near_constant_sd</span><span class="tag t-infra">design-matrix collinearity</span><span class="tag t-infra">confounding_pairs</span></p>
+          <p class="doc-link">Designed in <code>EDA_CHECKS.md</code>, including which Meridian checks are adopted and why.</p>
+        </div>
+        <aside class="ex" aria-label="Phase 2 in the example">
+          <p class="ex-label">In the example</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Finding</th><th>Grade</th></tr></thead>
+            <tbody>
+              <tr><td>Combined competitor media mixes TV GRPs with digital impressions</td><td><span class="tag t-alert">ERROR</span></td></tr>
+              <tr><td>Trade retailer "Fixed Expenses" has no group</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
+              <tr><td>TV never goes off air in 2025, so decay is learned mostly from 2024</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
+              <tr><td>1.2 rows per parameter</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
+              <tr><td>Monthly trade spend spread over its weeks by days</td><td><span class="tag t-infra">INFO</span></td></tr>
+            </tbody>
+          </table></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 3 ============================== -->
+  <section class="phase" id="p3" aria-labelledby="p3-h">
+    <div class="phase-num" aria-hidden="true">3</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p3-h">Prepare</h2>
+        <p>Put every column on the axis its prior lives on, and give every learned parameter a range written in business units.</p>
+      </div>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Scale</strong> with codebase 1's rule, using training weeks only:
+              <ul>
+                <li>KPI: per sub-brand, mean and sd;</li>
+                <li>media: ÷ the median active week, so 1.0 = a typical week and zero stays zero;</li>
+                <li>level drivers such as TDP and price: centred.</li>
+              </ul>
+            </li>
+            <li><strong>Lag tensor:</strong> for every week, the scaled media 0 … <code>max_lag</code> weeks earlier.</li>
+            <li><strong>Bounds in business units:</strong>
+              <ul>
+                <li>half-life in weeks → decay;</li>
+                <li>EC50 in GRPs → typical weeks;</li>
+                <li>peak lag in weeks.</li>
+              </ul>
+              A pin (<code>fix_*</code>) makes a parameter a constant.
+            </li>
+            <li><strong>The window caps the decay:</strong> <code>max_lag = ceil(ln 0.05 ÷ ln α_max − 1)</code>. An 8-week window supports decay only up to 0.717.</li>
+            <li><strong><code>min_lag</code></strong> is the fixed delay applied in preprocessing today. It is chosen by cross-validation, because NUTS cannot learn an integer.</li>
+            <li><strong>Priors:</strong> saturating channels get a contribution-volume prior; everything else keeps codebase 1's coefficient priors and ±% units.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">resolve_scaling</span><span class="tag t-infra">prior_sd_basis</span><span class="tag t-infra">pooling modes</span><span class="tag t-infra">config.yaml</span></p>
+        </div>
+        <aside class="ex" aria-label="Phase 3 in the example">
+          <p class="ex-label">In the example</p>
+          <ul>
+            <li>TV for Effervescent: the median active week is 130 GRPs, which becomes 1.0.</li>
+            <li>EC50's default range of 0.1–10 typical weeks = 13–1,300 GRPs. The prior centre is 0.8 = 104 GRPs.</li>
+            <li>TV window 0–13 weeks → decay ≤ 0.807 (half-life ≤ 3.2 weeks).</li>
+            <li>BTL window 0–4 weeks → decay ≤ 0.549.</li>
+          </ul>
+          <div class="table-wrap"><table>
+            <thead><tr><th>max_lag</th><th class="num">3</th><th class="num">4</th><th class="num">6</th><th class="num">8</th><th class="num">13</th></tr></thead>
+            <tbody>
+              <tr><td>largest decay</td><td class="num">0.473</td><td class="num">0.549</td><td class="num">0.652</td><td class="num">0.717</td><td class="num">0.807</td></tr>
+              <tr><td>half-life cap</td><td class="num">0.9 wk</td><td class="num">1.2 wk</td><td class="num">1.6 wk</td><td class="num">2.1 wk</td><td class="num">3.2 wk</td></tr>
+            </tbody>
+          </table></div>
+        </aside>
+      </div>
+      <figure class="fig narrow">
+        <div class="fig-scroll"><svg viewBox="0 0 560 392" class="fig-svg fits" role="img" aria-label="Top: geometric decay 0.8 spreads its carryover over many lags; a window ending at lag 8 cuts 13.4 percent of it and a window ending at lag 13 cuts 4.4 percent. Bottom: a delayed kernel with decay 0.7 peaking at lag 3, zero below min_lag 1 and nothing beyond max_lag 8.">
+<text x="0.0" y="16.0" class="sv-title" text-anchor="start">What a short window cuts</text>
+<text x="0.0" y="32.0" class="sv-small" text-anchor="start">geometric decay α = 0.8, share of total carryover by lag</text>
+<line x1="46.0" y1="136.0" x2="546.0" y2="136.0" class="sv-axis" fill="none"/>
+<rect x="51.9" y="48.4" width="17.6" height="87.6" rx="0" class="sv-bar-learned"/>
+<rect x="81.3" y="65.9" width="17.6" height="70.1" rx="0" class="sv-bar-learned"/>
+<rect x="110.7" y="79.9" width="17.6" height="56.1" rx="0" class="sv-bar-learned"/>
+<rect x="140.1" y="91.1" width="17.6" height="44.9" rx="0" class="sv-bar-learned"/>
+<rect x="169.5" y="100.1" width="17.6" height="35.9" rx="0" class="sv-bar-learned"/>
+<rect x="198.9" y="107.3" width="17.6" height="28.7" rx="0" class="sv-bar-learned"/>
+<rect x="228.4" y="113.0" width="17.6" height="23.0" rx="0" class="sv-bar-learned"/>
+<rect x="257.8" y="117.6" width="17.6" height="18.4" rx="0" class="sv-bar-learned"/>
+<rect x="287.2" y="121.3" width="17.6" height="14.7" rx="0" class="sv-bar-learned"/>
+<rect x="316.6" y="124.2" width="17.6" height="11.8" rx="0" class="sv-bar-learned-soft"/>
+<rect x="346.0" y="126.6" width="17.6" height="9.4" rx="0" class="sv-bar-learned-soft"/>
+<rect x="375.4" y="128.5" width="17.6" height="7.5" rx="0" class="sv-bar-learned-soft"/>
+<rect x="404.8" y="130.0" width="17.6" height="6.0" rx="0" class="sv-bar-learned-soft"/>
+<rect x="434.2" y="131.2" width="17.6" height="4.8" rx="0" class="sv-bar-learned-soft"/>
+<rect x="463.6" y="132.1" width="17.6" height="3.9" rx="0" class="sv-bar-cut"/>
+<rect x="493.1" y="132.9" width="17.6" height="3.1" rx="0" class="sv-bar-cut"/>
+<rect x="522.5" y="133.5" width="17.6" height="2.5" rx="0" class="sv-bar-cut"/>
+<text x="60.7" y="150.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="178.4" y="150.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="296.0" y="150.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="443.1" y="150.0" class="sv-tick" text-anchor="middle">13</text>
+<text x="531.3" y="150.0" class="sv-tick" text-anchor="middle">16</text>
+<text x="40.0" y="150.0" class="sv-tick" text-anchor="end">lag</text>
+<text x="40.0" y="140.0" class="sv-tick" text-anchor="end">0</text>
+<text x="40.0" y="48.0" class="sv-tick" text-anchor="end">0.2</text>
+<text x="46.0" y="168.0" class="sv-small" text-anchor="start">max_lag = 8 · 13.4% of carryover cut</text>
+<line x1="46.0" y1="175.0" x2="310.7" y2="175.0" class="sv-bracket" fill="none"/>
+<line x1="46.0" y1="171.0" x2="46.0" y2="179.0" class="sv-bracket" fill="none"/>
+<line x1="310.7" y1="171.0" x2="310.7" y2="179.0" class="sv-bracket" fill="none"/>
+<text x="46.0" y="194.0" class="sv-small" text-anchor="start">max_lag = 13 · 4.4% cut</text>
+<line x1="46.0" y1="201.0" x2="457.8" y2="201.0" class="sv-bracket" fill="none"/>
+<line x1="46.0" y1="197.0" x2="46.0" y2="205.0" class="sv-bracket" fill="none"/>
+<line x1="457.8" y1="197.0" x2="457.8" y2="205.0" class="sv-bracket" fill="none"/>
+<text x="0.0" y="222.0" class="sv-title" text-anchor="start">One window, three settings</text>
+<text x="0.0" y="238.0" class="sv-small" text-anchor="start">delayed decay α = 0.7: min_lag and max_lag fixed, peak θ learned</text>
+<rect x="46.0" y="262.0" width="50.0" height="84.0" rx="0" class="sv-zone-off"/>
+<rect x="496.0" y="262.0" width="50.0" height="84.0" rx="0" class="sv-zone-off"/>
+<line x1="46.0" y1="346.0" x2="546.0" y2="346.0" class="sv-axis" fill="none"/>
+<rect x="107.0" y="329.1" width="28.0" height="16.9" rx="0" class="sv-bar-learned"/>
+<rect x="157.0" y="296.8" width="28.0" height="49.2" rx="0" class="sv-bar-learned"/>
+<rect x="207.0" y="275.7" width="28.0" height="70.3" rx="0" class="sv-bar-learned"/>
+<rect x="257.0" y="296.8" width="28.0" height="49.2" rx="0" class="sv-bar-learned"/>
+<rect x="307.0" y="329.1" width="28.0" height="16.9" rx="0" class="sv-bar-learned"/>
+<rect x="357.0" y="343.2" width="28.0" height="2.8" rx="0" class="sv-bar-learned"/>
+<rect x="407.0" y="345.8" width="28.0" height="0.2" rx="0" class="sv-bar-learned"/>
+<rect x="457.0" y="346.0" width="28.0" height="0.0" rx="0" class="sv-bar-learned"/>
+<line x1="96.0" y1="258.0" x2="96.0" y2="346.0" class="sv-marker-learned" fill="none"/>
+<line x1="496.0" y1="258.0" x2="496.0" y2="346.0" class="sv-marker-learned" fill="none"/>
+<text x="101.0" y="256.0" class="sv-mono" text-anchor="start">min_lag = 1</text>
+<text x="491.0" y="256.0" class="sv-mono" text-anchor="end">max_lag = 8</text>
+<text x="71.0" y="360.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="121.0" y="360.0" class="sv-tick" text-anchor="middle">1</text>
+<text x="171.0" y="360.0" class="sv-tick" text-anchor="middle">2</text>
+<text x="221.0" y="360.0" class="sv-tick" text-anchor="middle">3</text>
+<text x="271.0" y="360.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="321.0" y="360.0" class="sv-tick" text-anchor="middle">5</text>
+<text x="371.0" y="360.0" class="sv-tick" text-anchor="middle">6</text>
+<text x="421.0" y="360.0" class="sv-tick" text-anchor="middle">7</text>
+<text x="471.0" y="360.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="40.0" y="360.0" class="sv-tick" text-anchor="end">lag</text>
+<path d="M221.0,366.0 l-5,8 h10 z" class="sv-arrowhead-learned"/>
+<text x="221.0" y="388.0" class="sv-small sv-learned-text" text-anchor="middle">θ = 3, the learned peak</text>
+</svg></div>
+        <figcaption>Top: what a short window cuts. With decay 0.8, a window ending at lag 8 cuts 13.4% of the carryover; ending at lag 13 cuts 4.4%. Bottom: <code>min_lag</code> and <code>max_lag</code> are fixed, while the peak θ is learned inside the window.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 4 ============================== -->
+  <section class="phase" id="p4" aria-labelledby="p4-h">
+    <div class="phase-num" aria-hidden="true">4</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p4-h">Fit the model</h2>
+        <p>One model over all sub-brands and weeks. The sampler learns the carryover, the saturation, the coefficients, the baseline and the noise together.</p>
+      </div>
+      <figure class="fig">
+        <div class="fig-scroll"><svg viewBox="0 0 1240 612" class="fig-svg" role="img" aria-label="The model from start to end. Paid media is scaled, passed through a lag window, adstock and Hill saturation with learned decay, peak lag, EC50 and slope, then multiplied by a coefficient per sub-brand set from a contribution-volume prior. Carryover-only features get adstock and a coefficient prior; linear drivers and the calendar baseline get coefficients only. All rows add into fitted sales, which the likelihood compares with the scaled observed sales. NUTS samples every parameter jointly and the posterior draws feed diagnosis, cross-validation and reporting.">
+<defs><marker id="ah-model" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="sv-arrowhead"/></marker></defs>
+<text x="10.0" y="22.0" class="sv-colhead" text-anchor="start">1 · Model datacube</text>
+<text x="236.0" y="22.0" class="sv-colhead" text-anchor="start">2 · Scale</text>
+<text x="452.0" y="22.0" class="sv-colhead" text-anchor="start">3 · Transform</text>
+<text x="718.0" y="22.0" class="sv-colhead" text-anchor="start">4 · Coefficient</text>
+<text x="962.0" y="22.0" class="sv-colhead" text-anchor="start">5 · Add</text>
+<text x="1110.0" y="22.0" class="sv-colhead" text-anchor="start">6 · Compare</text>
+<text x="10.0" y="58.0" class="sv-small" text-anchor="start">Every row reads left to right</text>
+<text x="10.0" y="74.0" class="sv-small" text-anchor="start">and ends in the same sum.</text>
+<rect x="452.0" y="36.0" width="230.0" height="64.0" rx="6" class="sv-box-prior"/>
+<text x="567.0" y="54.0" class="sv-title" text-anchor="middle">Bounds, set in phase 3</text>
+<text x="567.0" y="70.0" class="sv-small" text-anchor="middle">α ≤ α_max(max_lag) · θ in window</text>
+<text x="567.0" y="84.0" class="sv-small" text-anchor="middle">EC50 0.1–10 typical weeks · slope 1</text>
+<rect x="718.0" y="36.0" width="208.0" height="64.0" rx="6" class="sv-box-prior"/>
+<text x="822.0" y="54.0" class="sv-title" text-anchor="middle">Coefficient priors</text>
+<text x="822.0" y="70.0" class="sv-small" text-anchor="middle">β = exp(μ + τ·z) per sub-brand</text>
+<text x="822.0" y="84.0" class="sv-small" text-anchor="middle">volume prior or coefficient prior</text>
+<rect x="10.0" y="124.0" width="190.0" height="66.0" rx="6" class="sv-box-media"/>
+<text x="105.0" y="142.0" class="sv-title" text-anchor="middle">Paid media</text>
+<text x="105.0" y="158.0" class="sv-small" text-anchor="middle">TV · video · social</text>
+<text x="105.0" y="172.0" class="sv-small" text-anchor="middle">search · OOH</text>
+<rect x="236.0" y="124.0" width="180.0" height="66.0" rx="6" class="sv-box-plain"/>
+<text x="326.0" y="142.0" class="sv-title" text-anchor="middle">÷ median active week</text>
+<text x="326.0" y="158.0" class="sv-small" text-anchor="middle">per sub-brand</text>
+<text x="326.0" y="172.0" class="sv-small" text-anchor="middle">zero stays zero</text>
+<rect x="452.0" y="124.0" width="230.0" height="66.0" rx="6" class="sv-box-learned"/>
+<text x="567.0" y="142.0" class="sv-title" text-anchor="middle">Adstock → Hill</text>
+<text x="567.0" y="158.0" class="sv-small" text-anchor="middle">lag window min_lag … max_lag</text>
+<text x="567.0" y="172.0" class="sv-small" text-anchor="middle">decay α, peak θ · EC50, slope</text>
+<rect x="718.0" y="124.0" width="208.0" height="66.0" rx="6" class="sv-box-media"/>
+<text x="822.0" y="142.0" class="sv-title" text-anchor="middle">× β per sub-brand</text>
+<text x="822.0" y="158.0" class="sv-small" text-anchor="middle">prior on contribution volume,</text>
+<text x="822.0" y="172.0" class="sv-small" text-anchor="middle">turned into β every draw</text>
+<rect x="10.0" y="210.0" width="190.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="105.0" y="228.0" class="sv-title" text-anchor="middle">Carryover only</text>
+<text x="105.0" y="244.0" class="sv-small" text-anchor="middle">competitor TV (−) · BTL</text>
+<rect x="236.0" y="210.0" width="180.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="326.0" y="228.0" class="sv-title" text-anchor="middle">÷ median active week</text>
+<text x="326.0" y="244.0" class="sv-small" text-anchor="middle">per sub-brand</text>
+<rect x="452.0" y="210.0" width="230.0" height="58.0" rx="6" class="sv-box-learned"/>
+<text x="567.0" y="228.0" class="sv-title" text-anchor="middle">Adstock</text>
+<text x="567.0" y="244.0" class="sv-small" text-anchor="middle">lag window · decay α</text>
+<rect x="718.0" y="210.0" width="208.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="822.0" y="228.0" class="sv-title" text-anchor="middle">× β per sub-brand</text>
+<text x="822.0" y="244.0" class="sv-small" text-anchor="middle">coefficient prior, sign</text>
+<rect x="10.0" y="288.0" width="190.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="105.0" y="306.0" class="sv-title" text-anchor="middle">Linear drivers</text>
+<text x="105.0" y="322.0" class="sv-small" text-anchor="middle">TDP · base price (−)</text>
+<text x="105.0" y="336.0" class="sv-small" text-anchor="middle">category · TPR · dummies</text>
+<rect x="236.0" y="288.0" width="180.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="326.0" y="306.0" class="sv-title" text-anchor="middle">centre + scale</text>
+<text x="326.0" y="322.0" class="sv-small" text-anchor="middle">dummies as they are</text>
+<rect x="452.0" y="288.0" width="230.0" height="58.0" rx="6" class="sv-box-none"/>
+<text x="567.0" y="306.0" class="sv-title" text-anchor="middle">no transform</text>
+<rect x="718.0" y="288.0" width="208.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="822.0" y="306.0" class="sv-title" text-anchor="middle">× β per sub-brand</text>
+<text x="822.0" y="322.0" class="sv-small" text-anchor="middle">coefficient prior, sign</text>
+<rect x="10.0" y="366.0" width="190.0" height="58.0" rx="6" class="sv-box-base"/>
+<text x="105.0" y="384.0" class="sv-title" text-anchor="middle">Calendar</text>
+<text x="105.0" y="400.0" class="sv-small" text-anchor="middle">week index</text>
+<rect x="236.0" y="366.0" width="180.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="326.0" y="384.0" class="sv-title" text-anchor="middle">trend t: 0 → 1</text>
+<text x="326.0" y="400.0" class="sv-small" text-anchor="middle">Fourier sin / cos</text>
+<rect x="452.0" y="366.0" width="230.0" height="58.0" rx="6" class="sv-box-none"/>
+<text x="567.0" y="384.0" class="sv-title" text-anchor="middle">no transform</text>
+<rect x="718.0" y="366.0" width="208.0" height="58.0" rx="6" class="sv-box-base"/>
+<text x="822.0" y="384.0" class="sv-title" text-anchor="middle">Baseline core</text>
+<text x="822.0" y="400.0" class="sv-small" text-anchor="middle">intercept + trend + season</text>
+<text x="822.0" y="414.0" class="sv-small" text-anchor="middle">pooled over sub-brands</text>
+<rect x="10.0" y="444.0" width="190.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="105.0" y="462.0" class="sv-title" text-anchor="middle">KPI: Units EQ</text>
+<text x="105.0" y="478.0" class="sv-small" text-anchor="middle">per sub-brand-week</text>
+<rect x="236.0" y="444.0" width="180.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="326.0" y="462.0" class="sv-title" text-anchor="middle">(y − mean) ÷ sd</text>
+<text x="326.0" y="478.0" class="sv-small" text-anchor="middle">per sub-brand</text>
+<line x1="203.0" y1="157.0" x2="232.0" y2="157.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="419.0" y1="157.0" x2="448.0" y2="157.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="685.0" y1="157.0" x2="714.0" y2="157.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="929.0" y1="157.0" x2="958.0" y2="157.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="203.0" y1="239.0" x2="232.0" y2="239.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="419.0" y1="239.0" x2="448.0" y2="239.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="685.0" y1="239.0" x2="714.0" y2="239.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="929.0" y1="239.0" x2="958.0" y2="239.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="203.0" y1="317.0" x2="232.0" y2="317.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="419.0" y1="317.0" x2="448.0" y2="317.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="685.0" y1="317.0" x2="714.0" y2="317.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="929.0" y1="317.0" x2="958.0" y2="317.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="203.0" y1="395.0" x2="232.0" y2="395.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="419.0" y1="395.0" x2="448.0" y2="395.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="685.0" y1="395.0" x2="714.0" y2="395.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="929.0" y1="395.0" x2="958.0" y2="395.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<rect x="962.0" y="124.0" width="112.0" height="300.0" rx="6" class="sv-box-plain"/>
+<text x="1018.0" y="262.0" class="sv-big" text-anchor="middle">Σ</text>
+<text x="1018.0" y="286.0" class="sv-small" text-anchor="middle">fitted sales</text>
+<text x="1018.0" y="302.0" class="sv-small" text-anchor="middle">μ per sub-brand</text>
+<text x="1018.0" y="318.0" class="sv-small" text-anchor="middle">and week</text>
+<rect x="1110.0" y="124.0" width="120.0" height="378.0" rx="6" class="sv-box-plain"/>
+<text x="1170.0" y="150.0" class="sv-title" text-anchor="middle">Likelihood</text>
+<text x="1170.0" y="172.0" class="sv-small" text-anchor="middle">scaled sales</text>
+<text x="1170.0" y="188.0" class="sv-small" text-anchor="middle">~ Normal or</text>
+<text x="1170.0" y="204.0" class="sv-small" text-anchor="middle">Student-t</text>
+<text x="1170.0" y="236.0" class="sv-small" text-anchor="middle">mean μ</text>
+<text x="1170.0" y="252.0" class="sv-small" text-anchor="middle">noise σ per</text>
+<text x="1170.0" y="268.0" class="sv-small" text-anchor="middle">sub-brand, pooled</text>
+<line x1="1077.0" y1="274.0" x2="1106.0" y2="274.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<text x="1092.0" y="266.0" class="sv-mono" text-anchor="middle">μ</text>
+<line x1="203.0" y1="473.0" x2="232.0" y2="473.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<line x1="419.0" y1="473.0" x2="1106.0" y2="473.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<text x="760.0" y="465.0" class="sv-mono" text-anchor="middle">observed sales, scaled</text>
+<line x1="567.0" y1="102.0" x2="567.0" y2="121.0" class="sv-arrow-dash" fill="none" marker-end="url(#ah-model)"/>
+<line x1="822.0" y1="102.0" x2="822.0" y2="121.0" class="sv-arrow-dash" fill="none" marker-end="url(#ah-model)"/>
+<line x1="1170.0" y1="505.0" x2="1170.0" y2="536.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<text x="1162.0" y="526.0" class="sv-mono" text-anchor="end">likelihood + priors</text>
+<rect x="1060.0" y="540.0" width="170.0" height="62.0" rx="6" class="sv-box-plain"/>
+<text x="1145.0" y="560.0" class="sv-title" text-anchor="middle">NUTS sampler</text>
+<text x="1145.0" y="577.0" class="sv-small" text-anchor="middle">NumPyro on GPU</text>
+<text x="1145.0" y="591.0" class="sv-small" text-anchor="middle">all parameters jointly</text>
+<rect x="780.0" y="540.0" width="220.0" height="62.0" rx="6" class="sv-box-plain"/>
+<text x="890.0" y="560.0" class="sv-title" text-anchor="middle">Posterior draws</text>
+<text x="890.0" y="577.0" class="sv-small" text-anchor="middle">transforms, coefficients,</text>
+<text x="890.0" y="591.0" class="sv-small" text-anchor="middle">baseline and noise together</text>
+<rect x="500.0" y="540.0" width="220.0" height="62.0" rx="6" class="sv-box-plain"/>
+<text x="610.0" y="560.0" class="sv-title" text-anchor="middle">Phases 5–7</text>
+<text x="610.0" y="577.0" class="sv-small" text-anchor="middle">diagnose · cross-validate</text>
+<text x="610.0" y="591.0" class="sv-small" text-anchor="middle">report in units sold</text>
+<line x1="1057.0" y1="571.0" x2="1004.0" y2="571.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<text x="1030.0" y="563.0" class="sv-mono" text-anchor="middle">samples</text>
+<line x1="777.0" y1="571.0" x2="724.0" y2="571.0" class="sv-arrow" fill="none" marker-end="url(#ah-model)"/>
+<text x="750.0" y="563.0" class="sv-mono" text-anchor="middle">draws</text>
+<rect x="10.0" y="550.0" width="16.0" height="14.0" rx="3" class="sv-swatch-learned"/>
+<text x="34.0" y="561.0" class="sv-small" text-anchor="start">learned in the model</text>
+<rect x="210.0" y="550.0" width="16.0" height="14.0" rx="3" class="sv-swatch-media"/>
+<text x="234.0" y="561.0" class="sv-small" text-anchor="start">media</text>
+<rect x="10.0" y="576.0" width="16.0" height="14.0" rx="3" class="sv-swatch-base"/>
+<text x="34.0" y="587.0" class="sv-small" text-anchor="start">baseline</text>
+<rect x="210.0" y="576.0" width="16.0" height="14.0" rx="3" class="sv-box-none"/>
+<text x="234.0" y="587.0" class="sv-small" text-anchor="start">no transform</text>
+</svg></div>
+        <figcaption>Read each row from left to right; every row ends in the same sum. Saturating media is the only row with both learned transforms. The observed sales enter at step 6 and are compared with the fitted sum. NUTS explores every parameter jointly, and the posterior draws feed phases 5–7.</figcaption>
+      </figure>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Media:</strong> lag window → adstock (decay α, optional peak θ) → Hill saturation (EC50, slope) → × β for each sub-brand.</li>
+            <li><strong>Shared vs per sub-brand:</strong> decay, EC50 and slope are learned once per channel, or once per channel family (a <em>transform group</em>). Only β varies by sub-brand, shrunk toward a shared mean.</li>
+            <li><strong>Saturating channels:</strong> the prior is a contribution volume V. On every draw, the model sets β so the channel contributes exactly V, because the transformed media changes from draw to draw.</li>
+            <li><strong>Everything else:</strong> codebase 1's buckets. Signs are structural (<code>±exp</code>); pooling is hierarchical, independent or global.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">coefficient buckets</span><span class="tag t-infra">per-region priors</span><span class="tag t-infra">fit.py on GPU</span></p>
+        </div>
+        <aside class="ex" aria-label="Phase 4 in the example">
+          <p class="ex-label">In the example: the TV volume prior</p>
+          <pre class="formula">V    ~ vendor's TV volume, ±20%
+h    = Hill(Adstock(TV))   this draw
+μ    = log V
+       − log( Σ_g exp(τ·z_g)
+              · dv_scale_g · Σ_t h[g,t] )
+β_g  = exp(μ + τ·z_g)
+       for g = Effervescent, Liquid, Tabs</pre>
+          <p>This is the algebra Meridian uses to turn an ROI prior into a coefficient, with units sold in place of money.</p>
+        </aside>
+      </div>
+      <figure class="fig">
+        <div class="fig-scroll"><svg viewBox="0 0 1240 292" class="fig-svg" role="img" aria-label="Effervescent TV, step by step: raw weekly GRPs; divided by the median active week of 130 GRPs; geometric adstock weights with decay 0.6 over lags 0 to 8; the carried-over series; a Hill curve with EC50 0.6; then multiplied by the sub-brand coefficient and the KPI scale to give a contribution in units sold.">
+<defs><marker id="ah-chain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" class="sv-arrowhead"/></marker></defs>
+<text x="10.0" y="20.0" class="sv-title" text-anchor="start">1 · Raw media</text>
+<text x="10.0" y="37.0" class="sv-small" text-anchor="start">TV GRPs per week (example)</text>
+<line x1="40.0" y1="58.0" x2="40.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="40.0" y1="212.0" x2="188.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="196.0" y1="135.0" x2="224.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="230.0" y="20.0" class="sv-title" text-anchor="start">2 · Scale</text>
+<text x="230.0" y="37.0" class="sv-small" text-anchor="start">÷ 130 GRPs = 1 typical week</text>
+<line x1="260.0" y1="58.0" x2="260.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="260.0" y1="212.0" x2="408.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="416.0" y1="135.0" x2="444.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="450.0" y="20.0" class="sv-title" text-anchor="start">3 · Adstock weights</text>
+<text x="450.0" y="37.0" class="sv-small" text-anchor="start">α = 0.6 learned, lags 0–8</text>
+<line x1="480.0" y1="58.0" x2="480.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="480.0" y1="212.0" x2="628.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="636.0" y1="135.0" x2="664.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="670.0" y="20.0" class="sv-title" text-anchor="start">4 · Carried over</text>
+<text x="670.0" y="37.0" class="sv-small" text-anchor="start">average of recent weeks</text>
+<line x1="700.0" y1="58.0" x2="700.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="700.0" y1="212.0" x2="848.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="856.0" y1="135.0" x2="884.0" y2="135.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<text x="890.0" y="20.0" class="sv-title" text-anchor="start">5 · Saturate</text>
+<text x="890.0" y="37.0" class="sv-small" text-anchor="start">EC50 = 0.6 learned, slope 1</text>
+<line x1="920.0" y1="58.0" x2="920.0" y2="212.0" class="sv-axis" fill="none"/>
+<line x1="920.0" y1="212.0" x2="1068.0" y2="212.0" class="sv-axis" fill="none"/>
+<rect x="60.1" y="109.3" width="6.0" height="102.7" rx="0" class="sv-bar-raw"/>
+<rect x="69.4" y="75.1" width="6.0" height="136.9" rx="0" class="sv-bar-raw"/>
+<rect x="78.6" y="92.2" width="6.0" height="119.8" rx="0" class="sv-bar-raw"/>
+<rect x="115.6" y="135.0" width="6.0" height="77.0" rx="0" class="sv-bar-raw"/>
+<rect x="124.9" y="117.9" width="6.0" height="94.1" rx="0" class="sv-bar-raw"/>
+<rect x="171.1" y="83.7" width="6.0" height="128.3" rx="0" class="sv-bar-raw"/>
+<rect x="180.4" y="100.8" width="6.0" height="111.2" rx="0" class="sv-bar-raw"/>
+<line x1="37.0" y1="212.0" x2="40.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="34.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="37.0" y1="75.1" x2="40.0" y2="75.1" class="sv-axis" fill="none"/>
+<text x="34.0" y="79.1" class="sv-tick" text-anchor="end">160</text>
+<text x="114.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<rect x="280.1" y="110.5" width="6.0" height="101.5" rx="0" class="sv-bar-raw"/>
+<rect x="289.4" y="76.6" width="6.0" height="135.4" rx="0" class="sv-bar-raw"/>
+<rect x="298.6" y="93.5" width="6.0" height="118.5" rx="0" class="sv-bar-raw"/>
+<rect x="335.6" y="135.8" width="6.0" height="76.2" rx="0" class="sv-bar-raw"/>
+<rect x="344.9" y="118.9" width="6.0" height="93.1" rx="0" class="sv-bar-raw"/>
+<rect x="391.1" y="85.1" width="6.0" height="126.9" rx="0" class="sv-bar-raw"/>
+<rect x="400.4" y="102.0" width="6.0" height="110.0" rx="0" class="sv-bar-raw"/>
+<line x1="260.0" y1="102.0" x2="408.0" y2="102.0" class="sv-ref" fill="none"/>
+<line x1="257.0" y1="212.0" x2="260.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="254.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="257.0" y1="102.0" x2="260.0" y2="102.0" class="sv-axis" fill="none"/>
+<text x="254.0" y="106.0" class="sv-tick" text-anchor="end">1.0</text>
+<text x="334.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<rect x="483.2" y="73.7" width="10.0" height="138.3" rx="0" class="sv-bar-learned"/>
+<rect x="499.7" y="129.0" width="10.0" height="83.0" rx="0" class="sv-bar-learned"/>
+<rect x="516.1" y="162.2" width="10.0" height="49.8" rx="0" class="sv-bar-learned"/>
+<rect x="532.6" y="182.1" width="10.0" height="29.9" rx="0" class="sv-bar-learned"/>
+<rect x="549.0" y="194.1" width="10.0" height="17.9" rx="0" class="sv-bar-learned"/>
+<rect x="565.4" y="201.2" width="10.0" height="10.8" rx="0" class="sv-bar-learned"/>
+<rect x="581.9" y="205.5" width="10.0" height="6.5" rx="0" class="sv-bar-learned"/>
+<rect x="598.3" y="208.1" width="10.0" height="3.9" rx="0" class="sv-bar-learned"/>
+<rect x="614.8" y="209.7" width="10.0" height="2.3" rx="0" class="sv-bar-learned"/>
+<line x1="477.0" y1="212.0" x2="480.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="474.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="477.0" y1="75.1" x2="480.0" y2="75.1" class="sv-axis" fill="none"/>
+<text x="474.0" y="79.1" class="sv-tick" text-anchor="end">0.4</text>
+<text x="488.2" y="228.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="554.0" y="228.0" class="sv-tick" text-anchor="middle">4</text>
+<text x="619.8" y="228.0" class="sv-tick" text-anchor="middle">8</text>
+<text x="554.0" y="243.0" class="sv-tick" text-anchor="middle">lag (weeks)</text>
+<rect x="720.1" y="110.5" width="6.0" height="101.5" rx="0" class="sv-bar-faint"/>
+<rect x="729.4" y="76.6" width="6.0" height="135.4" rx="0" class="sv-bar-faint"/>
+<rect x="738.6" y="93.5" width="6.0" height="118.5" rx="0" class="sv-bar-faint"/>
+<rect x="775.6" y="135.8" width="6.0" height="76.2" rx="0" class="sv-bar-faint"/>
+<rect x="784.9" y="118.9" width="6.0" height="93.1" rx="0" class="sv-bar-faint"/>
+<rect x="831.1" y="85.1" width="6.0" height="126.9" rx="0" class="sv-bar-faint"/>
+<rect x="840.4" y="102.0" width="6.0" height="110.0" rx="0" class="sv-bar-faint"/>
+<polyline points="704.6,212.0 713.9,212.0 723.1,171.0 732.4,132.7 741.6,116.5 750.9,154.7 760.1,177.6 769.4,191.4 778.6,168.9 787.9,148.5 797.1,173.9 806.4,189.6 815.6,199.1 824.9,204.7 834.1,156.4 843.4,134.2" class="sv-line-media" fill="none"/>
+<circle cx="723.1" cy="171.0" r="2.2" class="sv-dot-media"/>
+<circle cx="732.4" cy="132.7" r="2.2" class="sv-dot-media"/>
+<circle cx="741.6" cy="116.5" r="2.2" class="sv-dot-media"/>
+<circle cx="750.9" cy="154.7" r="2.2" class="sv-dot-media"/>
+<circle cx="760.1" cy="177.6" r="2.2" class="sv-dot-media"/>
+<circle cx="769.4" cy="191.4" r="2.2" class="sv-dot-media"/>
+<circle cx="778.6" cy="168.9" r="2.2" class="sv-dot-media"/>
+<circle cx="787.9" cy="148.5" r="2.2" class="sv-dot-media"/>
+<circle cx="797.1" cy="173.9" r="2.2" class="sv-dot-media"/>
+<circle cx="806.4" cy="189.6" r="2.2" class="sv-dot-media"/>
+<circle cx="815.6" cy="199.1" r="2.2" class="sv-dot-media"/>
+<circle cx="824.9" cy="204.7" r="2.2" class="sv-dot-media"/>
+<circle cx="834.1" cy="156.4" r="2.2" class="sv-dot-media"/>
+<circle cx="843.4" cy="134.2" r="2.2" class="sv-dot-media"/>
+<line x1="697.0" y1="212.0" x2="700.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="694.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="697.0" y1="102.0" x2="700.0" y2="102.0" class="sv-axis" fill="none"/>
+<text x="694.0" y="106.0" class="sv-tick" text-anchor="end">1.0</text>
+<text x="774.0" y="228.0" class="sv-tick" text-anchor="middle">weeks 1–16</text>
+<line x1="920.0" y1="135.0" x2="1068.0" y2="135.0" class="sv-ref" fill="none"/>
+<line x1="979.2" y1="56.0" x2="979.2" y2="212.0" class="sv-marker-learned" fill="none"/>
+<text x="983.2" y="66.0" class="sv-tick sv-learned-text" text-anchor="start">EC50</text>
+<polyline points="920.0,212.0 923.0,211.6 925.9,210.5 928.9,208.6 931.8,206.1 934.8,202.9 937.8,199.3 940.7,195.2 943.7,190.8 946.6,186.1 949.6,181.2 952.6,176.2 955.5,171.2 958.5,166.3 961.4,161.4 964.4,156.6 967.4,151.9 970.3,147.4 973.3,143.1 976.2,138.9 979.2,135.0 982.2,131.2 985.1,127.7 988.1,124.3 991.0,121.1 994.0,118.1 997.0,115.2 999.9,112.6 1002.9,110.0 1005.8,107.6 1008.8,105.4 1011.8,103.3 1014.7,101.3 1017.7,99.4 1020.6,97.6 1023.6,95.9 1026.6,94.3 1029.5,92.8 1032.5,91.4 1035.4,90.1 1038.4,88.8 1041.4,87.6 1044.3,86.5 1047.3,85.4 1050.2,84.4 1053.2,83.4 1056.2,82.5 1059.1,81.6 1062.1,80.8 1065.0,80.0 1068.0,79.2" class="sv-line-media-dash" fill="none"/>
+<polyline points="920.0,212.0 923.0,204.7 925.9,198.0 928.9,191.9 931.8,186.3 934.8,181.2 937.8,176.5 940.7,172.1 943.7,168.0 946.6,164.2 949.6,160.7 952.6,157.4 955.5,154.2 958.5,151.3 961.4,148.6 964.4,146.0 967.4,143.6 970.3,141.2 973.3,139.1 976.2,137.0 979.2,135.0 982.2,133.1 985.1,131.3 988.1,129.6 991.0,128.0 994.0,126.4 997.0,125.0 999.9,123.5 1002.9,122.2 1005.8,120.9 1008.8,119.6 1011.8,118.4 1014.7,117.2 1017.7,116.1 1020.6,115.0 1023.6,114.0 1026.6,113.0 1029.5,112.0 1032.5,111.1 1035.4,110.2 1038.4,109.3 1041.4,108.5 1044.3,107.7 1047.3,106.9 1050.2,106.1 1053.2,105.4 1056.2,104.7 1059.1,104.0 1062.1,103.3 1065.0,102.6 1068.0,102.0" class="sv-line-media" fill="none"/>
+<circle cx="956.8" cy="153.0" r="2.4" class="sv-dot-media"/>
+<circle cx="991.1" cy="127.9" r="2.4" class="sv-dot-media"/>
+<circle cx="1005.6" cy="121.0" r="2.4" class="sv-dot-media"/>
+<circle cx="971.4" cy="140.4" r="2.4" class="sv-dot-media"/>
+<circle cx="950.8" cy="159.3" r="2.4" class="sv-dot-media"/>
+<circle cx="938.5" cy="175.3" r="2.4" class="sv-dot-media"/>
+<circle cx="958.7" cy="151.1" r="2.4" class="sv-dot-media"/>
+<circle cx="977.0" cy="136.5" r="2.4" class="sv-dot-media"/>
+<circle cx="954.2" cy="155.6" r="2.4" class="sv-dot-media"/>
+<circle cx="940.1" cy="172.9" r="2.4" class="sv-dot-media"/>
+<circle cx="931.6" cy="186.8" r="2.4" class="sv-dot-media"/>
+<circle cx="926.5" cy="196.7" r="2.4" class="sv-dot-media"/>
+<circle cx="969.9" cy="141.6" r="2.4" class="sv-dot-media"/>
+<circle cx="989.8" cy="128.7" r="2.4" class="sv-dot-media"/>
+<text x="1066.0" y="72.2" class="sv-tick" text-anchor="end">slope 2</text>
+<text x="1066.0" y="117.0" class="sv-tick" text-anchor="end">slope 1</text>
+<line x1="917.0" y1="212.0" x2="920.0" y2="212.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="216.0" class="sv-tick" text-anchor="end">0</text>
+<line x1="917.0" y1="135.0" x2="920.0" y2="135.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="139.0" class="sv-tick" text-anchor="end">0.5</text>
+<line x1="917.0" y1="58.0" x2="920.0" y2="58.0" class="sv-axis" fill="none"/>
+<text x="914.0" y="62.0" class="sv-tick" text-anchor="end">1</text>
+<text x="920.0" y="228.0" class="sv-tick" text-anchor="middle">0</text>
+<text x="979.2" y="228.0" class="sv-tick" text-anchor="middle">0.6</text>
+<text x="1068.0" y="228.0" class="sv-tick" text-anchor="middle">1.5</text>
+<text x="994.0" y="243.0" class="sv-tick" text-anchor="middle">adstocked, typical weeks</text>
+<rect x="1110.0" y="46.0" width="120.0" height="58.0" rx="6" class="sv-box-media"/>
+<text x="1170.0" y="65.0" class="sv-title" text-anchor="middle">× β</text>
+<text x="1170.0" y="81.0" class="sv-small" text-anchor="middle">per sub-brand,</text>
+<text x="1170.0" y="94.0" class="sv-small" text-anchor="middle">from volume prior</text>
+<rect x="1110.0" y="124.0" width="120.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="1170.0" y="143.0" class="sv-title" text-anchor="middle">× dv_scale</text>
+<text x="1170.0" y="159.0" class="sv-small" text-anchor="middle">back to</text>
+<text x="1170.0" y="172.0" class="sv-small" text-anchor="middle">units sold</text>
+<rect x="1110.0" y="202.0" width="120.0" height="58.0" rx="6" class="sv-box-plain"/>
+<text x="1170.0" y="221.0" class="sv-title" text-anchor="middle">= contribution</text>
+<text x="1170.0" y="237.0" class="sv-small" text-anchor="middle">units per week,</text>
+<text x="1170.0" y="250.0" class="sv-small" text-anchor="middle">per sub-brand</text>
+<line x1="1076.0" y1="75.0" x2="1104.0" y2="75.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<line x1="1170.0" y1="104.0" x2="1170.0" y2="122.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+<line x1="1170.0" y1="182.0" x2="1170.0" y2="200.0" class="sv-arrow" fill="none" marker-end="url(#ah-chain)"/>
+</svg></div>
+        <figcaption>In the example: 16 weeks of Effervescent TV through steps 1–5. Decay 0.6 and EC50 0.6 stand in for one posterior draw. Because the adstock weights sum to 1, step 4 stays on step 2's axis, so EC50 0.6 means "0.6 of a typical week" (78 GRPs).</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 5 ============================== -->
+  <section class="phase" id="p5" aria-labelledby="p5-h">
+    <div class="phase-num" aria-hidden="true">5</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p5-h">Diagnose</h2>
+        <p>Did the sampler converge, did the data move the priors, and did learning the transforms leave the rest of the model readable?</p>
+      </div>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Convergence</strong>, at codebase 1's standard: R-hat ≤ 1.01, divergences, effective sample size.</li>
+            <li><strong>Did the data speak?</strong> Contraction for every coefficient, decay, EC50 and log volume.</li>
+            <li><strong>New transform flags:</strong>
+              <ul>
+                <li>a parameter pressed against its bound;</li>
+                <li>an EC50 beyond anything observed;</li>
+                <li>decay trading off against β.</li>
+              </ul>
+            </li>
+            <li><strong>Residuals and structure:</strong> Durbin-Watson, heteroscedasticity, tails, the posterior predictive p-value on the total, and the probability the baseline goes negative.</li>
+            <li><strong>Collinearity again</strong>, this time at the posterior-median transform.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">diagnostics.py</span><span class="tag t-infra">assumptions.py</span><span class="tag t-infra">prior_plots.py</span><span class="tag t-infra">warnings_report.py</span></p>
+        </div>
+        <aside class="ex" aria-label="Phase 5 in the example">
+          <p class="ex-label">In the example: reading TV</p>
+          <div class="table-wrap"><table>
+            <thead><tr><th>Check</th><th>Good</th><th>If not</th></tr></thead>
+            <tbody>
+              <tr><td>Decay 90% interval</td><td>inside 0–0.807, clear of 0.807</td><td>the window, not the data, sets it</td></tr>
+              <tr><td>EC50 ÷ 95th-pct active week</td><td>below 1</td><td>saturation never reached: narrow EC50 or drop Hill</td></tr>
+              <tr><td>corr(decay, β)</td><td>below 0.7</td><td>carryover and size trade off: pin decay</td></tr>
+              <tr><td>Contraction of decay</td><td>clearly above 0</td><td>the prior is the answer: say so</td></tr>
+            </tbody>
+          </table></div>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 6 ============================== -->
+  <section class="phase" id="p6" aria-labelledby="p6-h">
+    <div class="phase-num" aria-hidden="true">6</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p6-h">Cross-validate and choose</h2>
+        <p>One fit is weak evidence, especially once transforms are learned. Refit on growing windows and ask whether the forecasts, coefficients and transforms hold.</p>
+      </div>
+      <figure class="fig">
+        <div class="fig-scroll"><svg viewBox="0 0 1240 246" class="fig-svg" role="img" aria-label="Four expanding-window folds over 104 weeks. Fold 1 trains on weeks 1 to 52 and tests on 53 to 65; fold 2 trains on 1 to 65 and tests on 66 to 78; fold 3 trains on 1 to 78 and tests on 79 to 91; fold 4 trains on 1 to 91 and tests on 92 to 104. The minimum training window is 52 weeks.">
+<line x1="695.0" y1="26.0" x2="695.0" y2="200.0" class="sv-ref" fill="none"/>
+<text x="701.0" y="18.0" class="sv-small" text-anchor="start">minimum training window: 52 weeks</text>
+<text x="10.0" y="45.0" class="sv-title" text-anchor="start">Fold 1</text>
+<text x="10.0" y="60.0" class="sv-small" text-anchor="start">tests weeks 53–65</text>
+<rect x="170.0" y="34.0" width="525.0" height="24.0" rx="2" class="sv-bar-train"/>
+<text x="687.0" y="50.0" class="sv-onbar" text-anchor="end">train 52 wk</text>
+<rect x="695.0" y="34.0" width="131.2" height="24.0" rx="2" class="sv-bar-test"/>
+<text x="760.6" y="50.0" class="sv-onbar" text-anchor="middle">test 13</text>
+<rect x="826.2" y="34.5" width="393.8" height="23.0" rx="2" class="sv-bar-unused"/>
+<text x="834.2" y="50.0" class="sv-small" text-anchor="start">not used by this fold</text>
+<text x="10.0" y="87.0" class="sv-title" text-anchor="start">Fold 2</text>
+<text x="10.0" y="102.0" class="sv-small" text-anchor="start">tests weeks 66–78</text>
+<rect x="170.0" y="76.0" width="656.2" height="24.0" rx="2" class="sv-bar-train"/>
+<text x="818.2" y="92.0" class="sv-onbar" text-anchor="end">train 65 wk</text>
+<rect x="826.2" y="76.0" width="131.2" height="24.0" rx="2" class="sv-bar-test"/>
+<text x="891.9" y="92.0" class="sv-onbar" text-anchor="middle">test 13</text>
+<rect x="957.5" y="76.5" width="262.5" height="23.0" rx="2" class="sv-bar-unused"/>
+<text x="965.5" y="92.0" class="sv-small" text-anchor="start">not used by this fold</text>
+<text x="10.0" y="129.0" class="sv-title" text-anchor="start">Fold 3</text>
+<text x="10.0" y="144.0" class="sv-small" text-anchor="start">tests weeks 79–91</text>
+<rect x="170.0" y="118.0" width="787.5" height="24.0" rx="2" class="sv-bar-train"/>
+<text x="949.5" y="134.0" class="sv-onbar" text-anchor="end">train 78 wk</text>
+<rect x="957.5" y="118.0" width="131.2" height="24.0" rx="2" class="sv-bar-test"/>
+<text x="1023.1" y="134.0" class="sv-onbar" text-anchor="middle">test 13</text>
+<rect x="1088.8" y="118.5" width="131.2" height="23.0" rx="2" class="sv-bar-unused"/>
+<text x="1096.8" y="134.0" class="sv-small" text-anchor="start">not used by this fold</text>
+<text x="10.0" y="171.0" class="sv-title" text-anchor="start">Fold 4</text>
+<text x="10.0" y="186.0" class="sv-small" text-anchor="start">tests weeks 92–104</text>
+<rect x="170.0" y="160.0" width="918.8" height="24.0" rx="2" class="sv-bar-train"/>
+<text x="1080.8" y="176.0" class="sv-onbar" text-anchor="end">train 91 wk</text>
+<rect x="1088.8" y="160.0" width="131.2" height="24.0" rx="2" class="sv-bar-test"/>
+<text x="1154.4" y="176.0" class="sv-onbar" text-anchor="middle">test 13</text>
+<line x1="170.0" y1="206.0" x2="1220.0" y2="206.0" class="sv-axis" fill="none"/>
+<line x1="170.0" y1="206.0" x2="170.0" y2="210.0" class="sv-axis" fill="none"/>
+<text x="170.0" y="223.0" class="sv-tick" text-anchor="middle">0</text>
+<line x1="301.2" y1="206.0" x2="301.2" y2="210.0" class="sv-axis" fill="none"/>
+<text x="301.2" y="223.0" class="sv-tick" text-anchor="middle">13</text>
+<line x1="432.5" y1="206.0" x2="432.5" y2="210.0" class="sv-axis" fill="none"/>
+<text x="432.5" y="223.0" class="sv-tick" text-anchor="middle">26</text>
+<line x1="563.8" y1="206.0" x2="563.8" y2="210.0" class="sv-axis" fill="none"/>
+<text x="563.8" y="223.0" class="sv-tick" text-anchor="middle">39</text>
+<line x1="695.0" y1="206.0" x2="695.0" y2="210.0" class="sv-axis" fill="none"/>
+<text x="695.0" y="223.0" class="sv-tick" text-anchor="middle">52</text>
+<line x1="826.2" y1="206.0" x2="826.2" y2="210.0" class="sv-axis" fill="none"/>
+<text x="826.2" y="223.0" class="sv-tick" text-anchor="middle">65</text>
+<line x1="957.5" y1="206.0" x2="957.5" y2="210.0" class="sv-axis" fill="none"/>
+<text x="957.5" y="223.0" class="sv-tick" text-anchor="middle">78</text>
+<line x1="1088.8" y1="206.0" x2="1088.8" y2="210.0" class="sv-axis" fill="none"/>
+<text x="1088.8" y="223.0" class="sv-tick" text-anchor="middle">91</text>
+<line x1="1220.0" y1="206.0" x2="1220.0" y2="210.0" class="sv-axis" fill="none"/>
+<text x="1220.0" y="223.0" class="sv-tick" text-anchor="middle">104</text>
+<text x="160.0" y="223.0" class="sv-tick" text-anchor="end">week</text>
+</svg></div>
+        <figcaption>Expanding-window folds on the example's 104 weeks. Each fold refits the whole model on everything before its 13-week test window. Scaling, bounds and priors are recomputed inside each fold, so no test week leaks into training. With a 52-week minimum, four folds fit (the weekly preset asks for five).</figcaption>
+      </figure>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Scores per fold:</strong> wMAPE, CRPS and 90% predictive coverage on the test weeks.</li>
+            <li><strong>Stability across folds:</strong> the coefficients, and the learned decay and EC50. A decay that moves when the cut-off moves has not been pinned down.</li>
+            <li><strong>Choosing between specifications</strong>, with codebase 1's rule:
+              <ol>
+                <li>pass the gate (R-hat, divergences, coverage);</li>
+                <li>more accurate only if better by more than one standard error;</li>
+                <li>more stable;</li>
+                <li>fewer parameters.</li>
+              </ol>
+            </li>
+            <li><strong>This is where the builder's freedom gets tested.</strong> Two recipes are two specifications, compared like any others.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">cv_scorecard</span><span class="tag t-infra">select_model</span><span class="tag t-infra">cadence presets</span></p>
+        </div>
+        <aside class="ex" aria-label="Phase 6 in the example">
+          <p class="ex-label">In the example: two questions CV answers</p>
+          <ul>
+            <li><strong>TV variables:</strong> hero + halo + unattributed, or one combined TV variable?</li>
+            <li><strong>OOH delay:</strong> <code>min_lag</code> 0 or 1?</li>
+          </ul>
+          <p>Each variant is a full run across the four folds. The winner is chosen by the rule on the left, not by the one Q4 holdout.</p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== PHASE 7 ============================== -->
+  <section class="phase" id="p7" aria-labelledby="p7-h">
+    <div class="phase-num" aria-hidden="true">7</div>
+    <div class="phase-main">
+      <div class="phase-head">
+        <h2 id="p7-h">Report in units sold</h2>
+        <p>Replay every posterior draw to get each driver's weekly contribution, check that the parts add up, and roll them up the way the business reads them.</p>
+      </div>
+      <div class="phase-grid">
+        <div class="what">
+          <h3>What happens</h3>
+          <ul>
+            <li><strong>Contributions in units sold</strong>, per sub-brand and week, with intervals. On every draw the parts add up exactly to fitted sales.</li>
+            <li><strong>Baseline, expanded:</strong> core (intercept, trend, seasonality) + TDP + base price + category + dummies + competitor TV.</li>
+            <li><strong>Incremental effects</strong> roll up by pillar: TV, Online Media, Trade.</li>
+            <li><strong>Reconciliation chain:</strong> raw → scaled → contribution → fitted → actual, with each step in its own file.</li>
+            <li><strong>Benchmark sheet:</strong> paste the vendor's volumes. They are already in the same units as our volume priors.</li>
+          </ul>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">reconciliation.py</span><span class="tag t-infra">contribution_reference</span><span class="tag t-infra">pillar roll-up</span><span class="tag t-infra">benchmark.py</span></p>
+        </div>
+        <aside class="ex" aria-label="Phase 7 in the example">
+          <p class="ex-label">In the example: Liquid's decomposition</p>
+          <pre class="tree">fitted units sold, Liquid =
+  __baseline__
+    core: intercept + trend + seasonality
+    TDP · base price · category volume
+    category price · dummies
+    competitor TV (−)
++ TV pillar
+    TV unattributed (shared)
+    TV Effervescent halo
++ Online Media
+    video · social · search
+    OOH 2024 · OOH 2025
++ Trade
+    BTL price promotions · BTL shopper
+    TPR (once its source is confirmed)</pre>
+          <p>Liquid receives Effervescent's TV as <strong>halo</strong>, never as hero.</p>
+        </aside>
+      </div>
+    </div>
+  </section>
+
+  <!-- ============================== MERIDIAN ============================== -->
+  <section class="block" aria-labelledby="mer-h">
+    <div class="block-head">
+      <h2 id="mer-h">How the modelling differs from Meridian</h2>
+      <p>The structure is the same: adstock, then Hill, coefficients pooled across regions, and all parameters sampled together by NUTS. The differences sit in scaling, priors, the baseline and validation.</p>
+    </div>
+    <div class="panel">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Topic</th><th>Meridian</th><th>Codebase 2</th><th>What it means</th></tr></thead>
+        <tbody>
+          <tr><td><strong>Currency of results</strong></td><td>revenue or a non-revenue KPI; ROI is central</td><td>sales volume (<code>Units EQ</code>); no ROI</td><td>priors and contributions are in units sold</td></tr>
+          <tr><td><strong>Scaling</strong></td><td>KPI per capita, standardised over all geos and weeks. Media ÷ (population × one median per channel)</td><td>KPI standardised per sub-brand. Media ÷ that sub-brand's median active week. No population</td><td>in both, EC50 means "multiples of a typical active week"; ours is per region</td></tr>
+          <tr><td><strong>Carryover</strong></td><td>geometric or binomial, normalised. Window of max_lag + 1 weeks (default 8). Peak always at lag 0</td><td>geometric, or delayed with a learned peak θ. Window from min_lag to max_lag, with the decay cap tied to the window</td><td>can represent build-up, and the team's fixed lag</td></tr>
+          <tr><td><strong>Saturation</strong></td><td>Hill, slope fixed at 1 by default, per channel</td><td>same Hill; parameters per channel or per transform group</td><td>groups keep 33 transformed columns learnable</td></tr>
+          <tr><td><strong>Media coefficient prior</strong></td><td>ROI LogNormal(0.2, 0.9), turned into β on every draw (<code>calculate_beta_x</code>)</td><td>contribution volume (e.g. vendor ±20%), turned into β on every draw</td><td>the same algebra, with units instead of money</td></tr>
+          <tr><td><strong>Other coefficients</strong></td><td>Normal random effects for controls and non-media; no sign constraint</td><td>structural signs (<code>±exp</code>); hierarchical, independent or global; per-region prior overrides</td><td>a price effect can never turn positive</td></tr>
+          <tr><td><strong>Baseline</strong></td><td>geo intercept (one geo fixed at 0) + time effects on knots. A geo model's default is one knot per week</td><td>pooled intercept + per-sub-brand trend + Fourier seasonality</td><td>see "Flexible or parametric baseline" below</td></tr>
+          <tr><td><strong>Noise</strong></td><td>Normal; one σ for all geos by default</td><td>σ per sub-brand, partially pooled; Normal or Student-t</td><td>robust to promotion spikes</td></tr>
+          <tr><td><strong>Validation</strong></td><td>one holdout mask inside the likelihood</td><td>expanding-window refits, a scorecard, and a selection rule (phase 6)</td><td>tests whether the answer depends on where the data is cut</td></tr>
+          <tr><td><strong>Beyond the model</strong></td><td>reach and frequency, organic media, response curves, budget optimiser</td><td>not planned</td><td>—</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div class="cards">
+      <article class="card">
+        <p class="card-title">Same inversion, different currency</p>
+        <p>Neither model samples the media coefficient directly. Each draw first computes the transformed media, then solves for the β that delivers a target. Meridian's target is ROI × spend; ours is a contribution volume.</p>
+        <p class="muted">A prior written directly on β would mean something different at every decay and EC50. A prior on volume means the same thing on every draw.</p>
+      </article>
+      <article class="card">
+        <p class="card-title">Flexible or parametric baseline</p>
+        <p>Meridian's per-week time effects absorb every week-to-week movement shared by all regions. Most of our media is national, identical in every sub-brand, so the number of knots would decide how much of that movement counts as baseline and how much as media.</p>
+        <p class="muted">A smooth trend + Fourier baseline leaves more of the movement to the drivers, but it extrapolates poorly: that is codebase 1's Q4 holdout problem. Knots remain an option (P3).</p>
+      </article>
+      <article class="card">
+        <p class="card-title">Same Hill, different window rule</p>
+        <p>Both normalise the carryover weights, so adstock is a weighted average of recent weeks and EC50 stays on the typical-week axis.</p>
+        <p class="muted">With Meridian's default 9-week window, any decay above about 0.72 already loses more than 5% of its carryover to the cut-off, yet the prior still allows decay up to 1. We state the cap, tie it to the window, and allow a learned peak and a fixed delay.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ============================== NEW ============================== -->
+  <section class="block" aria-labelledby="new-h">
+    <div class="block-head">
+      <h2 id="new-h">New in Phase 2</h2>
+      <p>What neither codebase 1 nor Meridian provides today.</p>
+    </div>
+    <div class="cards four">
+      <article class="card"><p class="card-title">Variable builder</p><p>Recipes with splits, value groups, hero / halo, period cuts and vendor-style names, with a reconciliation that every raw row is used once.</p></article>
+      <article class="card"><p class="card-title">Checks on raw data</p><p>Build checks, a unit guard, and "can this channel teach carryover and saturation?" before any sampling.</p></article>
+      <article class="card"><p class="card-title">Lag window</p><p>A fixed <code>min_lag</code>, a learned peak θ, and a decay cap derived from <code>max_lag</code>.</p></article>
+      <article class="card"><p class="card-title">Transform groups</p><p>Decay and EC50 shared within a channel family: 14 transform parameters instead of 59.</p></article>
+      <article class="card"><p class="card-title">Bound diagnostics</p><p>Flags for a parameter pressed against its bound, an EC50 beyond the data, and decay trading off with β.</p></article>
+      <article class="card"><p class="card-title">Volume priors inverted per draw</p><p>The vendor's volumes are used as priors directly, with no ROI and no hand division by Σx.</p></article>
+      <article class="card"><p class="card-title">CV chooses the variables</p><p>Recipe variants and <code>min_lag</code> variants are compared with the same scorecard as any other specification.</p></article>
+      <article class="card"><p class="card-title">Bridge test to codebase 1</p><p>Pin every transform at today's preprocessing values: codebase 2 should then reproduce codebase 1.</p></article>
+    </div>
+  </section>
+
+  <!-- ============================== BUILD ORDER ============================== -->
+  <section class="block" aria-labelledby="build-h">
+    <div class="block-head">
+      <h2 id="build-h">Build order and open items</h2>
+      <p>The order the code will be written in once planning is signed off. The first real-data fit is allowed after P0.</p>
+    </div>
+    <ol class="track">
+      <li class="gate">
+        <p class="phase-tag"><b>P0</b><span>before any real-data run</span></p>
+        <ul>
+          <li>variable builder, Option A, with build checks</li>
+          <li>raw-data and design checks</li>
+          <li>scaling rule and prior units</li>
+          <li>volume prior turned into β</li>
+          <li><code>config.yaml</code> and the feature table</li>
+          <li><code>tests_phase2/</code></li>
+        </ul>
+      </li>
+      <li>
+        <p class="phase-tag"><b>P1</b><span>before anyone reads output</span></p>
+        <ul>
+          <li>variable builder, Option B recipes</li>
+          <li>reconciliation chain</li>
+          <li>baseline, reference, pillar</li>
+          <li>warnings and plotting</li>
+          <li>transform diagnostics</li>
+        </ul>
+      </li>
+      <li>
+        <p class="phase-tag"><b>P2</b><span>quality of life</span></p>
+        <ul>
+          <li>benchmark sheet on volume</li>
+          <li>prior charts, cadence presets</li>
+          <li>CV scorecard and selection</li>
+          <li><code>include_intercept</code>, <code>prob_negligible</code></li>
+        </ul>
+      </li>
+      <li>
+        <p class="phase-tag"><b>P3</b><span>pending or optional</span></p>
+        <ul>
+          <li>dummies, once defined</li>
+          <li>expert source, once its columns are known</li>
+          <li>binomial decay, Hill before adstock</li>
+          <li>knot baseline, response curves</li>
+        </ul>
+      </li>
+    </ol>
+    <div class="panel">
+      <div class="table-wrap"><table>
+        <thead><tr><th>Open item</th><th>Default until answered</th></tr></thead>
+        <tbody>
+          <tr><td>Where TPR comes from</td><td>not built; probably trade Price Promotions</td></tr>
+          <tr><td>What a dummy is in our context: a switch, a step, or a decay</td><td>not built; a <code>dummies</code> sheet is reserved</td></tr>
+          <tr><td>The expert file's main column, spend and metrics</td><td>design ready; columns to confirm</td></tr>
+          <tr><td>The region for the next model: sub-brand, retail channel or retailer</td><td>a setting; this page uses sub-brand</td></tr>
+          <tr><td>TDP across retail channels</td><td>weighted + numeric distribution summed over SKUs; a sales-weighted average across retail channels</td></tr>
+          <tr><td>Base price</td><td>a price fact if present, otherwise Value ÷ Units labelled as average price</td></tr>
+        </tbody>
+      </table></div>
+    </div>
+  </section>
+
+  <footer class="foot">
+    <p class="eyebrow">Sources</p>
+    <ul>
+      <li>Detail: <code>updating production code/codebase2_full_mmm/docs/</code>: <code>PHASE2_ARCHITECTURE.md</code>, <code>VARIABLE_CREATION.md</code>, <code>EDA_CHECKS.md</code></li>
+      <li>Decisions of record: <code>updating production code/CLAUDE.md</code></li>
+      <li>Meridian: <code>model/posterior_sampler.py</code>, <code>model/adstock_hill.py</code>, <code>model/equations.py</code>, <code>model/transformers.py</code>, <code>model/spec.py</code>, <code>model/eda/eda_engine.py</code></li>
+      <li>Delayed adstock: Jin, Wang, Sun, Chan and Koehler (2017), Google</li>
+      <li>Data structures: <code>data_structures/</code> media, trade and consumption snapshots</li>
+    </ul>
+  </footer>
+</main>

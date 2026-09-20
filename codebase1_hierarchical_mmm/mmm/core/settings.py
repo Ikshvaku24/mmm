@@ -44,7 +44,7 @@ from dataclasses import fields
 
 import yaml
 
-from config import (AssumptionConfig, CVConfig, ModelConfig, OutputConfig,
+from mmm.core.config import (AssumptionConfig, CVConfig, ModelConfig, OutputConfig,
                     RunConfig, SamplerConfig, load_feature_config)
 
 # --------------------------------------------------------------------------- #
@@ -63,7 +63,8 @@ SECTIONS = {
 EXCLUDED = {"model": ("features",)}
 
 DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format",
-             "benchmark_mapping")
+             "benchmark_mapping", "vendor_contribution", "pillar_spend",
+             "dv_aggregation", "pre_model_dir")
 
 
 @dataclasses.dataclass
@@ -104,7 +105,21 @@ HELP: dict[str, dict[str, str]] = {
                               "combined variables (feature,benchmark_group). When the vendor "
                               "reports one line where we carry several columns, the benchmark "
                               "sheet sums ours first so one row compares to one row. "
-                              "null = compare feature by feature"),
+                              "null = compare feature by feature. Sample: "
+                              "samples/benchmark_mapping_sample.csv"),
+        "vendor_contribution": ("OPTIONAL csv/xlsx of the vendor's contribution per feature "
+                                "(and region). When present the PRE-MODEL step inverts it into "
+                                "a sample feature-prior file and pre-fills the benchmark sheet. "
+                                "Sample: samples/vendor_contribution_sample.csv"),
+        "pillar_spend": ("OPTIONAL csv/xlsx used when there is NO vendor contribution: "
+                         "pillar, feature, feature_spend, pillar_share_pct. The pre-model step "
+                         "splits each pillar's share of sales across its features by spend. "
+                         "Sample: samples/pillar_spend_sample.csv"),
+        "dv_aggregation": ("how the KPI is aggregated per region when inverting a contribution: "
+                           "mean (default) | sum | median. Must match how the vendor expressed "
+                           "their number"),
+        "pre_model_dir": ("where the pre-model step writes the sample prior file and its "
+                          "calculation workbook. null = pre_model_outputs/"),
     },
     "model": {
         "likelihood": "'normal' | 'student_t'. student_t is robust to promo/holiday spikes",
@@ -131,7 +146,11 @@ HELP: dict[str, dict[str, str]] = {
         "dv_scale": "'none'|'sd'|'mean'|'mean_positive'|'max' - the unit your PRIORS live in",
         "dv_scale_scope": "'region' (own scale each) | 'global' (one number for all regions)",
         "cadence": "'auto'|'weekly'|'monthly' - sets every period count downstream",
-        "holdout_periods": "last N dates held out per region for OOS metrics. null = cadence preset",
+        "holdout_periods": ("last N dates held out per region for OOS metrics, as an ABSOLUTE "
+                            "count. null = use holdout_fraction / the cadence policy"),
+        "holdout_fraction": ("holdout as a FRACTION of the panel, so it follows the data: 0.125 "
+                             "is 13 weeks on 2 years and 26 on 4. Ignored when holdout_periods "
+                             "is an integer. null = the policy default (0.125)"),
         "report_draws": "posterior draws used for the decomposition and plots",
         "on_convergence_failure": "'warn' | 'fail' - 'fail' refuses to persist an unconverged fit",
         "zero_threshold_rel": "snap |v| < this * max|v| to 0 before scaling. ~1e-6 kills adstock dust",
@@ -223,10 +242,14 @@ HELP: dict[str, dict[str, str]] = {
                     "run. Turn it on once the single fit looks sane. Outputs land in "
                     "06_cross_validation/"),
         "cadence": "'auto'|'weekly'|'monthly' - the preset every null below is filled from",
-        "horizon": "test periods per fold (null -> 13 weekly / 3 monthly)",
+        "horizon": ("test periods per fold, ABSOLUTE. null -> horizon_fraction, then the "
+                    "policy (12.5% of the panel: 13 on a 2-year weekly panel, 26 on 4)"),
+        "horizon_fraction": "test periods per fold as a fraction of the panel. null = the policy",
         "n_folds": "number of expanding-window folds (null -> 5 weekly / 3 monthly)",
         "step": "periods between fold origins (null -> horizon)",
-        "min_train_periods": "shortest training window (null -> 52 weekly / 12 monthly)",
+        "min_train_periods": ("shortest training window, ABSOLUTE. null -> min_train_fraction, "
+                              "then the policy (50% of the panel, never under one year)"),
+        "min_train_fraction": "shortest training window as a fraction of the panel",
         "draws": "override sampler.draws for CV speed (null -> preset)",
         "tune": "override sampler.tune for CV speed (null -> preset)",
         "make_plots": "write the CV accuracy charts",
@@ -292,7 +315,8 @@ def load_settings(path: str, features=None) -> Settings:
 
     data = dict(raw.get("data") or {})
     _check_keys(data, set(DATA_KEYS), "data")
-    for k in ("input_path", "feature_priors", "benchmark_mapping"):
+    for k in ("input_path", "feature_priors", "benchmark_mapping",
+              "vendor_contribution", "pillar_spend", "pre_model_dir"):
         if data.get(k):
             data[k] = _resolve_path(data[k], base_dir)
 
@@ -359,6 +383,10 @@ DEFAULT_DATA = {
     "feature_priors": "feature_priors.csv",
     "date_format": None,
     "benchmark_mapping": None,
+    "vendor_contribution": None,
+    "pillar_spend": None,
+    "dv_aggregation": "mean",
+    "pre_model_dir": None,
 }
 
 HEADER = """\
@@ -483,8 +511,12 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     Cross-validation runs afterwards only when `cv.enabled` is true - it is a
     full refit per fold, so it is opt-in rather than part of every run.
     """
-    from run_pipeline import run
-    from warnings_report import collect_warnings
+    from mmm.run_pipeline import run
+    from mmm.checks.warnings_report import collect_warnings
+    try:
+        from mmm.data.prior_builder import run_pre_model
+    except ImportError:            # optional - the run works without it
+        run_pre_model = None
 
     # Loading the settings resolves every feature spec, which is where the
     # per-feature prior warnings come from. Capture them here so they reach
@@ -499,15 +531,33 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
         raise ValueError(
             f"{path}: no features. Set data.feature_priors to the prior CSV.")
     panel = load_panel(settings) if df is None else df
+
+    # PRE-MODEL: if the client gave us a vendor decomposition or a pillar/spend
+    # file, turn it into a sample prior file (plus the working) before fitting.
+    # It never overwrites `data.feature_priors` - you review it and point at it
+    # yourself, because a generated prior is a proposal, not a decision.
+    if run_pre_model is not None and (settings.data.get("vendor_contribution")
+                                      or settings.data.get("pillar_spend")):
+        with collect_warnings() as _pre:
+            result_pre = run_pre_model(settings, df=panel)
+        caught += list(_pre)
+    else:
+        result_pre = {}
+
     result = run(panel, settings.model, settings.run, settings.sampler,
                  save_trace=save_trace, out_cfg=settings.output,
                  cv_cfg=settings.cv, extra_warnings=caught,
                  assumption_cfg=settings.assumptions,
-                 benchmark_mapping=settings.data.get("benchmark_mapping"))
+                 benchmark_mapping=settings.data.get("benchmark_mapping"),
+                 benchmark_contribution=(
+                     result_pre.get("benchmark_contribution")
+                     or settings.data.get("vendor_contribution")))
     if record_settings:
         dump_settings(settings, os.path.join(result["output_dir"], "01_data",
                                              "resolved_config.yaml"))
     result["settings"] = settings
+    if result_pre:
+        result["pre_model"] = result_pre
     return result
 
 

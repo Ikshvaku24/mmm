@@ -15,8 +15,8 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
-from compat import get_group, has_group
-from plotting import annotate, figsize, save_fig, units_note
+from mmm.core.compat import get_group, has_group
+from mmm.reporting.plotting import annotate, figsize, save_fig, units_note
 
 RHAT_WARN = 1.01
 RHAT_FAIL = 1.05
@@ -491,7 +491,7 @@ def _per_parameter_plots(idata, outdir, out_cfg, skip_prefixes=()) -> int:
         for lab, pr, po in slices:
             pairs.append((f"{name}[{lab}]" if lab else name, pr, po, role, logged))
     try:
-        from prior_plots import write_prior_posterior_plots
+        from mmm.reporting.prior_plots import write_prior_posterior_plots
         return write_prior_posterior_plots(
             pairs, os.path.join(outdir, "prior_posterior"), cap)
     except Exception as e:  # noqa: BLE001 - a plot must never kill a fit

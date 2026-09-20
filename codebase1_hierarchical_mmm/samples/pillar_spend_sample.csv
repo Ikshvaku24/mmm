@@ -1,0 +1,9 @@
+pillar,feature,feature_spend,pillar_share_pct
+TV & DTV,media__tv_core_grps,1800000,6.0
+TV & DTV,media__tv_halo_grps,600000,6.0
+Online Media,media__digital-social_hero_impressions,900000,4.5
+Online Media,media__digital-display_hero_impressions,450000,4.5
+Online Media,media__ecommerce-search_clicks,250000,4.5
+Expert,btl_expert-calls_premium,300000,2.0
+Baseline,tdp,,62.0
+Baseline,avp,,62.0

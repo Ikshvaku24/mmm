@@ -17,8 +17,8 @@ fold; for quick sweeps use SamplerConfig(sampler="advi") (PE convention: ADVI
 for CV speed, NUTS for the final fit) or CVConfig(draws=..., tune=...).
 
 Usage:
-    from config import CVConfig, ModelConfig, OutputConfig, RunConfig, SamplerConfig
-    from cross_validation import run_cv
+    from mmm.core.config import CVConfig, ModelConfig, OutputConfig, RunConfig, SamplerConfig
+    from mmm.checks.cross_validation import run_cv
 
     # WEEKLY (104 weeks): the preset gives horizon 13, 5 folds, min_train 52
     cv = run_cv(df, model_cfg,
@@ -68,15 +68,15 @@ import matplotlib.pyplot as plt  # noqa: E402
 import numpy as np
 import pandas as pd
 
-from config import (CVConfig, ModelConfig, OutputConfig, RunConfig,
+from mmm.core.config import (CVConfig, ModelConfig, OutputConfig, RunConfig,
                     SamplerConfig, resolve_period_plan)
-from data_prep import make_folds, prepare_data
-from diagnostics import quick_convergence_checks
-from fit import fit
-from model import build_model
-from outputs import (beta_draws_by_feature, compute_decomposition,
+from mmm.data.data_prep import make_folds, prepare_data
+from mmm.checks.diagnostics import quick_convergence_checks
+from mmm.modelling.fit import fit
+from mmm.modelling.model import build_model
+from mmm.reporting.outputs import (beta_draws_by_feature, compute_decomposition,
                      compute_fit_metrics, stack_posterior)
-from plotting import (annotate, figsize, save_fig, set_figure_defaults,
+from mmm.reporting.plotting import (annotate, figsize, save_fig, set_figure_defaults,
                       units_note)
 
 

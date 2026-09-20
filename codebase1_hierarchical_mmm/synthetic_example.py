@@ -15,8 +15,8 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from config import FeatureSpec, ModelConfig, RunConfig, SamplerConfig
-from run_pipeline import run
+from mmm.core.config import FeatureSpec, ModelConfig, RunConfig, SamplerConfig
+from mmm.run_pipeline import run
 
 RNG = np.random.default_rng(7)
 

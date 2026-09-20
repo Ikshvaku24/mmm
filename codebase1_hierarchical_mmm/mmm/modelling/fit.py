@@ -26,7 +26,7 @@ import time
 
 import pymc as pm
 
-from config import SamplerConfig
+from mmm.core.config import SamplerConfig
 
 _MANIFEST_PACKAGES = ("pymc", "pytensor", "arviz", "numpy", "pandas",
                       "xarray", "jax", "numpyro")

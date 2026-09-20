@@ -53,8 +53,8 @@ import sys
 
 import pandas as pd
 
-from settings import load_panel, load_settings, run_from_yaml
-from warnings_report import collect_warnings
+from mmm.core.settings import load_panel, load_settings, run_from_yaml
+from mmm.checks.warnings_report import collect_warnings
 
 CONFIG = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
 

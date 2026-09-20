@@ -14,9 +14,9 @@ chain those optional files evidence.
 Typical use (e.g. from a Databricks notebook):
 
     import pandas as pd
-    from config import (ModelConfig, OutputConfig, RunConfig, SamplerConfig,
+    from mmm.core.config import (ModelConfig, OutputConfig, RunConfig, SamplerConfig,
                         load_feature_config)
-    from run_pipeline import run
+    from mmm.run_pipeline import run
 
     df = pd.read_excel(".../input_datacube.xlsx")          # date, region, dv, features
     features = load_feature_config(".../feature_priors.csv")
@@ -33,20 +33,20 @@ import warnings
 
 import pandas as pd
 
-from compat import extend_idata, save_idata
-from config import (INTERCEPT_PARAMS, AssumptionConfig, CVConfig,
+from mmm.core.compat import extend_idata, save_idata
+from mmm.core.config import (INTERCEPT_PARAMS, AssumptionConfig, CVConfig,
                     ModelConfig, OutputConfig, RunConfig, SamplerConfig)
-from data_prep import prepare_data, write_data_stage_outputs
-from diagnostics import (convergence_report, enforce_convergence,
+from mmm.data.data_prep import prepare_data, write_data_stage_outputs
+from mmm.checks.diagnostics import (convergence_report, enforce_convergence,
                          prior_posterior_report, quick_convergence_checks)
-from fit import fit, sample_prior
-from model import build_model
-from assumptions import write_assumptions, write_collinearity
-from outputs import (beta_draws_by_feature, coefficient_report,
+from mmm.modelling.fit import fit, sample_prior
+from mmm.modelling.model import build_model
+from mmm.checks.assumptions import write_assumptions, write_collinearity
+from mmm.reporting.outputs import (beta_draws_by_feature, coefficient_report,
                      compute_decomposition, contribution_report, fit_report,
                      prior_predictive_plot, stack_posterior)
-from plotting import set_figure_defaults
-from warnings_report import (collect_warnings, print_warning_summary,
+from mmm.reporting.plotting import set_figure_defaults
+from mmm.checks.warnings_report import (collect_warnings, print_warning_summary,
                              write_warning_docs)
 
 
@@ -59,7 +59,8 @@ def run(df: pd.DataFrame,
         cv_cfg: CVConfig | None = None,
         extra_warnings: list | None = None,
         assumption_cfg: AssumptionConfig | None = None,
-        benchmark_mapping: str | None = None):
+        benchmark_mapping: str | None = None,
+        benchmark_contribution: str | None = None):
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
@@ -97,7 +98,7 @@ def run(df: pd.DataFrame,
 
         result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
                              dirs, root, save_trace, assumption_cfg,
-                             benchmark_mapping)
+                             benchmark_mapping, benchmark_contribution)
 
     # Warnings raised while the CONFIG was being read happen before this
     # function is reached (load_feature_config runs in the caller), so the
@@ -111,7 +112,7 @@ def run(df: pd.DataFrame,
     # cross-validation is opt-in: it is a full refit per fold, so it can cost
     # more than the headline run. cv.enabled=false leaves the folder absent.
     if cv_cfg is not None and cv_cfg.enabled:
-        from cross_validation import run_cv
+        from mmm.checks.cross_validation import run_cv
         print("[6/6] cross-validation")
         result["cv"] = run_cv(df, model_cfg, run_cfg, sampler_cfg, cv_cfg, out_cfg)
 
@@ -120,7 +121,8 @@ def run(df: pd.DataFrame,
 
 
 def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
-                save_trace, assumption_cfg=None, benchmark_mapping=None):
+                save_trace, assumption_cfg=None, benchmark_mapping=None,
+                benchmark_contribution=None):
     """The five reporting stages. Split out so `run` can wrap them all in one
     warning-capture block without indenting the whole body twice."""
     print("[1/5] preparing data")
@@ -165,6 +167,7 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     # coefficient beside the volume it produces, without re-stacking the trace
     contrib = contribution_report(decomp, pdata, dirs["05_contributions"],
                                   benchmark_mapping=benchmark_mapping,
+                                  benchmark_contribution=benchmark_contribution,
                                   out_cfg=out_cfg, coef=coef)
 
     if save_trace:

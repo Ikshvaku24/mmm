@@ -459,9 +459,44 @@ def _write_xlsx(table: pd.DataFrame, outdir: str) -> str:
     return path
 
 
+def prefill_benchmark(table: pd.DataFrame, contrib_path: str) -> pd.DataFrame:
+    """Fill column E from a vendor contribution file, so nobody pastes by hand.
+
+    The pre-model step writes `benchmark_contribution.csv` in a canonical
+    shape; when it exists the sheet arrives already populated and the formulas
+    are live on open. Anything the file does not cover is left blank to paste.
+    """
+    if not contrib_path or not os.path.exists(contrib_path):
+        return table
+    src = pd.read_csv(contrib_path) if str(contrib_path).lower().endswith(".csv") \
+        else pd.read_excel(contrib_path)
+    f = _sniff(src.columns, MAPPING_FEATURE_HINTS)
+    r = _sniff(src.columns, ("region", "retailer", "account", "market", "geo"),
+               exclude={f})
+    v = _sniff(src.columns, ("contribution", "benchmark", "volume", "value"),
+               exclude={f, r})
+    if f is None or v is None:
+        return table
+    src = src.assign(_f=src[f].astype(str).str.strip(),
+                     _r=(src[r].astype(str).str.strip() if r else "__all__"),
+                     _v=pd.to_numeric(src[v], errors="coerce"))
+    by_fr = src.groupby(["_f", "_r"])["_v"].sum().to_dict()
+    by_f = src.groupby("_f")["_v"].sum().to_dict()
+    out = table.copy()
+    vals = []
+    for _, row in out.iterrows():
+        key = (str(row["feature"]), str(row["region"]))
+        vals.append(by_fr.get(key, by_f.get(str(row["feature"]), np.nan)))
+    out[FILL_COL] = vals
+    n = int(pd.Series(vals).notna().sum())
+    print(f"[benchmark] pre-filled {n}/{len(out)} rows from {contrib_path}")
+    return out
+
+
 def write_benchmark_comparison(decomp, pdata, outdir: str,
                                math_df=None, run_root: str = None,
-                               mapping_path: str = None) -> str:
+                               mapping_path: str = None,
+                               contrib_path: str = None) -> str:
     """Called by the pipeline: assemble and write the sheet."""
     mapping = load_mapping(mapping_path) if mapping_path else {}
     contraction_df = prior_df = None
@@ -476,6 +511,7 @@ def write_benchmark_comparison(decomp, pdata, outdir: str,
     table = build_table(decomp, pdata, math_df=math_df,
                         contraction_df=contraction_df, prior_df=prior_df,
                         mapping=mapping)
+    table = prefill_benchmark(table, contrib_path)
     path = write_benchmark_sheet(table, outdir)
     print(f"[benchmark] paste the benchmark into column "
           f"{_letters()[FILL_COL]} of {os.path.basename(path)} "

@@ -58,7 +58,9 @@ Scale conventions (important for choosing priors):
     So "20% uncertainty" is prior_sd ~ 0.2, NOT 0.2 * m. Passing 0.2*m makes
     prior_sd tiny, which pins the coefficient and leaves the data no say - see
     the warning raised below when prior_sd < 0.05.
-  - `center=True` keeps the sign constraint but scales the feature like a control
+  - `center_mode="mean"` keeps the sign constraint but scales the feature
+    like a control (centre + sd), which is what an always-on LEVEL variable
+    needs - see when_center_is_not_1.md
     (centre + scale). Use it for ALWAYS-ON LEVEL variables - distribution points,
     price indices, ACV measures. Media-style scale-only scaling leaves such a
     variable at ~1.0 every week, which is collinear with the region intercept:
@@ -67,6 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
+import math
 import warnings
 from dataclasses import dataclass, field
 
@@ -104,50 +107,89 @@ VALID_CADENCE = ("auto", "weekly", "monthly")
 INTERCEPT_PARAMS = ("mu_alpha", "tau_alpha", "z_alpha", "alpha_region")
 
 
+# A YEAR is always 52 weeks or 12 months. Everything else scales with how much
+# data there is.
+PERIODS_PER_YEAR = {"weekly": 52, "monthly": 12}
+CADENCE_UNIT = {"weekly": "weeks", "monthly": "months"}
+
+
+@dataclass(frozen=True)
+class PeriodPolicy:
+    """How the period counts scale with the LENGTH of the panel.
+
+    The old design hard-coded "13 weeks holdout, 52-week MAT, 5 folds", which is
+    right for a 2-year weekly panel and wrong for every other shape: on 4 years
+    a 13-week holdout is 6% of the data rather than 12.5%, and only two MAT
+    blocks would be reported out of four available years.
+
+    So the presets are now FRACTIONS of the panel, and the defaults reproduce
+    the historic numbers exactly on the 2-year panels both projects used:
+
+        weekly  104 periods   holdout 0.125 * 104 = 13     min_train 0.5 -> 52
+        monthly  24 periods   holdout 0.125 *  24 =  3     min_train 0.5 -> 12
+
+    and scale the way you would expect on anything else:
+
+        weekly  208 periods (4 yr)   holdout 26   min_train 104   MAT 1..4
+        monthly  48 periods (4 yr)   holdout  6   min_train  12   MAT 1..4
+
+    Absolute overrides still win - see `RunConfig.holdout_periods` and the
+    `CVConfig` counts. Set a fraction when you want it to follow the data; set
+    an integer when the business has fixed the window.
+    """
+    holdout_frac: float = 0.125        # 13/104 and 3/24 - one quarter of a 2yr panel
+    cv_horizon_frac: float = 0.125     # a fold tests the same span as the holdout
+    cv_min_train_frac: float = 0.5     # never fit on less than half the panel...
+    cv_min_train_min_years: float = 1.0  # ...and never on less than one year
+    cv_n_folds: int = 5
+    cv_short_panel_draws: int | None = 500   # applied when the panel is short
+    cv_short_panel_periods: int = 36         # "short" = fewer than this many
+
+    def __post_init__(self):
+        for name in ("holdout_frac", "cv_horizon_frac", "cv_min_train_frac"):
+            v = getattr(self, name)
+            if not 0.0 < v < 1.0:
+                raise ValueError(f"{name} must be strictly between 0 and 1, "
+                                 f"got {v}")
+        if self.cv_n_folds < 1:
+            raise ValueError("cv_n_folds must be >= 1")
+        if self.cv_min_train_min_years <= 0:
+            raise ValueError("cv_min_train_min_years must be > 0")
+
+
+DEFAULT_PERIOD_POLICY = PeriodPolicy()
+
+
 @dataclass(frozen=True)
 class PeriodPlan:
-    """Every period-count the pipeline needs, derived from the data cadence.
+    """Every period count the pipeline needs, RESOLVED against this panel.
 
-    The same model is run on two shapes of panel and each one has its own idea
-    of "a year", "a sensible holdout" and "a CV fold":
-
-        weekly    104 periods = 2 years   91 train / 13 test   MAT = 52 + 52
-        monthly    24 periods = 2 years   21 train /  3 test   MAT = 12 + 12
-
-    Hard-coding 13 and 52 works for the retailer panel and silently produces
-    nonsense on the monthly one - a 13-MONTH holdout out of 24 is over half the
-    data, and a 52-month MAT window does not exist. Set `cadence` once and every
-    downstream number follows.
+    Unlike the old fixed presets this carries `n_periods`, because almost every
+    number below is a fraction of it. A year is still exactly 52 weeks or 12
+    months - that never scales - but how many years you have decides how many
+    MAT blocks are reported, how long the holdout is and how the CV folds are
+    laid out.
     """
     cadence: str                  # "weekly" | "monthly"
-    periods_per_year: int         # 52 | 12
+    periods_per_year: int         # 52 | 12 - fixed, a year is a year
     unit: str                     # "weeks" | "months"
-    holdout_periods: int          # RunConfig  - 13 | 3  (one quarter)
-    mat_periods: int              # OutputConfig - the MAT block length
-    cv_horizon: int               # CVConfig   - 13 | 3
-    cv_min_train_periods: int     # CVConfig   - one year = 50% of a 2-yr panel
-    cv_n_folds: int               # CVConfig   - fewer folds when periods are scarce
-    cv_draws: int | None          # CVConfig   - None = leave the sampler alone
+    n_periods: int                # how long this panel actually is
+    n_years: float                # n_periods / periods_per_year
+    mat_periods: int              # one MAT block = one year
+    n_mat_blocks: int             # how many whole years fit (>= 1)
+    holdout_periods: int
+    cv_horizon: int
+    cv_min_train_periods: int
+    cv_n_folds: int
+    cv_draws: int | None
     cv_tune: int | None
 
-
-PERIOD_PRESETS = {
-    "weekly": PeriodPlan(
-        cadence="weekly", periods_per_year=52, unit="weeks",
-        holdout_periods=13,          # one quarter
-        mat_periods=52,
-        cv_horizon=13, cv_min_train_periods=52, cv_n_folds=5,
-        cv_draws=None, cv_tune=None),   # matches the historic defaults exactly
-    "monthly": PeriodPlan(
-        cadence="monthly", periods_per_year=12, unit="months",
-        holdout_periods=3,           # one quarter
-        mat_periods=12,
-        cv_horizon=3, cv_min_train_periods=12, cv_n_folds=3,
-        # 24 months with horizon=3 and min_train=12 admits at most 4 folds, and
-        # each fold is a full refit on 21 rows per region - cheap to sample but
-        # there is little for NUTS to learn, so shorter chains are plenty.
-        cv_draws=500, cv_tune=500),
-}
+    def describe(self) -> str:
+        return (f"{self.cadence} ({self.periods_per_year}/yr): "
+                f"{self.n_periods} {self.unit} = {self.n_years:.2f} years, "
+                f"MAT 1..{self.n_mat_blocks}, holdout {self.holdout_periods}, "
+                f"CV horizon {self.cv_horizon} / min train "
+                f"{self.cv_min_train_periods} / {self.cv_n_folds} folds")
 
 
 def infer_cadence(dates) -> str:
@@ -171,8 +213,21 @@ def infer_cadence(dates) -> str:
     return "monthly"
 
 
-def resolve_period_plan(cadence: str = "auto", dates=None) -> PeriodPlan:
-    """cadence + (optionally) the data -> the full set of period counts."""
+def n_unique_periods(dates) -> int:
+    return int(pd.Series(pd.to_datetime(pd.Series(np.asarray(dates)))).nunique())
+
+
+def resolve_period_plan(cadence: str = "auto", dates=None,
+                        n_periods: int | None = None,
+                        policy: PeriodPolicy | None = None) -> PeriodPlan:
+    """cadence + panel length -> every period count.
+
+    `n_periods` may be given directly (useful in tests and when the dates have
+    already been counted); otherwise it is counted from `dates`. When neither is
+    available the plan falls back to a 2-year panel, which is what every preset
+    was hard-coded to before this became fluid.
+    """
+    pol = policy or DEFAULT_PERIOD_POLICY
     c = str(cadence or "auto").strip().lower()
     if c not in VALID_CADENCE:
         raise ValueError(f"cadence must be one of {VALID_CADENCE}, got {cadence!r}")
@@ -182,7 +237,68 @@ def resolve_period_plan(cadence: str = "auto", dates=None) -> PeriodPlan:
                 "cadence='auto' needs the dates to infer from. Pass dates=, or "
                 "set cadence='weekly'/'monthly' explicitly.")
         c = infer_cadence(dates)
-    return PERIOD_PRESETS[c]
+
+    ppy = PERIODS_PER_YEAR[c]
+    if n_periods is None:
+        n_periods = n_unique_periods(dates) if dates is not None else 2 * ppy
+    n_periods = max(1, int(n_periods))
+    n_years = n_periods / ppy
+
+    # MAT: one block per WHOLE year, oldest first. 2 years -> MAT 1, MAT 2 (the
+    # historic behaviour); 4 years -> MAT 1..MAT 4; anything left over at the
+    # front becomes "Pre-MAT" so no block is an unequal window.
+    n_mat_blocks = max(1, int(n_periods // ppy))
+
+    holdout = _at_least_one(pol.holdout_frac * n_periods)
+    cv_horizon = _at_least_one(pol.cv_horizon_frac * n_periods)
+    cv_min_train = _at_least_one(max(pol.cv_min_train_frac * n_periods,
+                                     pol.cv_min_train_min_years * ppy))
+    # never ask for a training window that leaves no room for a single fold
+    cv_min_train = min(cv_min_train, max(1, n_periods - cv_horizon))
+
+    short = n_periods < pol.cv_short_panel_periods
+    return PeriodPlan(
+        cadence=c, periods_per_year=ppy, unit=CADENCE_UNIT[c],
+        n_periods=n_periods, n_years=n_years,
+        mat_periods=ppy, n_mat_blocks=n_mat_blocks,
+        holdout_periods=holdout,
+        cv_horizon=cv_horizon,
+        cv_min_train_periods=cv_min_train,
+        cv_n_folds=pol.cv_n_folds,
+        cv_draws=pol.cv_short_panel_draws if short else None,
+        cv_tune=pol.cv_short_panel_draws if short else None,
+    )
+
+
+def _at_least_one(x: float) -> int:
+    """Round HALF-UP, never below 1.
+
+    `round()` is banker's rounding: round(32.5) is 32, not 33. For a holdout
+    that is a surprising place to lose a period, and it makes "12.5% of 260"
+    impossible to verify by hand.
+    """
+    return max(1, int(math.floor(float(x) + 0.5)))
+
+
+def resolve_count(absolute, fraction, n_periods: int, label: str) -> int | None:
+    """Absolute wins, then fraction, then None (= take the preset).
+
+    The three-way precedence is the whole point of the fluid design: a business
+    that has fixed "13 weeks, always" writes the integer; anybody else writes a
+    fraction, or nothing and gets the policy default.
+    """
+    if absolute is not None:
+        a = int(absolute)
+        if a < 0:
+            raise ValueError(f"{label} must be >= 0, got {a}")
+        return a
+    if fraction is not None:
+        f = float(fraction)
+        if not 0.0 < f < 1.0:
+            raise ValueError(
+                f"{label}_fraction must be strictly between 0 and 1, got {f}")
+        return _at_least_one(f * n_periods)
+    return None
 
 
 VALID_SD_BASIS = ("log", "relative", "absolute")
@@ -311,14 +427,6 @@ class FeatureSpec:
     prior_mean: float | None = None    # population prior location (magnitude if signed)
     prior_sd: float | None = None      # population prior sd (log-scale if signed)
     regional_sd: float | None = None   # prior scale of cross-region heterogeneity
-    center: bool = False               # DEPRECATED - use `center_mode` instead.
-                                       # Kept only so prior files written before
-                                       # center_mode existed still load: a 1 here
-                                       # maps to center_mode="mean" and warns.
-                                       # Two columns meaning the same thing is
-                                       # how `center=1` silently became a no-op
-                                       # in v7, when an explicit center_mode
-                                       # column won and overwrote it.
     pooling: str | None = None         # "hierarchical" | "independent" | "global"
     baseline: bool = False             # fold into the BASELINE instead of reporting
                                        # as an incremental effect (always-on business
@@ -342,9 +450,15 @@ class FeatureSpec:
     pillar: str = ""                   # reporting group ("Online Media", "TV & DTV",
                                        # "Expert", ...) - contributions are rolled up
                                        # by pillar in 05_contributions
-    center_mode: str | None = None     # "none" | "mean". Explicit override of the
-                                       # `center` flag. None = derive from `center`
-                                       # (and from sign="free", always centred).
+    center_mode: str | None = None     # "none" | "mean" - the ONLY centring
+                                       # setting. None = "mean" for sign="free"
+                                       # (always centred), else "none".
+                                       # REQUIRED as "mean" for always-on LEVEL
+                                       # variables (distribution, price index,
+                                       # ACV): without it they scale to ~1.0
+                                       # every period and duplicate the region
+                                       # intercept. Pair with
+                                       # contribution_reference="zero".
     prior_sd_basis: str = "log"        # how to READ prior_sd / regional_sd:
                                        # "log" (as-is), "relative" (a fraction,
                                        # 0.2 = +/-20%), "absolute" (coefficient
@@ -391,28 +505,16 @@ class FeatureSpec:
                 )
                 s.prior_mean = 0.05
             s.prior_sd = 1.0 if s.prior_sd is None else float(s.prior_sd)
-        # `center_mode` is the only setting. `center` is accepted for old files
-        # and translated here, with a warning when both are present, because a
-        # silent disagreement between them is exactly the v7 failure: an
-        # explicit center_mode won and the center=1 the analyst had set did
-        # nothing at all.
-        legacy = bool(s.center)
+        # `center_mode` is the ONLY centring setting. The old 0/1 `center`
+        # column is gone: two columns meaning the same thing is how a center=1
+        # silently became a no-op in v7, when an explicit center_mode won and
+        # overwrote it. A `free` feature is always centred - the sign
+        # constraint is what made uncentred scaling meaningful in the first
+        # place, and there is none.
         if s.center_mode is None:
-            s.center_mode = "mean" if (legacy or s.sign == "free") else "none"
-            if legacy:
-                warnings.warn(
-                    f"{s.name}: `center` is deprecated - it has been read as "
-                    "center_mode='mean'. Replace the `center` column with "
-                    "`center_mode` in the prior file; keeping both is how a "
-                    "center=1 silently becomes a no-op.")
+            s.center_mode = "mean" if s.sign == "free" else "none"
         else:
             s.center_mode = str(s.center_mode).strip().lower()
-            if legacy and s.center_mode != "mean":
-                warnings.warn(
-                    f"{s.name}: the prior file sets BOTH center=1 and "
-                    f"center_mode={s.center_mode!r}. center_mode wins, so "
-                    "center=1 does nothing here. Delete the `center` column.")
-        s.center = s.center_mode == "mean"     # keep the alias consistent
         if s.center_mode not in VALID_CENTER:
             raise ValueError(
                 f"{s.name}: center_mode must be one of {VALID_CENTER}, "
@@ -425,9 +527,6 @@ class FeatureSpec:
             raise ValueError(
                 f"{s.name}: scale_mode must be one of {VALID_SCALE}, "
                 f"got {s.scale_mode!r}. " + SCALE_HELP)
-        # keep the legacy flag consistent with the explicit mode - everything
-        # downstream (contribution reference, support flags) keys off it
-        s.center = s.center_mode == "mean"
         s.baseline = bool(s.baseline)
         s.pillar = "" if s.pillar is None else str(s.pillar).strip()
         ref = s.contribution_reference
@@ -607,8 +706,8 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
                (distribution, price index, ACV) so they are centred rather than
                only scaled. Pair it with contribution_reference="zero" or the
                reported contribution collapses to ~0.
-               (A legacy `center` 0/1 column is still read and mapped to this,
-               with a deprecation warning. Do not write both.)
+               The old 0/1 `center` column has been REMOVED; a file that
+               still contains it is rejected with instructions.
       pooling  "hierarchical" | "independent" | "global". Defaults to
                hierarchical/global from the `hierarchical` column.
       baseline (0/1) 1 to fold the feature into the baseline instead of
@@ -637,6 +736,12 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
     df = pd.read_csv(path)
     if "variable" not in df.columns:
         raise ValueError(f"{path}: missing required column 'variable'")
+    if "center" in df.columns:
+        raise ValueError(
+            f"{path}: the `center` column has been removed - use `center_mode` "
+            "(\"none\" | \"mean\") instead. Two columns meaning the same thing "
+            "is how a center=1 silently became a no-op. Rename the column and "
+            "map 1 -> \"mean\", 0 -> \"none\".")
 
     base_rows, region_rows = [], []
     for _, r in df.iterrows():
@@ -648,7 +753,6 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
         if name in by_name:
             raise ValueError(f"{path}: duplicate feature-level row for {name!r}")
         hier = _cell(r, "hierarchical")
-        center = _cell(r, "center")
         baseline = _cell(r, "baseline")
         pooling = _cell(r, "pooling")
         spec = FeatureSpec(
@@ -658,7 +762,6 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             prior_mean=_cell(r, "global_prior_mean"),
             prior_sd=_cell(r, "global_prior_sd"),
             regional_sd=_cell(r, "regional_sd_prior"),
-            center=False if center is None else bool(int(center)),
             pooling=None if pooling is None else str(pooling).strip().lower(),
             baseline=False if baseline is None else bool(int(baseline)),
             contribution_reference=_cell(r, "contribution_reference") or "auto",
@@ -813,10 +916,15 @@ class RunConfig:
                                 # period count downstream. "auto" infers it from
                                 # the observed date spacing in prepare_data.
     holdout_periods: int | None = 0     # last N dates held out per region for OOS
-                                # metrics. None = take it from the cadence preset
-                                # (13 weeks / 3 months - one quarter either way).
-                                # The default stays 0 so existing callers are
-                                # untouched.
+                                # metrics, as an ABSOLUTE count. None = take it
+                                # from `holdout_fraction` / the cadence policy,
+                                # which scales with the panel: 12.5% is 13 weeks
+                                # on 2 years and 26 on 4. The default stays 0 so
+                                # existing callers are untouched.
+    holdout_fraction: float | None = None   # holdout as a FRACTION of the panel.
+                                # Ignored when holdout_periods is an integer.
+                                # Use it when the window should follow the data
+                                # rather than being fixed by the business.
     report_draws: int = 400             # posterior draws used for decomposition/plots
     on_convergence_failure: str = "warn"  # "warn" | "fail" - PE-style guardrail:
                                           # "fail" raises instead of silently
@@ -837,7 +945,7 @@ class RunConfig:
     near_constant_sd: float = 0.1         # warn when an always-on scale-only feature
                                           # has scaled sd below this: it is ~constant
                                           # at 1.0 and therefore collinear with the
-                                          # region intercept (use center=1 instead)
+                                          # region intercept (use center_mode=mean)
 
     def __post_init__(self):
         if self.dv_center not in VALID_CENTER:
@@ -851,8 +959,18 @@ class RunConfig:
             raise ValueError(f"cadence must be one of {VALID_CADENCE}, "
                              f"got {self.cadence!r}")
         if self.holdout_periods is not None and self.holdout_periods < 0:
-            raise ValueError("holdout_periods must be >= 0 (or None for the "
-                             "cadence preset)")
+            raise ValueError("holdout_periods must be >= 0 (or None to take it "
+                             "from holdout_fraction / the cadence policy)")
+        if self.holdout_fraction is not None:
+            if not 0.0 < float(self.holdout_fraction) < 1.0:
+                raise ValueError("holdout_fraction must be strictly between 0 "
+                                 f"and 1, got {self.holdout_fraction}")
+            if self.holdout_periods not in (None, 0):
+                warnings.warn(
+                    f"holdout_periods={self.holdout_periods} and "
+                    f"holdout_fraction={self.holdout_fraction} are both set. "
+                    "The absolute count wins; the fraction is ignored. Set "
+                    "holdout_periods=None to use the fraction.")
         if self.on_convergence_failure not in {"warn", "fail"}:
             raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
         if self.zero_threshold_rel < 0:
@@ -1099,21 +1217,26 @@ class CVConfig:
     `horizon` periods; origins step back through the series so accuracy and
     coefficient stability are measured across several windows, not one.
 
-    Every count defaults to None, meaning "take it from the cadence preset".
-    For a WEEKLY panel the preset reproduces the historic hard-coded defaults
-    exactly (13 / 5 / 52), so nothing moves; a MONTHLY panel gets 3 / 3 / 12
-    plus shorter chains, because 24 months cannot support a 13-period horizon
-    or a 52-period minimum training window.
+    Every count defaults to None, meaning "derive it". The precedence is:
+
+        absolute integer  >  *_fraction  >  the cadence policy
+
+    and the policy scales with the panel, so a 2-year weekly panel still gets
+    the historic 13 / 52, and a 4-year one gets 26 / 104 without anybody
+    editing a config. A monthly panel gets 3 / 12 on two years and 6 / 24 on
+    four, plus shorter chains while the panel is short.
     """
     enabled: bool = False              # run CV at all. Off by default because
                                        # every fold is a FULL refit, so a 5-fold
                                        # CV costs ~5x the headline run. Turn it
                                        # on once the single fit looks sane.
     cadence: str = "auto"              # "auto" | "weekly" | "monthly"
-    horizon: int | None = None         # test periods per fold  (13 wk / 3 mo)
-    n_folds: int | None = None         # (5 wk / 3 mo)
+    horizon: int | None = None         # test periods per fold, ABSOLUTE
+    horizon_fraction: float | None = None   # ...or as a fraction of the panel
+    n_folds: int | None = None
     step: int | None = None            # spacing between origins (default: horizon)
-    min_train_periods: int | None = None   # (52 wk / 12 mo = one year)
+    min_train_periods: int | None = None    # shortest training window, ABSOLUTE
+    min_train_fraction: float | None = None  # ...or as a fraction of the panel
     draws: int | None = None           # override sampler draws for CV speed
     tune: int | None = None
     make_plots: bool = True
@@ -1123,18 +1246,33 @@ class CVConfig:
         if self.cadence not in VALID_CADENCE:
             raise ValueError(f"cadence must be one of {VALID_CADENCE}, "
                              f"got {self.cadence!r}")
+        for name in ("horizon_fraction", "min_train_fraction"):
+            v = getattr(self, name)
+            if v is not None and not 0.0 < float(v) < 1.0:
+                raise ValueError(f"cv.{name} must be strictly between 0 and 1, "
+                                 f"got {v}")
 
     def resolved(self, plan: "PeriodPlan") -> "CVConfig":
-        """Fill every unset count from the cadence preset. Explicit wins."""
+        """Fill every unset count. Absolute wins, then fraction, then the policy.
+
+        The plan already carries the policy-derived numbers scaled to THIS
+        panel, so a 4-year panel gets a 26-week horizon without anybody editing
+        a config.
+        """
         from dataclasses import replace as _replace
+        n = plan.n_periods
+        horizon = resolve_count(self.horizon, self.horizon_fraction, n,
+                                "cv.horizon")
+        min_train = resolve_count(self.min_train_periods,
+                                  self.min_train_fraction, n,
+                                  "cv.min_train_periods")
         return _replace(
             self,
             cadence=plan.cadence,
-            horizon=plan.cv_horizon if self.horizon is None else self.horizon,
+            horizon=plan.cv_horizon if horizon is None else horizon,
             n_folds=plan.cv_n_folds if self.n_folds is None else self.n_folds,
-            min_train_periods=(plan.cv_min_train_periods
-                               if self.min_train_periods is None
-                               else self.min_train_periods),
+            min_train_periods=(plan.cv_min_train_periods if min_train is None
+                               else min_train),
             draws=plan.cv_draws if self.draws is None else self.draws,
             tune=plan.cv_tune if self.tune is None else self.tune,
         )

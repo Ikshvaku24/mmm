@@ -26,12 +26,12 @@ when you say nothing. Omit any key and that default applies; a **misspelled key
 is an error**, not a silent default.
 
 ```python
-from settings import run_from_yaml
+from mmm.core.settings import run_from_yaml
 result = run_from_yaml("config.yaml")
 ```
 
 Regenerate it after upgrading the codebase with
-`python settings.py --write config.yaml`. Each run also drops its **effective**
+`python -m mmm.core.settings --write config.yaml`. Each run also drops its **effective**
 settings — every default filled in — at
 `outputs/<run_name>/01_data/resolved_config.yaml`, which is the record of what
 actually ran.
@@ -561,6 +561,6 @@ beta_g              = mu + tau·z_g                — hierarchical
 | change the counterfactual | `contribution_reference` |
 | change the units | `dv_scale`, `scale_mode` |
 
-**Related:** `METHODOLOGY.md` (how to build the model in the first place) · `MERIDIAN_ASSUMPTIONS.md` · `config.yaml` (every setting + its default) · `OUTPUTS_GUIDE.md` (every file and column) ·
+**Related:** `METHODOLOGY.md` (how to build the model in the first place) · `FEATURE_PRIOR_GUIDE.md` (the prior CSV, and how to generate it) · `PROJECT_STRUCTURE.md` · `MERIDIAN_ASSUMPTIONS.md` · `config.yaml` (every setting + its default) · `OUTPUTS_GUIDE.md` (every file and column) ·
 `docs/understanding_prior_sd_conversion.md` · `docs/when_cneter_is_not_1.md` ·
 `../CLAUDE.md` (run history and decisions already made)

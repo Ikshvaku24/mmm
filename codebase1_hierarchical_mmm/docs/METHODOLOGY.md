@@ -166,7 +166,7 @@ is to let stage 1–3 tell you what the data supports before you impose anything
 | Level | What you know | Setting |
 |---|---|---|
 | 0 | Direction only | `sign_constraint=positive`, `global_prior_sd=0.7` (≈ a factor of 2) |
-| 1 | Rough magnitude from spend share | `global_prior_mean` from the spend heuristic below, `prior_sd=0.5` |
+| 1 | Rough magnitude from spend share | `global_prior_mean` from the spend heuristic below, `prior_sd=0.5`. **`mmm/data/prior_builder.py` computes it for you** |
 | 2 | A prior study or a category benchmark | mean from it, `prior_sd=0.3` |
 | 3 | Your own experiment (geo test, switchback) | mean from it, `prior_sd=0.1–0.2` |
 | 4 | An imposed benchmark you are reproducing | mean from it, `prior_sd=0.02`, and **say it is an assumption** |
@@ -176,6 +176,11 @@ when you can name the evidence. Never start at level 4 for a variable you
 intend to *estimate* — you cannot estimate something you have pinned.
 
 ### Setting a level-1 mean from spend
+
+> **This is automated.** Put a `pillar, feature, feature_spend,
+> pillar_share_pct` file at `data.pillar_spend` and the pre-model step does the
+> arithmetic, with a calculation workbook showing every step. See
+> `FEATURE_PRIOR_GUIDE.md` §5. The maths it applies is exactly what follows.
 
 With no benchmark, the defensible starting point is: assume marketing in total
 delivers a plausible share of sales, and split that share across channels in
