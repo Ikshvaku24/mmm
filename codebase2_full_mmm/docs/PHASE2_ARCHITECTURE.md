@@ -5,9 +5,10 @@
 >
 > **Decisions of record:** `../../CLAUDE.md` (the Phase 2 brief). **Meridian source:**
 > `../../../meridian/meridian/` (read-only). Every Meridian claim below carries a file pointer.
-> **One-page overview:** `PHASE2_ARCHITECTURE.html` in this folder.
-> **Companions:** `VARIABLE_CREATION.md` (building variables from the raw files) and
-> `EDA_CHECKS.md` (what is checked, and how it differs from codebase 1 and Meridian).
+> **One-page overview:** `Codebase_2_blueprint.html` in this folder. (`PHASE2_ARCHITECTURE.html` is an
+> HTML render of this file.)
+> **Companions:** `METHODOLOGY.md` (the order to build in), `EXPLANATION.md` (what the
+> transforms do and how they move the numbers) and `EDA_CHECKS.md` (what is checked).
 
 Written for the MMM team. Meridian's vocabulary is translated into standard MMM terms
 throughout: decay (adstock), EC50 (half-saturation), coefficients, random effects, contribution priors,
@@ -85,7 +86,8 @@ Codebase 2 has almost none of it.
     vendor's volume ±20%). It is converted into a coefficient on every draw, because the transformed
     media changes on every draw (§10).
   - Every other feature keeps codebase 1's coefficient priors.
-- **Variables are built from the raw files** by a new builder (`VARIABLE_CREATION.md`).
+- **Variables arrive already built** to the data structure. The only preparation is splitting
+  one by region or by period (`METHODOLOGY.md` §1). The earlier builder design is parked.
 - **The raw data is checked before fitting** (`EDA_CHECKS.md`).
 - **The region is a setting.** It is the retailer accounts in codebase 1's datacube, and the three
   sub-brands (Effervescent, Liquid, Tabs) in the running example the other Phase 2 documents share.
@@ -94,7 +96,7 @@ Codebase 2 has almost none of it.
 
 | Phase | What happens | Where it is designed |
 |---|---|---|
-| 1. Build variables | raw media, trade, expert and consumption rows → model datacube + variable dictionary | `VARIABLE_CREATION.md` |
+| 1. Prepare the variables | the datacube arrives built; split by region or period where needed | `METHODOLOGY.md` §1 |
 | 2. Check raw data | build checks, raw-data checks, design checks | `EDA_CHECKS.md` |
 | 3. Prepare | scaling, lag tensor, parameter bounds and lag windows | §7, §9 |
 | 4. Fit | one joint model; transforms learned in-model | §5, §8, §10 |
@@ -169,7 +171,7 @@ flowchart LR
         TR2["Transform report<br/>transform_report.py"]
         E2["EDA stage<br/>eda.py"]
         N2["NEW priors.py<br/>bounds + volume prior inversion"]
-        G2["NEW variable builder<br/>+ raw-data checks"]
+        G2["NEW raw-data checks<br/>+ transform diagnostics"]
     end
     CB1 ==>|ported into, never the reverse| CB2
     classDef keep fill:#DDF1EA,stroke:#1F8A70,color:#16202B
@@ -342,25 +344,24 @@ flowchart LR
 
 ## 4. Roadmap
 
-This is the CLAUDE.md port plan, updated for two new pieces of work: the variable builder and the raw-data
-checks.
+This is the CLAUDE.md port plan, updated for the one genuinely new piece of work: the raw-data and
+transform checks.
 
 **P0: before any real-data run**
 - Contents:
-  - variable builder, Option A, plus build checks (`VARIABLE_CREATION.md`);
+  - variable splitting by region and period, with its checks (`METHODOLOGY.md` §1);
   - raw-data and design checks (`EDA_CHECKS.md` stages B–C);
   - `resolve_scaling`, with the centring and scaling modes and `dv_scale*`;
   - prior units, plus the contribution-volume prior conversion (§10);
   - `settings.py`, `config.yaml` and the one feature table;
   - `tests_phase2/` skeleton.
 - Done when:
-  - the builder reconciles every source to 0;
+  - split pieces add back to their parent, every week and region;
   - the v1 always-on level-variable case passes;
   - a synthetic run recovers a known contribution volume.
 
 **P1: before anyone reads output**
 - Contents:
-  - variable builder, Option B: splits, value groups, hero / halo, periods;
   - `reconciliation.py`, with `contribution_math` adapted;
   - `OutputConfig`;
   - baseline / reference / pillar;
@@ -395,7 +396,7 @@ checks.
 
 ```mermaid
 flowchart LR
-    P0["P0<br/>builder A, raw checks,<br/>scaling, volume priors, config"] --> P1["P1<br/>builder B, reconciliation,<br/>outputs, warnings"]
+    P0["P0<br/>splitting, raw checks,<br/>scaling, volume priors, config"] --> P1["P1<br/>reconciliation,<br/>outputs, warnings"]
     P1 --> P2["P2<br/>benchmark, cadence,<br/>CV scorecard"]
     P2 --> P3["P3<br/>dummies, expert,<br/>optional transforms"]
     P0 -.->|first real-data fit allowed here| RUN["Real-data run"]
@@ -602,8 +603,8 @@ rather than hiding it.
 2. **National spend.**
    - National media repeats in all 5 accounts. Spend must be **allocated** across accounts (by
      sales or delivery share), not repeated.
-   - Otherwise spend totals and cost-per-unit checks are 5× too high. The builder keeps spend at
-     source level and never multiplies it by the number of regions (`VARIABLE_CREATION.md` §6.4).
+   - Otherwise spend totals and cost-per-unit checks are 5× too high. Spend is read at the level
+     the datacube delivers it and is never multiplied by the number of regions.
 
 ---
 
@@ -1145,8 +1146,7 @@ from codebase 2, amber is new.
 
 ```mermaid
 flowchart TB
-    BV["build_variables.py - NEW<br/>raw files to datacube"] --> DRV["run_real_data.py<br/>synthetic_example.py"]
-    DRV --> SET["settings.py<br/>config.yaml + feature table"]
+    DRV["run_real_data.py<br/>synthetic_example.py"] --> SET["settings.py<br/>config.yaml + feature table"]
     SET --> RUN["run_pipeline.run"]
     RUN --> EDA["eda.py<br/>raw data and design checks"]
     EDA -->|no ERROR| PREP["data_prep.py<br/>scaling, lag tensor"]
@@ -1165,7 +1165,7 @@ flowchart TB
     classDef new fill:#F8E3B8,stroke:#B7791F,color:#16202B
     classDef keep fill:#DDF1EA,stroke:#1F8A70,color:#16202B
     classDef port fill:#E8ECF0,stroke:#6B7684,color:#16202B
-    class PRI,BV new
+    class PRI new
     class EDA,MOD,TRR keep
     class SET,PRE,DIA,REC,POST,BEN,WARN,PREP,OUT,CV,RUN port
 ```
@@ -1174,7 +1174,6 @@ flowchart TB
 |---|---|---|
 | `settings.py`, `config.yaml` | port codebase 1, extend | load and validate the YAML and the one feature table; typo guard; `resolved_config.yaml` |
 | `run_pipeline.py` | port codebase 1 structure, keep codebase 2 stages | stage order, warning capture, output folders |
-| `build_variables.py` | **new** | raw files → model datacube, variable dictionary, reconciliation, feature-table draft (`VARIABLE_CREATION.md`) |
 | `eda.py` | keep codebase 2, extend | build, raw-data and design checks before fitting (`EDA_CHECKS.md`) |
 | `data_prep.py` | merge | codebase 1 `resolve_scaling` + guards + `PeriodPlan`, onto codebase 2's `(G,T)` panel, lag tensor (with `min_lag` mask) |
 | `priors.py` | **new** | resolve bounds (§9.1); unit conversions; contribution volume → β in pytensor, with a numpy twin for tests |
@@ -1196,13 +1195,12 @@ flowchart TB
 
 ## 13. Configuration design
 
-Three inputs:
+Two inputs:
 
 | File | What it holds | Written by |
 |---|---|---|
-| `variable_spec.xlsx` | how variables are built (`VARIABLE_CREATION.md`) | drafted by the builder, edited by the analyst |
 | `config.yaml` | run settings | the modeller |
-| **one feature table** | one row per modelled column | drafted by the builder (`feature_table_draft.csv`), edited by the modeller |
+| **one feature table** | one row per modelled column | the modeller; codebase 1's `mmm/data/prior_builder.py` can draft the prior columns |
 
 ### `config.yaml`
 
@@ -1211,7 +1209,7 @@ defaults, and the group bounds are the §6 starting assumptions.
 
 ```yaml
 data:
-  datacube: model_datacube.csv              # written by build_variables.py
+  datacube: model_datacube.csv              # the datacube as delivered
   feature_table: feature_table_phase2.csv
 
 transforms:
@@ -1295,7 +1293,7 @@ This stage is designed in its own document, **`EDA_CHECKS.md`**. In short:
 
 | Stage | Runs on | Examples | Stops the run? |
 |---|---|---|---|
-| A. Build checks | the variable build | every raw row assigned once; unit guard; period pieces add back | yes, on ERROR |
+| A. Split checks | any variable split by region or period | pieces add back to their parent; units preserved; no gaps or overlaps | yes, on ERROR |
 | B. Raw data checks | the model datacube, unscaled | KPI variability; spend vs metric; cost-per-unit outliers; dust; can carryover and saturation be learned | yes, on ERROR |
 | C. Design checks | scaled data, before fitting | correlation; VIF (centred and uncentred); condition number; variable ≈ week or region; rows per parameter | yes, on ERROR (exact duplicates only) |
 | D. Model checks | the posterior | convergence, contraction, residual battery, transform bound flags | reported |
@@ -1310,18 +1308,14 @@ adopted) and the reason.
 **Figure D15. The output tree.** ★ = new or changed in Phase 2.
 
 ```
-build/                    written by build_variables.py, before any model run
-├── model_datacube.csv · variable_dictionary.csv · feature_table_draft.csv
-└── build_reconciliation.csv · build_report.md
-
 outputs/<run_name>/
 ├── 00_warnings/          00_INDEX.md · <category>.md · all_warnings.csv
-│                         ★ new categories: transform_bounds, build_checks, raw_data
+│                         ★ new categories: transform_bounds, split_checks, raw_data
 ├── 01_data/              panel_summary · feature_scaling_stats (incl. media medians)
 │                         model_input_matrix · resolved_config.yaml
 │                         ★ prior_summary: contribution-volume priors and resolved transform bounds
 │                         collinearity_summary / _vif / _pairs: pre-fit, on raw scaled media
-├── 02_eda/               eda_report.md · ★ build_checks · ★ raw_checks · ★ cost_per_unit
+├── 02_eda/               eda_report.md · ★ split_checks · ★ raw_checks · ★ cost_per_unit
 │                         ★ learnability
 ├── 03_convergence/       sampling_log.json · convergence_report · posterior_summary_full
 │                         ★ prior_posterior_contraction: adds decay, EC50, peak lag, log volume
@@ -1400,7 +1394,7 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 | Volume preservation | Σ Adstock(x) = Σ x − carryover past the last week |
 | Scaling round-trip | forward then inverse returns the raw column (the codebase 1 `test_v6_scaling` idea) |
 | Decomposition identity | parts sum to fitted on every draw, with references applied |
-| Build checks | every raw row assigned once; unit guard; period pieces add back (`EDA_CHECKS.md` stage A) |
+| Split checks | pieces add back to their parent; units preserved; periods do not overlap (`EDA_CHECKS.md` stage A) |
 | Config round-trip | `config.yaml` → settings → `resolved_config.yaml` → the same settings |
 
 **Cross-validation.**
@@ -1470,7 +1464,7 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 ### This project
 
 - `../../CLAUDE.md`: the Phase 2 brief, run history, decisions not to re-litigate.
-- `VARIABLE_CREATION.md`, `EDA_CHECKS.md`: this folder.
+- `METHODOLOGY.md`, `EXPLANATION.md`, `EDA_CHECKS.md`: this folder.
 - `../../codebase1_hierarchical_mmm/docs/`:
   - `METHODOLOGY.md`, `TUNING_GUIDE.md`, `OUTPUTS_GUIDE.md`;
   - `MERIDIAN_ASSUMPTIONS.md`, including the §5b EDA gap list.

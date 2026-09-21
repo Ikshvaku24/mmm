@@ -266,8 +266,8 @@
       <div><dt>Basis</dt><dd>Sales volume · no ROI</dd></div>
       <div><dt>Example</dt><dd>3 sub-brands × 104 weeks</dd></div>
       <div><dt>Sampler</dt><dd>PyMC model, NumPyro on GPU</dd></div>
-      <div><dt>Pending</dt><dd>Dummies · TPR source · expert columns</dd></div>
-      <div class="wide"><dt>Detail documents (codebase2_full_mmm/docs/)</dt><dd><code>PHASE2_ARCHITECTURE.md</code> · <code>VARIABLE_CREATION.md</code> · <code>EDA_CHECKS.md</code></dd></div>
+      <div><dt>Pending</dt><dd>Dummies · TPR source</dd></div>
+      <div class="wide"><dt>Detail documents (codebase2_full_mmm/docs/)</dt><dd><code>PHASE2_ARCHITECTURE.md</code> · <code>METHODOLOGY.md</code> · <code>EXPLANATION.md</code> · <code>EDA_CHECKS.md</code></dd></div>
     </dl>
   </header>
 
@@ -282,7 +282,7 @@
   <section class="example" aria-labelledby="ex-h">
     <div class="example-head">
       <h2 id="ex-h">The example used on this page</h2>
-      <p class="muted">Numbers are illustrative. The same example runs through <code>VARIABLE_CREATION.md</code> and <code>EDA_CHECKS.md</code>.</p>
+      <p class="muted">Numbers are illustrative. The same example runs through <code>METHODOLOGY.md</code>, <code>EXPLANATION.md</code> and <code>EDA_CHECKS.md</code>.</p>
     </div>
     <dl class="example-grid">
       <div><dt>Regions</dt><dd>Our brand's three sub-brands: <strong>Effervescent, Liquid, Tabs</strong>. Each sub-brand's sales is one series in one joint model.</dd></div>
@@ -296,7 +296,7 @@
 
   <nav aria-label="Phases">
     <ol class="rail">
-      <li><a href="#p1"><span class="n">1</span><span class="t">Build variables</span><span class="s">raw rows → model datacube</span></a></li>
+      <li><a href="#p1"><span class="n">1</span><span class="t">Prepare variables</span><span class="s">split by region or period if needed</span></a></li>
       <li><a href="#p2"><span class="n">2</span><span class="t">Check raw data</span><span class="s">stop bad data before it reaches the model</span></a></li>
       <li><a href="#p3"><span class="n">3</span><span class="t">Prepare</span><span class="s">scale, set bounds and lag windows</span></a></li>
       <li><a href="#p4"><span class="n">4</span><span class="t">Fit</span><span class="s">one joint model learns everything</span></a></li>
@@ -311,33 +311,26 @@
     <div class="phase-num" aria-hidden="true">1</div>
     <div class="phase-main">
       <div class="phase-head">
-        <h2 id="p1-h">Build variables</h2>
-        <p>The vendor's variables do not exist in any raw file; they were made by filtering, grouping and cutting the media, trade and sales extracts. A builder now does that, fast by default and free when needed.</p>
+        <h2 id="p1-h">Prepare the variables</h2>
+        <p>The datacube arrives with its variables already built to the data structure. The only preparation left is splitting one that should behave differently in different regions, or in different periods.</p>
       </div>
       <div class="phase-grid">
         <div class="what">
           <h3>What happens</h3>
           <ul>
-            <li><strong>Profile, automatically:</strong> for each channel, its active weeks, which metrics are non-zero, its spend, and the values of every column that could split it.</li>
-            <li><strong>Option A:</strong> one variable per channel. The analyst only confirms the metric: TV → GRPs, search → clicks, OOH → spend.</li>
-            <li><strong>Option B, recipes:</strong> split a channel by any columns, merge or drop values, add words such as hero or halo, place it on sub-brands, and cut it by period.</li>
-            <li><strong>Consumption:</strong>
-              <ul>
-                <li>our brand's <code>Units EQ</code> becomes the KPI;</li>
-                <li>competitor or category volume, base price and TDP become baseline drivers;</li>
-                <li>base price is Value ÷ Units when there is no price fact;</li>
-                <li>TDP is weighted distribution + numeric distribution.</li>
-              </ul>
-            </li>
-            <li><strong>Competitor media</strong> is combined into one variable.</li>
-            <li><strong>Every raw row lands in exactly one variable</strong>, or is excluded with a reason. A reconciliation file proves it.</li>
+            <li><strong>Nothing is built.</strong> Media, trade and sales columns arrive as variables; the KPI, distribution, price and category columns arrive with them.</li>
+            <li><strong>Split by region</strong> when the same activity should act differently across regions: a sub-brand's TV is hero in its own region and halo in the others.</li>
+            <li><strong>Split by period</strong> when the activity changed character: OOH bought differently in 2025, or a MAT 1 / MAT 2 cut.</li>
+            <li><strong>The test of a good split:</strong> the pieces add back to the original, every week and every region. A split is a re-labelling, not new data.</li>
+            <li><strong>Split only with a reason</strong> you can name. "The fit improved" is not one; cross-validation decides that in phase 6.</li>
+            <li><strong>Pieces of one parent share a transform group</strong>, so the same channel does not get a different carryover per period.</li>
           </ul>
-          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">nothing: new step</span></p>
-          <p class="doc-link">Designed in <code>VARIABLE_CREATION.md</code>.</p>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">feature table</span><span class="tag t-infra">pillar and baseline flags</span></p>
+          <p class="doc-link">Designed in <code>METHODOLOGY.md</code> §1.</p>
         </div>
         <aside class="ex" aria-label="Phase 1 in the example">
           <p class="ex-label">In the example</p>
-          <p>A TV recipe: split by open / pay TV and by <code>sub_brand</code>, metric <code>grps</code>, region rule <strong>hero / halo</strong>. One week, with 120 GRPs attributed to Effervescent and 80 GRPs of brand-level TV:</p>
+          <p>TV attributed to Effervescent, split by region into hero and halo. One week, with 120 GRPs attributed to Effervescent and 80 GRPs of brand-level TV:</p>
           <div class="table-wrap"><table>
             <thead><tr><th>Variable</th><th class="num">Efferv.</th><th class="num">Liquid</th><th class="num">Tabs</th></tr></thead>
             <tbody>
@@ -346,7 +339,7 @@
               <tr><td><code>…unattr_grps</code> <span class="tag t-infra">shared</span></td><td class="num">80</td><td class="num">80</td><td class="num">80</td></tr>
             </tbody>
           </table></div>
-          <p>OOH spend is cut by year into <code>…_invest_2024</code> and <code>…_invest_2025</code>. The two add back to the whole every week, and the builder checks this.</p>
+          <p>OOH is cut by year into <code>…_invest_2024</code> and <code>…_invest_2025</code>. The two add back to the original every week, and that is checked before fitting.</p>
         </aside>
       </div>
     </div>
@@ -358,13 +351,13 @@
     <div class="phase-main">
       <div class="phase-head">
         <h2 id="p2-h">Check the raw data</h2>
-        <p>Codebase 1 saw only finished variables, so problems in the raw extracts were invisible. Now we build the variables ourselves and learn the transforms from raw activity, so both can fail in ways they could not before.</p>
+        <p>Codebase 1 saw variables that were already transformed, so problems in the raw activity were invisible. Now the model learns the transforms from untransformed activity, and any split we make can break, so both are checked before the fit.</p>
       </div>
       <div class="phase-grid">
         <div class="what">
           <h3>What happens</h3>
           <ul>
-            <li><strong>A · Build checks:</strong> every row is counted once; GRPs are never added to impressions; period pieces add back to the whole.</li>
+            <li><strong>A · Split checks:</strong> the pieces add back to their parent; units are preserved; periods neither overlap nor leave a gap.</li>
             <li><strong>B · Raw data checks:</strong> the KPI varies; spend matches the metric; cost-per-unit outliers (Meridian's rule); dust columns; variables with fewer than 5 active weeks.</li>
             <li><strong>New in Phase 2: can the data teach the transforms?</strong> Carryover needs weeks off air. Saturation needs weeks well above a typical week.</li>
             <li><strong>C · Design checks, before fitting:</strong> correlation; VIF, centred and uncentred; condition number; variable ≈ week or sub-brand; rows per parameter.</li>
@@ -378,11 +371,11 @@
           <div class="table-wrap"><table>
             <thead><tr><th>Finding</th><th>Grade</th></tr></thead>
             <tbody>
-              <tr><td>Combined competitor media mixes TV GRPs with digital impressions</td><td><span class="tag t-alert">ERROR</span></td></tr>
-              <tr><td>Trade retailer "Fixed Expenses" has no group</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
+              <tr><td>The two OOH period pieces overlap in week 53, so they do not add back</td><td><span class="tag t-alert">ERROR</span></td></tr>
+              <tr><td>TV hero and halo are not in one transform group</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
               <tr><td>TV never goes off air in 2025, so decay is learned mostly from 2024</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
               <tr><td>1.2 rows per parameter</td><td><span class="tag t-learned">ATTENTION</span></td></tr>
-              <tr><td>Monthly trade spend spread over its weeks by days</td><td><span class="tag t-infra">INFO</span></td></tr>
+              <tr><td>Adstock warm-up: the first 13 weeks have no earlier media</td><td><span class="tag t-infra">INFO</span></td></tr>
             </tbody>
           </table></div>
         </aside>
@@ -1064,8 +1057,8 @@ h    = Hill(Adstock(TV))   this draw
       <p>What neither codebase 1 nor Meridian provides today.</p>
     </div>
     <div class="cards four">
-      <article class="card"><p class="card-title">Variable builder</p><p>Recipes with splits, value groups, hero / halo, period cuts and vendor-style names, with a reconciliation that every raw row is used once.</p></article>
-      <article class="card"><p class="card-title">Checks on raw data</p><p>Build checks, a unit guard, and "can this channel teach carryover and saturation?" before any sampling.</p></article>
+      <article class="card"><p class="card-title">Variable splitting, checked</p><p>Split by region or period, with the pieces proven to add back to the parent and sharing one transform group.</p></article>
+      <article class="card"><p class="card-title">Checks on raw data</p><p>Split checks, a unit guard, and "can this channel teach carryover and saturation?" before any sampling.</p></article>
       <article class="card"><p class="card-title">Lag window</p><p>A fixed <code>min_lag</code>, a learned peak θ, and a decay cap derived from <code>max_lag</code>.</p></article>
       <article class="card"><p class="card-title">Transform groups</p><p>Decay and EC50 shared within a channel family: 14 transform parameters instead of 59.</p></article>
       <article class="card"><p class="card-title">Bound diagnostics</p><p>Flags for a parameter pressed against its bound, an EC50 beyond the data, and decay trading off with β.</p></article>
@@ -1085,7 +1078,7 @@ h    = Hill(Adstock(TV))   this draw
       <li class="gate">
         <p class="phase-tag"><b>P0</b><span>before any real-data run</span></p>
         <ul>
-          <li>variable builder, Option A, with build checks</li>
+          <li>variable splitting, with its checks</li>
           <li>raw-data and design checks</li>
           <li>scaling rule and prior units</li>
           <li>volume prior turned into β</li>
@@ -1096,7 +1089,6 @@ h    = Hill(Adstock(TV))   this draw
       <li>
         <p class="phase-tag"><b>P1</b><span>before anyone reads output</span></p>
         <ul>
-          <li>variable builder, Option B recipes</li>
           <li>reconciliation chain</li>
           <li>baseline, reference, pillar</li>
           <li>warnings and plotting</li>
@@ -1128,7 +1120,6 @@ h    = Hill(Adstock(TV))   this draw
         <tbody>
           <tr><td>Where TPR comes from</td><td>not built; probably trade Price Promotions</td></tr>
           <tr><td>What a dummy is in our context: a switch, a step, or a decay</td><td>not built; a <code>dummies</code> sheet is reserved</td></tr>
-          <tr><td>The expert file's main column, spend and metrics</td><td>design ready; columns to confirm</td></tr>
           <tr><td>The region for the next model: sub-brand, retail channel or retailer</td><td>a setting; this page uses sub-brand</td></tr>
           <tr><td>TDP across retail channels</td><td>weighted + numeric distribution summed over SKUs; a sales-weighted average across retail channels</td></tr>
           <tr><td>Base price</td><td>a price fact if present, otherwise Value ÷ Units labelled as average price</td></tr>
@@ -1140,7 +1131,7 @@ h    = Hill(Adstock(TV))   this draw
   <footer class="foot">
     <p class="eyebrow">Sources</p>
     <ul>
-      <li>Detail: <code>updating production code/codebase2_full_mmm/docs/</code>: <code>PHASE2_ARCHITECTURE.md</code>, <code>VARIABLE_CREATION.md</code>, <code>EDA_CHECKS.md</code></li>
+      <li>Detail: <code>updating production code/codebase2_full_mmm/docs/</code>: <code>PHASE2_ARCHITECTURE.md</code>, <code>METHODOLOGY.md</code>, <code>EXPLANATION.md</code>, <code>EDA_CHECKS.md</code></li>
       <li>Decisions of record: <code>updating production code/CLAUDE.md</code></li>
       <li>Meridian: <code>model/posterior_sampler.py</code>, <code>model/adstock_hill.py</code>, <code>model/equations.py</code>, <code>model/transformers.py</code>, <code>model/spec.py</code>, <code>model/eda/eda_engine.py</code></li>
       <li>Delayed adstock: Jin, Wang, Sun, Chan and Koehler (2017), Google</li>

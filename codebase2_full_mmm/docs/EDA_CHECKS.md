@@ -3,9 +3,10 @@
 > **Status:** planning, 2026-09-17. **No code yet.**
 >
 > **Companions** (same folder):
-> - `VARIABLE_CREATION.md`: builds the variables these checks run on.
+> - `METHODOLOGY.md`: the order to build in, including variable splitting.
 > - `PHASE2_ARCHITECTURE.md`: the model.
-> - `PHASE2_ARCHITECTURE.html`: the one-page overview.
+> - `Codebase_2_blueprint.html`: the one-page overview.
+> - `EXPLANATION.md`: what the transforms do, in plain words.
 >
 > **Meridian source:** `../../../meridian/meridian/model/eda/eda_engine.py` (checks),
 > `eda/constants.py` and `eda/eda_spec.py` (thresholds), and `analysis/review/` (checks after fitting).
@@ -36,11 +37,11 @@ Anything wrong in the raw media was already baked into those columns and could n
 with spend but no GRPs, a monthly budget smeared across weeks, a national line copied into every
 region: all invisible.
 
-**Codebase 2** starts from **raw rows** and **learns** carryover and saturation. That has three
-consequences.
+**Codebase 2** takes the same variables **untransformed** and **learns** carryover and saturation.
+That has three consequences.
 
-1. **We build the variables, so we can break them.** Double counting, mixed units, wrong calendar
-   mapping and lost rows become our errors to catch → **stage A**.
+1. **We may split a variable by region or period, so we can break it.** A split whose pieces do
+   not add back to the original is our error to catch → **stage A**.
 2. **Raw data quality becomes visible.** Spend against metric, cost per unit, currency and partial
    weeks can all be checked directly → **stage B**.
 3. **The data must be able to teach the transforms.**
@@ -51,10 +52,11 @@ consequences.
 **Figure E1. What each codebase can see.**
 
 ```
-codebase 1:  raw files ──[vendor builds + transforms]──▶ variables ──▶ checks ──▶ model
-                          ▲ problems here are invisible
+codebase 1:  raw files ──[built, adstocked, saturated upstream]──▶ variables ──▶ checks ──▶ model
+                          ▲ problems here are invisible, and the transforms are fixed
 
-codebase 2:  raw files ──▶ checks A ──▶ variables ──▶ checks B, C ──▶ model learns transforms ──▶ checks D
+codebase 2:  raw files ──[built upstream]──▶ variables ──▶ checks A (splits), B, C ──▶ model learns transforms ──▶ checks D
+                                              ▲ untransformed: raw activity is visible again
 ```
 
 ---
@@ -65,7 +67,7 @@ codebase 2:  raw files ──▶ checks A ──▶ variables ──▶ checks B
 
 ```mermaid
 flowchart LR
-    A["A Build checks<br/>while variables are made"] --> B["B Raw data checks<br/>on the model datacube"]
+    A["A Split checks<br/>only if a variable is split"] --> B["B Raw data checks<br/>on the model datacube"]
     B --> C["C Design checks<br/>on scaled data, before fitting"]
     C --> FIT["Fit the model"]
     FIT --> D["D Model checks<br/>after fitting"]
@@ -88,22 +90,21 @@ Every finding gets a grade, using the same three levels as Meridian's EDA engine
 
 ## 3. The checks, stage by stage
 
-### Stage A: build checks
+### Stage A: split checks
 
-These run while variables are made (`VARIABLE_CREATION.md` §8). All of them are new; neither codebase 1
-nor Meridian has them, because neither builds variables.
+These run when a variable is split by region or period (`METHODOLOGY.md` §1). If nothing is split,
+the stage is empty. All of them are new: neither codebase 1 nor Meridian splits variables.
 
 | Check | Catches | Grade |
 |---|---|---|
-| Row assignment | a raw row counted in two variables, or silently lost | ERROR |
-| Source totals reconcile | Σ variables + Σ excluded ≠ raw total, for any channel | ERROR |
-| Unit guard | GRPs added to impressions in one variable | ERROR |
-| Period split adds back | MAT or year pieces do not sum to the whole | ERROR |
-| Hero + halo integrity | hero + halo ≠ that sub-brand's total activity | ERROR |
-| Currency | more than one currency in one spend total | ERROR |
-| Unmapped values | a value with no group, e.g. a new retailer code | ATTENTION |
-| Calendar mapping | sources with different week starts; monthly rows spread across weeks | INFO, with the rule that was used |
-| Empty combinations | split combinations with no activity (dropped) | INFO |
+| Pieces add back | the pieces do not sum to the parent, week by week and region by region | ERROR |
+| Period coverage | period pieces overlap, or leave a gap in the window | ERROR |
+| Region coverage | a region lands in two pieces, or in none | ERROR |
+| Units preserved | a piece carries different units from its parent | ERROR |
+| Feature-table row | a piece with no row, or with no `split_of` recorded | ERROR |
+| Active weeks per piece | a piece active in fewer than 5 weeks | ATTENTION |
+| Pieces nearly identical | two pieces correlated above 0.9 | ATTENTION |
+| Transform group | pieces of one parent not sharing a transform group | ATTENTION |
 
 ### Stage B: raw data checks
 
@@ -195,8 +196,8 @@ These run after fitting.
 
 | Check | What it adds |
 |---|---|
-| **Build checks** (stage A) | Meridian expects ready-made input. We build variables, so every raw row must be accounted for once |
-| **Unit guard** | stops GRPs being added to impressions, e.g. when competitor media is combined |
+| **Split checks** (stage A) | a split must be a re-labelling of the same activity: the pieces add back to the parent |
+| **Unit guard** | a split piece must keep its parent's units |
 | **Carryover learnable** | warns before fitting when a channel never goes dark, so decay and level cannot be told apart |
 | **Saturation learnable** | warns when activity never rises far enough above a typical week to show diminishing returns |
 | **On/off regime** | a channel that only runs in the second year competes with the trend |
@@ -215,7 +216,7 @@ These run after fitting.
 | File | Contents |
 |---|---|
 | `02_eda/eda_report.md` | every finding, ranked by grade |
-| `02_eda/build_checks.csv` | stage A, including the reconciliation totals |
+| `02_eda/split_checks.csv` | stage A, one row per split piece |
 | `02_eda/raw_checks.csv` | stage B, one row per variable × check |
 | `02_eda/cost_per_unit.csv` | spend ÷ metric per variable, region and week, with outlier flags |
 | `02_eda/learnability.csv` | per transformed variable: off-weeks, 95th percentile ÷ median of active weeks, first and last active week |
@@ -231,9 +232,9 @@ Three sub-brands (Effervescent, Liquid, Tabs) as regions, over 104 weeks. The fi
 
 | Stage | Finding | Grade | What to do |
 |---|---|---|---|
-| A | trade `retailer = Fixed Expenses` has no group | ATTENTION | analyst decides: `drop` (overhead) or `all` |
-| A | trade is monthly; December's spend is spread over 5 weeks by days | INFO | nothing |
-| A | the combined competitor variable mixes TV GRPs with digital impressions | ERROR | use competitor spend, or keep competitor TV only |
+| A | the two OOH period pieces do not add back to the parent in week 53 | ERROR | fix the period boundaries: they overlap by one week |
+| A | TV hero and halo pieces are not in one transform group | ATTENTION | group them: the same channel should not change its carryover by region |
+| A | a period piece is active in 4 weeks | ATTENTION | do not split that finely; it is a memorised residual |
 | B | OOH has 3 weeks in 2025 with spend but zero panels | ATTENTION | check the extract. OOH uses spend as its metric, so the variable itself is unaffected |
 | B | TV has no week without GRPs in 2025 | ATTENTION | decay is learned mostly from 2024; consider `fix_alpha` or a transform group |
 | B | `…_ooh_…_invest_2025` is zero for all of 2024 | ATTENTION (on/off regime) | expected for a period split; read it next to the trend |

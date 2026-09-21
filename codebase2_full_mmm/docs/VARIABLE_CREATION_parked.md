@@ -1,3 +1,15 @@
+> # PARKED — not the plan
+>
+> **2026-09-21.** The raw data arrives with the variables already built to the data
+> structure, so nothing builds variables from raw rows. The only preparation left is
+> **splitting an existing variable by region or by period**, which is designed in
+> `METHODOLOGY.md` §1.
+>
+> This file is kept only as a record of the parked design, in case a future dataset
+> arrives unaggregated. Do not implement from it, and do not cite it as current.
+
+---
+
 # Variable creation — design
 
 > **Status:** planning, 2026-09-17. **No code yet.** This document designs one script, working name
