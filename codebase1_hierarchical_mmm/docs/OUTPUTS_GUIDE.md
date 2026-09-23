@@ -76,7 +76,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `contribution_timeseries` | `contribution_timeseries.csv` | 05 |
 | `contribution_math` | `contribution_math.csv` | 05 |
 | `contribution_reconciliation` | `contribution_reconciliation.csv` | 05 |
-| `benchmark_comparison` | `benchmark_comparison.xlsx` (or `.csv`) | 05 |
+| `benchmark_comparison` | `benchmark_comparison.xlsx` (or `.csv`) — regions across the columns; group + member rows and pre-filled benchmarks from `data.mapping_file` | 05 |
 | `contribution_plots` | the four 05 PNGs | 05 |
 | *(always)* | `00_warnings/*` | 00 |
 | `cv.enabled` **(CVConfig, not OutputConfig)** | everything in `06_cross_validation/` | 06 |
@@ -243,7 +243,7 @@ are always reported in real KPI units.
 Every column, features and KPI alike, goes through one helper:
 
 ```
-scaled = (raw − centre) / scale        # both from the TRAINING window only
+scaled = (raw − centre) / scale        # both from run.scaling_window (train by default)
 ```
 
 | Knob | Where | Values |
@@ -254,10 +254,11 @@ scaled = (raw − centre) / scale        # both from the TRAINING window only
 | `dv_scale` | `RunConfig` | `none`, `sd`, `mean`, `mean_positive`, `max` |
 | `dv_scale_scope` | `RunConfig` | `region` (default), `global` |
 
-Leave the feature columns blank for the legacy behaviour (`center=1` →
-`mean`/`sd`, otherwise `none`/`mean_positive`). `none`/`none` passes a column
-through **completely untouched** — use it when the data already arrives on the
-scale your priors were derived on.
+A blank feature `center_mode` / `scale_mode` means **`none` / `none`**: the
+column passes through **completely untouched** and priors are per raw unit.
+Centring and scaling are opt-in per feature. `run.scaling_window` (`train` |
+`full`) sets which periods every centre and scale is computed on, the KPI's
+included.
 
 > ⚠️ **The scale is the unit of your priors.** A coefficient means *"moves the
 > KPI by `beta × dv_scale` per `feature_scale` of input"*. Change either scale
@@ -290,24 +291,41 @@ the priors implied. The run now warns when `prior_sd < 0.05`.
 
 ## 🆕 `pre_model_outputs/` — before the model runs at all
 
-Written only when `data.vendor_contribution` or `data.pillar_spend` is set.
+Written only in cases a–c: `data.mapping_file` carries contributions, or
+`data.share_file` is given.
 
 | File | Contents |
 |---|---|
-| `feature_priors_sample.csv` | a generated prior file — **a proposal, not a decision**. Review it, then point `data.feature_priors` at it |
-| `prior_calculation.xlsx` | sheet 1 the working (one row per feature × region, every intermediate number and the formula); sheet 2 the resulting means; sheet 3 the method in prose |
-| `benchmark_contribution.csv` | the vendor's numbers in canonical shape, used to pre-fill column E of the benchmark sheet |
+| `feature_priors_national.csv` | a generated prior file — **a proposal, not a decision**. One row per model variable, the **national** mean (see below); blank where neither file covered it. `pooling: hierarchical` |
+| `feature_priors_regional.csv` | the same rows **plus one override row per region** (`variable, region, global_prior_mean` only) with that region's own coefficient. `pooling: independent` |
+| `prior_calculation.xlsx` | sheet 1 the working, sheet 2 the resulting means, sheet 3 the method in prose |
 
-**How to read the calculation sheet.** Every row shows
-`contribution / support / dv_agg` with the actual numbers substituted, so a
-prior mean can be checked rather than believed. `usable` and `skipped_because`
-say why any cell was left out — almost always zero support, which means the
-feature never ran in that region and contributes nothing there whatever its
-coefficient. `n_regions_used` is the divisor of the average, and it is **not**
-the region count.
+Point `data.feature_priors` at whichever matches your pooling decision, after
+reviewing it. Both carry `scale_mode: none` and `contribution_reference: zero`,
+and are only in the model's units with `run.dv_scale: mean` — the step warns
+otherwise.
 
-Method, and the handling of negative contributions, disagreeing signs and
-combined vendor variables: `FEATURE_PRIOR_GUIDE.md` §5.
+**How to read the calculation sheet.** Every row shows `C / support / dv_agg`
+(signed) with the numbers substituted, so a prior can be checked rather than
+believed. That is `prior_mean_region` — the region's coefficient, and its row in
+the regional file.
+
+- **case a** (vendor contribution) — one row per mapping **group** × region:
+  `members` names the variables combined, `contribution_basis` says whether the
+  number was regional or a national figure allocated by support.
+- **cases b/c** (shares) — one row per variable × region: `section`, `pillar`,
+  `share_of_sales`, `spend_split` (spend / computed pillar spend, media and
+  expert only) and `share_formula`.
+
+`usable` and `skipped_because` say why any cell was left out — almost always
+zero support, meaning the variable never ran in that region.
+
+Sheet 2 shows the national arithmetic: `national_coef = sum_of_region_coefs /
+n_regions_used` — the divisor is the number of regions **with support**, not the
+region count (2 of 5 regions with support → divide by 2). `global_prior_mean` is
+its magnitude for a signed variable, the signed value for a `free` one.
+
+Method and every edge case: `FEATURE_PRIOR_GUIDE.md` §5.
 
 ---
 
@@ -354,6 +372,10 @@ Nothing is suppressed: every warning still reaches `all_warnings.csv` verbatim.
 | `per_region_prior_sd_ignored` | medium | A per-region `prior_sd` was written but hierarchical pooling ignores it |
 | `seasonality_overfit_risk` | medium | `fourier_order` is high for the number of training periods |
 | `cadence_ambiguous` | medium | Date spacing is neither weekly nor monthly; monthly was assumed |
+| `scaling_uses_holdout` | review | `run.scaling_window: full` with a holdout — the holdout rows of `fit_metrics.csv` saw the scaling statistics of the test window. Judge out-of-sample accuracy with CV |
+| `generated_prior_units` | high | The pre-model step generated priors per unit of the region's MEAN KPI, but `run.dv_scale` is not `mean` (or the scope is not `region`). Every generated mean would be off by a constant multiple |
+| `generated_prior_blank` | medium | Some variables got no generated mean — in neither input file, or no support anywhere |
+| `regional_prior_sign_skipped` | review | A region's implied coefficient runs against its variable's sign, so the regional file has no row for it |
 | `other` | review | Matched no rule — read it in full rather than assuming it is routine |
 
 **How to read it.** `high` means a number in your report is probably not
@@ -427,8 +449,8 @@ One row per region.
 | `region` | Retailer account |
 | `n_obs` / `n_train` / `n_test` | Total / training / holdout weeks. v3: `104 / 91 / 13` |
 | `dv_mean`, `dv_sd` | Raw sales mean and sd over **all** weeks |
-| `kpi_center_used` | The mean actually subtracted (training window only) |
-| `kpi_scale_used` | The sd actually divided by (training window only) |
+| `kpi_center_used` | The mean actually subtracted (over `run.scaling_window` — the training window by default) |
+| `kpi_scale_used` | The scale actually divided by (same window) |
 | `date_min`, `date_max` | Date span |
 
 **How to read it.** `dv_mean` and `kpi_center_used` differ slightly
@@ -1184,44 +1206,103 @@ that ties to actual sales — use `contribution_summary.csv` instead.
 
 ### 🆕 `benchmark_comparison.xlsx` — paste a benchmark, formulas do the rest
 
-One row per region × feature, with this run's numbers already laid out and
-**live formulas in the cells**. Paste the vendor's (or last year's) contribution
-into **column E** and everything recalculates in the spreadsheet.
+This run's numbers laid out with **live formulas in the cells**, and the
+**regions across the columns**. Paste the vendor's (or last year's) contribution
+and everything recalculates in the spreadsheet.
 
-Written as `.xlsx` when openpyxl is available (it is on Databricks), otherwise
-as `.csv` — Excel evaluates `=` formulas in a CSV on open, so the fallback works
-the same way.
+Written as `.xlsx` when openpyxl is available (it is on Databricks) with three
+sheets — `summary` (read first), `comparison`, `what each column means` —
+otherwise as `.csv` with the summary below the table. Excel evaluates `=`
+formulas in a CSV on open, so the fallback works the same way.
+
+**Layout of `comparison`.** Row 1 names the blocks, row 2 the columns, data from
+row 3. Panes are frozen on the names and headers.
+
+```
+A-E   row_type | group | feature | pillar | members
+F-N   TOTAL (national):  our | benchmark | pct_diff | ratio | contraction |
+                         current_prior | suggested_prior | delta | verdict
+O...  one block per region (7 columns each):
+                         our | benchmark | pct_diff | ratio | contraction |
+                         current_prior | suggested_prior
+```
 
 | Column | Filled by | Meaning |
 |---|---|---|
-| `region`, `feature`, `pillar` | the run | the cell |
-| `our_contribution` | the run | what this run reports, KPI units |
-| **`benchmark_contribution`** | **YOU** | paste here — highlighted in the sheet |
-| `pct_diff` | formula | `(ours − theirs) / |theirs| × 100` |
-| `ratio_needed` | formula | `theirs / ours` — the multiplier to close the gap |
-| `contraction` | the run | near 0 means the posterior IS your prior |
-| `delta` | formula | `ln(ratio) / contraction` — how far the data wants to move, log units |
-| `current_prior_mean` | the run | the implied median your prior file produces |
-| `suggested_prior_mean` | formula | `current × ratio^(1/(1−contraction))` — **write this back into the prior file** |
-| `implied_benchmark_beta` | formula | their contribution expressed on YOUR axis |
-| `effective_scaled_sum`, `dv_scale_used` | the run | the inputs the formulas use |
-| `verdict` | formula | what to do about this row |
+| `row_type` | the run | `feature` (compared alone), `group` (a mapping group — the benchmark lives here), `member` (one variable of the group above it) |
+| `group` | the run | the mapping group — the vendor's name. A variable not in the mapping is its own group |
+| `feature` | the run | our variable; blank on a `group` row |
+| `pillar` | the run | reporting group |
+| `members` | the run | on a `group` row, the variables it sums |
+| `our` | the run / formula | this run's contribution, KPI units. `group` rows: `=SUM` of the member rows below; TOTAL: `=SUM` of the region blocks |
+| **`benchmark`** | **the mapping file, or YOU** | yellow on `feature`/`group` rows, grey (not used) on `member` rows. See "where to paste" |
+| `pct_diff` | formula | `(ours − theirs) / |theirs| × 100`. `feature`/`group` rows only |
+| `ratio` | formula | **R** `= theirs / ours`. A `member` row shows its **group's** R |
+| `contraction` | the run | this variable's `use_for_delta` contraction. A pooled feature has one value (repeated in each region); an `independent` one has its own per region, and TOTAL shows their mean |
+| `current_prior` | the run | the implied median coefficient your prior file produces (`prior_summary.csv`): the `__population__` row in TOTAL, the region's row in a region block |
+| `suggested_prior` | formula | `current × R^(1/(1−max(c,0)))` — **write this back**: TOTAL → `global_prior_mean`, a region block → that region's override row (the regional prior file). Exact for a signed variable; for a **free** one only when c is small — with high c use `current + (R−1)·β_post/(1−c)` (`prior_posterior_contraction_fitting.md` §2b) |
+| `delta` | formula (TOTAL) | `ln(R) / c` — how far the data wants to move, log units. Blank when c ∉ (0.001, 0.999) |
+| `verdict` | formula (TOTAL) | what to do about this row |
 
-**How to read it — the summary block to the right first.** It reports the median
-`delta` and its IQR, and turns that into a sentence:
+**Where to paste.**
+
+- **A national benchmark** → the TOTAL `benchmark` cell. Each region's
+  `benchmark` then spreads it by **our** contribution share, so every region
+  shows the national gap — the honest statement, since a national number cannot
+  say where the gap is.
+- **A regional benchmark** → over the region `benchmark` cells (the spread
+  formula is overwritten), then put their sum in TOTAL.
+- **With `data.mapping_file` carrying contributions** all of this is
+  pre-filled: regional numbers go in the region cells with TOTAL `=SUM` of them,
+  a national number goes in TOTAL. A vendor number replicated across several of
+  our rows is counted **once**.
+
+**A split variable — how R works when contraction is per member.** The vendor
+reports one number for the group (say `digital_hero`), we fit its members
+(`digital_hero_mat1`, `_mat2`). So:
+
+1. **R is computed once, on the group:** `R = benchmark / Σ our members`.
+2. **Each member is corrected with its OWN contraction and the shared R:**
+   `new_m = old_m × R^(1/(1−max(c_m, 0)))`.
+3. A member with **c ≤ 0** — the posterior is no narrower than the prior, the
+   data is not moving it — scales one-for-one with its prior, so the exponent is
+   1 and `new = old × R`. A member the data **does** pin (c > 0) needs a larger
+   move, because the data pulls part of any prior change back.
+4. Each member closing R on its own contribution closes R on their sum, so the
+   **group lands on the benchmark** (the test suite simulates the refit and
+   checks exactly this).
+
+The group row carries no prior and no suggestion — there is no single prior to
+correct. Its verdict reads `gap - each member row below carries its own fix`.
+
+**How to read it — the `summary` sheet first.** It counts the comparison rows
+filled in (`feature` + `group` rows; members never count), the median `pct_diff`,
+how many rows sit below/above, and the median `delta` with its IQR, then turns
+that into a sentence:
 
 - **`delta` clusters** (IQR < 0.1) → one global constraint is pushing every
   driver the same way, usually a free region intercept the benchmark does not
   have. Correcting prior means one at a time will **not** hold: the next refit
   re-imposes the same shortfall on the corrected numbers. Fix the structure
   (`model.include_intercept`, `model.alpha_prior_sd`) first.
-- **`delta` scatters** → the gaps really are per-feature. Column K is the fix.
+- **`delta` scatters** → the gaps really are per-variable. `suggested_prior` is
+  the fix.
 
-`verdict` per row distinguishes the cases: `prior-driven` (contraction < 0.2 —
-write column K back), `data disagrees` (contraction > 0.5 — decide whether to
-impose or accept), and `UNIDENTIFIED` (contraction ≤ 0 — structural, no prior
-fixes it).
+`verdict` per row, from the row's gap and its own contraction c:
 
+| verdict | when | meaning |
+|---|---|---|
+| `ok` | \|pct_diff\| < 10 | leave it |
+| `UNIDENTIFIED` | c < −0.2 | the posterior is WIDER than the prior — a collinearity problem. Fix that before trusting any prior |
+| `prior-driven` | −0.2 ≤ c < 0.2 | the result is your prior. Writing `suggested_prior` back closes the gap — and the number stays an assumption, not a finding |
+| `data disagrees` | c > 0.5 | the data pulls away from the benchmark. Impose it (tighten the sd) or accept the gap |
+| `mixed` | otherwise | compare its `delta` with the other rows |
+
+> **Removed:** `implied_benchmark_beta`, `effective_scaled_sum` and
+> `dv_scale_used`. They re-expressed the benchmark on our axis; `ratio` and
+> `suggested_prior` do the same job directly, and the inputs are still in
+> `contribution_math.csv`.
+>
 > The sheet replaces the old `bias_diagnosis.py`. A benchmark never arrives in a
 > fixed schema, so a script that reads one is guessing at the join; a sheet with
 > the formulas already in it needs only a paste, and every intermediate quantity

@@ -177,10 +177,14 @@ intend to *estimate* — you cannot estimate something you have pinned.
 
 ### Setting a level-1 mean from spend
 
-> **This is automated.** Put a `pillar, feature, feature_spend,
-> pillar_share_pct` file at `data.pillar_spend` and the pre-model step does the
-> arithmetic, with a calculation workbook showing every step. See
-> `FEATURE_PRIOR_GUIDE.md` §5. The maths it applies is exactly what follows.
+> **This is automated.** Put the shares in a `data.share_file` — one row per
+> variable with its `section` (`media`, `expert`, `comp_media`, `trade`,
+> `baseline`), pillar, pillar share and spend — and the pre-model step does the
+> arithmetic below for every section, with a calculation workbook. Media and
+> expert pillars are split by spend; competitor media and trade take a share
+> each; the baseline takes the whole-baseline share times each variable's share
+> WITHIN it, which is what the stage-1 baseline-only run in §1 gives you. See
+> `FEATURE_PRIOR_GUIDE.md` §5.
 
 With no benchmark, the defensible starting point is: assume marketing in total
 delivers a plausible share of sales, and split that share across channels in
@@ -220,6 +224,173 @@ After stage 3, look at each feature:
 **Do not tighten a prior because you dislike the answer.** Tighten it only to
 impose information you can name. The difference is whether you could write the
 sentence "this prior comes from ___" and have it be true.
+
+### Updating a prior mean with no benchmark — mean shift and contraction
+
+With a benchmark there is an outside target, R, and the benchmark sheet does
+the arithmetic. **Without one, the only evidence about where a prior should sit
+is this run's own data** — and two columns of
+`02_convergence/prior_posterior_contraction.csv` carry all of it. Read them on
+the **`use_for_delta` row** (`glogbeta_*` / `mu_logbeta_*` / `logbeta_*` for a
+signed variable — the log scale; why that row and not `beta_*`:
+`prior_posterior_contraction_fitting.md` §2b):
+
+| Column | Formula | Question it answers |
+|---|---|---|
+| `contraction` = c | `1 − posterior_var / prior_var` | did the data **sharpen** it? |
+| `mean_shift_in_prior_sd` = s | `(posterior_mean − prior_mean) / prior_sd` | did the data **move** it, and how far? |
+
+**What the data alone says.** The posterior is a precision-weighted average,
+`posterior = (1 − c)·prior + c·data`, so the data's own centre — the "Data"
+curve in the prior/posterior charts — is recoverable:
+
+```
+mu_data = prior_mean + s × prior_sd / c            (the log-scale row's own numbers)
+coefficient the data implies = exp(mu_data)        (signed variable, median basis)
+                             = mu_data             (free variable - natural scale, no exp)
+```
+
+Worked example — prior median 0.05, `prior_sd` 0.5 (log), c = 0.4, s = +0.8:
+
+```
+prior_mean (log)  = ln 0.05                 = −2.996
+posterior (log)   = −2.996 + 0.8 × 0.5      = −2.596   → median 0.075
+mu_data           = −2.996 + 0.8 × 0.5/0.4  = −1.996   → the data alone says 0.136
+check: 0.6 × (−2.996) + 0.4 × (−1.996)      = −2.596   ✓
+```
+
+**What to do — decided by c first, then s:**
+
+| c | \|s\| | Reading | The prior mean |
+|---|---|---|---|
+| < 0.2 | any | the data is silent. `mu_data` divides by a small c, so it is mostly noise | **do not update it from this run.** Keep it and report the result as an assumption, or bring outside evidence (the ladder above). Widening the sd once is a fair test: if c stays under 0.2, the variable is not identified in this data |
+| ≥ 0.2 | ≤ 2 | prior and data agree | **leave it.** The posterior is the answer. Re-centring on it and refitting uses the data twice |
+| ≥ 0.2 | > 2 | **prior-data conflict** — the prior was in the wrong place | 1. **check units first** (`dv_scale`, `scale_mode`, `scaling_window` — the commonest cause, `TUNING_GUIDE.md` §4). 2. If the prior came from weak evidence (ladder 0–2), set the mean to `exp(mu_data)`, **keep the sd wide** (≥ 0.5 relative) and refit once. 3. If it came from strong evidence (an experiment), keep it and investigate the data instead — confounding, collinearity (§3) |
+| > 0.8 | any | the data dominates | leave it — the prior barely matters |
+
+**The rule behind the table: re-centre, never re-tighten.** Moving a misplaced
+prior to where the data points, with the sd kept wide, removes a conflict.
+Moving it there *and* tightening it counts the same data twice: the next run
+reports a narrower interval than the evidence supports, and its contraction
+reads as if the data sharpened something when it was you.
+
+The same goes for the staged build (§1): carrying a stage-k posterior forward
+as the stage-k+1 prior is this move. Carry the **median** forward as the mean;
+set the sd from the ladder level you can justify from *outside* evidence, not
+from the posterior sd.
+
+> `exp(mu_data)` is a **median**. With `prior_mean_basis: mean` multiply by
+> `exp(σ²/2)`. The `prior_sd` on the log-scale row is already the log sigma,
+> whatever `prior_sd_basis` the file used.
+
+---
+
+## 2b. Raising a variable you believe is under-credited — a UCM brand-equity series
+
+The situation: you add an unobserved-component (UCM) series for brand trust /
+equity. There is no vendor contribution for it, it has support, the model runs
+— and its share of the total contribution is lower than you believe. How do
+you raise it, and when should you not?
+
+### Step 0 — is it how the contribution is measured?
+
+This is the commonest cause, and **no prior can fix it**. A UCM output is a
+latent level from a state-space smoother: its origin is arbitrary, it is often
+zero-mean and can go negative. The reported contribution is
+`beta × Σ(x − reference) × dv_scale`, so:
+
+- `contribution_reference: zero` (or `auto` on an uncentred column) on a
+  zero-mean series → `Σx ≈ 0` → contribution ≈ 0 **whatever beta is**;
+- `center_mode: mean` with `contribution_reference: auto` → measured against
+  its own average → ≈ 0 by construction.
+
+**Fix:** `contribution_reference: min` — "the sales equity delivers above its
+weakest observed level" — or rebase the series upstream so zero means
+something (no equity). This is reporting only: the fit is bit-identical, only
+the number you present changes. Settle it before touching a prior.
+
+### Step 1 — find out what it competes with
+
+A brand-equity series is slow and smooth: the same shape as the **trend**, the
+**intercept**, the low Fourier terms, and often distribution (TDP). Look at:
+
+- `04_fit/posterior_correlation.csv` — the UCM coefficient against
+  `beta_trend_region` and `alpha_region`;
+- `01_data/collinearity_vif.csv` — `explained_by` on the UCM row;
+- `contraction` on its `use_for_delta` row.
+
+High correlation with the trend or intercept means **the data cannot split
+them — the split is set by the priors.** That is not a failure; it tells you the
+share is a modelling choice, which makes raising it legitimate but makes it an
+assumption you must declare.
+
+### Step 2 — let contraction decide whether you may
+
+| c | Meaning | Raising the share is |
+|---|---|---|
+| < 0.2 | the share **is** your prior | legitimate — the data has no opinion. Report it as an assumption |
+| 0.2 – 0.5 | data and prior share it | possible; expect the fit to push back partly |
+| > 0.5 | the data says it is small | **against the data.** Only with outside evidence (a brand-tracking study, a published equity model). Expect CV accuracy to drop |
+
+### Step 3 — turn the share you want into a prior mean
+
+Treat your belief as the benchmark:
+
+```
+V   = target_share × Σ sales            (same window as the contribution report)
+V0  = its contribution now              (05_contributions/contribution_summary.csv)
+R   = V / V0
+new_prior_mean = old_prior_mean × R^(1 / (1 − max(c, 0)))      (c on the log-scale row)
+```
+
+The easy way: paste `V` into the TOTAL `benchmark` cell of the variable's row in
+`benchmark_comparison.xlsx` and read `suggested_prior`. Example: 2% now, you
+believe 6%, c = 0.15 → R = 3 → new = old × 3^(1/0.85) = **old × 3.64**.
+
+For a first prior, before any run: `beta = V / Σ(x − ref) / dv_scale`, with
+`ref = 0` under `contribution_reference: zero` and `ref = min(x)` under `min`,
+and `dv_scale` the region's mean KPI (`run.dv_scale: mean`). The pre-model
+share file does this only for `ref = 0` (it divides by raw `Σx`) — under `min`,
+compute it by hand.
+
+### Step 4 — make room for it
+
+Fitted sales ≈ actual sales — the adding-up constraint — so the extra volume
+must come **out of something**, and for a slow series it comes out of whatever
+it is collinear with. Decide where it should come from and loosen that:
+
+- **the intercept** — smaller `model.alpha_prior_sd` (0.05 nearly pins it) or
+  `include_intercept: false` (`CONFIG_GUIDE.md`, "the intercept in order of
+  severity");
+- **the trend** — `include_trend: false`. A linear trend and a rising equity
+  series are nearly the same column; keep one;
+- **the sign** — `sign_constraint: positive` on the UCM, so it cannot trade
+  negative against the trend.
+
+Skip this step and raising the prior of a variable collinear with the intercept
+only moves weight between two terms the data cannot separate: the posterior
+correlation goes more negative and the share bounces from run to run.
+
+### Step 5 — tighten only if you are imposing it
+
+If the variable is prior-driven (c < 0.2) and you want it held at `V`, tighten
+`global_prior_sd` (ladder level 4, 0.05–0.1 relative) and say so. Tightening
+changes c: as c → 0 the exponent → 1, so when you tighten at the same time set
+the prior to **current posterior median × R** directly.
+
+### Step 6 — check what you changed
+
+- **contraction** — jumped to ≈ 0? You imposed it. Fine if intended; say so.
+- **who gave up share** — `contribution_summary.csv`: out of the intercept or
+  trend (intended) or out of media (not intended)?
+- **CV** — `cv_scorecard.csv`: if wMAPE worsens by more than one standard
+  error, the data rejects the belief.
+- **exogeneity** — if the UCM was estimated from the **same sales series** (a
+  UCM decomposition of the KPI itself), it is a smoothed piece of the dependent
+  variable, not an explanatory variable: endogenous by construction, it will
+  absorb anything and its share means little.
+  `04_fit/exogeneity_cross_correlation.csv` flags it. Prefer an equity series
+  built from brand-tracking data (awareness, consideration, trust scores).
 
 ---
 
@@ -402,8 +573,9 @@ report as necessary, not sufficient.**
       └─ cv_scorecard.csv — admissible? and what is the STANDARD ERROR on
          wMAPE? A rival model must beat you by more than that to be better.
          compare_cv_runs([...]) applies the rule for you
-8.  Only now: compare to a benchmark - paste it into column E of
-    05_contributions/benchmark_comparison.xlsx and read the summary block
+8.  Only now: compare to a benchmark - paste it into the TOTAL (or region)
+    `benchmark` cells of 05_contributions/benchmark_comparison.xlsx and read
+    the summary sheet
 ```
 
 Step 8 is last on purpose. A model built to match a benchmark from the start
@@ -430,6 +602,13 @@ cannot tell you anything about the benchmark.
 8. **Reverting the centring fix** because centred features show ~0%
    contribution. That is `contribution_reference`, not a bug — set it to
    `zero`.
+9. **Re-centring a prior on this run's posterior and tightening it.** The
+   same data counted twice. Re-centre with the sd kept wide, or not at all
+   (§2, "Updating a prior mean with no benchmark").
+10. **Raising a variable's share without deciding where the volume comes
+    from.** Fitted sales are fixed; a slow series (brand equity, distribution)
+    takes its extra share from the intercept or trend, and if you have not
+    chosen which, the share bounces between runs (§2b).
 
 ---
 
@@ -448,7 +627,7 @@ Assumptions        04_fit/assumptions_report.md
 Stability          06_cross_validation/cv_stability_ranking.csv
 Model choice       06_cross_validation/cv_scorecard.csv + compare_cv_runs()
 Benchmark gap      05_contributions/benchmark_comparison.xlsx
-                   (paste into column E; delta clusters = structural)
+                   (paste into `benchmark`; delta clusters = structural)
 ```
 
 **Related:** `MERIDIAN_ASSUMPTIONS.md` (how Meridian handles all of this) · `TUNING_GUIDE.md` (which lever does what) · `OUTPUTS_GUIDE.md`

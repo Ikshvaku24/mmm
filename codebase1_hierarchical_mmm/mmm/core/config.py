@@ -451,13 +451,14 @@ class FeatureSpec:
                                        # "Expert", ...) - contributions are rolled up
                                        # by pillar in 05_contributions
     center_mode: str | None = None     # "none" | "mean" - the ONLY centring
-                                       # setting. None = "mean" for sign="free"
-                                       # (always centred), else "none".
-                                       # REQUIRED as "mean" for always-on LEVEL
+                                       # setting. None = "none" (no centring)
+                                       # for every sign.
+                                       # Consider "mean" for always-on LEVEL
                                        # variables (distribution, price index,
-                                       # ACV): without it they scale to ~1.0
-                                       # every period and duplicate the region
-                                       # intercept. Pair with
+                                       # ACV): uncentred they are near-constant
+                                       # and trade off against the region
+                                       # intercept (the sampler, not the
+                                       # prior, suffers). Pair it with
                                        # contribution_reference="zero".
     prior_sd_basis: str = "log"        # how to READ prior_sd / regional_sd:
                                        # "log" (as-is), "relative" (a fraction,
@@ -471,10 +472,9 @@ class FeatureSpec:
     sigma_log: float | None = None     # the sd the model actually samples
     regional_sd_log: float | None = None   # ditto for the cross-region tau
     scale_mode: str | None = None      # "none" | "sd" | "mean" | "mean_positive" |
-                                       # "max". None = the legacy default for this
-                                       # feature: "sd" when centred, else
-                                       # "mean_positive".
-                                       # USE "none"/"none" when the feature arrives
+                                       # "max". None = "none" (no scaling) - the
+                                       # default for every feature.
+                                       # "none"/"none" is right when the feature arrives
                                        # already transformed AND already on the
                                        # scale your priors were derived on - any
                                        # further scaling silently rescales every
@@ -508,11 +508,15 @@ class FeatureSpec:
         # `center_mode` is the ONLY centring setting. The old 0/1 `center`
         # column is gone: two columns meaning the same thing is how a center=1
         # silently became a no-op in v7, when an explicit center_mode won and
-        # overwrote it. A `free` feature is always centred - the sign
-        # constraint is what made uncentred scaling meaningful in the first
-        # place, and there is none.
+        # overwrote it.
+        # DEFAULT: no centring and no scaling, for every sign. The data arrives
+        # already transformed, and priors are written per RAW unit (that is
+        # what the pre-model builder produces and what every prior file on the
+        # real data used). A blank used to mean "mean"/"sd" for a free feature
+        # and "mean_positive" for a signed one - which silently put a raw-unit
+        # prior on a rescaled axis. Ask for centring or scaling explicitly.
         if s.center_mode is None:
-            s.center_mode = "mean" if s.sign == "free" else "none"
+            s.center_mode = "none"
         else:
             s.center_mode = str(s.center_mode).strip().lower()
         if s.center_mode not in VALID_CENTER:
@@ -520,7 +524,7 @@ class FeatureSpec:
                 f"{s.name}: center_mode must be one of {VALID_CENTER}, "
                 f"got {s.center_mode!r}")
         if s.scale_mode is None:
-            s.scale_mode = "sd" if s.center_mode == "mean" else "mean_positive"
+            s.scale_mode = "none"
         else:
             s.scale_mode = str(s.scale_mode).strip().lower()
         if s.scale_mode not in VALID_SCALE:
@@ -912,6 +916,18 @@ class RunConfig:
                                 # coefficients must shrink to match - only use it
                                 # when your priors were derived on that same
                                 # single scale.
+    scaling_window: str = "train"   # "train" | "full" - which periods the
+                                # centring/scaling statistics come from, for
+                                # the features AND the KPI. "train": the
+                                # training window only, so the holdout never
+                                # touches the transform. "full": the whole
+                                # panel - the window a vendor contribution and
+                                # the pre-model priors are computed over, so
+                                # dv_scale: mean is then EXACTLY the dv_agg the
+                                # priors were divided by. The price: the
+                                # holdout metrics are no longer strictly out of
+                                # sample (warned). CV always uses each fold's
+                                # own training window.
     cadence: str = "auto"       # "auto" | "weekly" | "monthly". Sets every
                                 # period count downstream. "auto" infers it from
                                 # the observed date spacing in prepare_data.
@@ -942,10 +958,13 @@ class RunConfig:
                                           # whose own maximum is dust; dividing by
                                           # ~1e-15 turns float noise into a
                                           # regressor. Set 0 to disable the check.
-    near_constant_sd: float = 0.1         # warn when an always-on scale-only feature
-                                          # has scaled sd below this: it is ~constant
-                                          # at 1.0 and therefore collinear with the
-                                          # region intercept (use center_mode=mean)
+    near_constant_sd: float = 0.1         # warn when an always-on UNCENTRED feature
+                                          # has sd / level (level = mean |non-zero
+                                          # value|) below this: it is ~constant
+                                          # and therefore collinear with the
+                                          # region intercept (use center_mode=mean).
+                                          # Relative, so it reads the same with
+                                          # or without scaling.
 
     def __post_init__(self):
         if self.dv_center not in VALID_CENTER:
@@ -954,6 +973,10 @@ class RunConfig:
             raise ValueError(f"dv_scale must be one of {VALID_SCALE}. " + SCALE_HELP)
         if self.dv_scale_scope not in {"region", "global"}:
             raise ValueError("dv_scale_scope must be 'region' or 'global'")
+        self.scaling_window = str(self.scaling_window or "train").strip().lower()
+        if self.scaling_window not in {"train", "full"}:
+            raise ValueError("scaling_window must be 'train' or 'full', got "
+                             f"{self.scaling_window!r}")
         self.cadence = str(self.cadence or "auto").strip().lower()
         if self.cadence not in VALID_CADENCE:
             raise ValueError(f"cadence must be one of {VALID_CADENCE}, "

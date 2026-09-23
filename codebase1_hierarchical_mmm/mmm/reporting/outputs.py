@@ -397,6 +397,17 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
             n_active = int(info.n_active_train)
             sd = float(pdata.X[(pdata.region_idx == g) & pdata.train_mask,
                                pdata.feature_index[name]].std())
+            # "near-constant" is judged RELATIVE to the column's own level
+            # (sd / mean |non-zero value|), so an unscaled TDP of 80 +/- 0.5
+            # is flagged exactly as a scaled 1.0 +/- 0.006 was
+            flag_sd = sd
+            raw_all = getattr(pdata, "X_raw", None)
+            if info.method == "scale_only" and raw_all is not None:
+                raw = raw_all[(pdata.region_idx == g) & pdata.train_mask,
+                              pdata.feature_index[name]]
+                nz = raw[raw != 0]
+                level = float(np.mean(np.abs(nz))) if len(nz) else 0.0
+                flag_sd = float(raw.std() / level) if level > 0 else 0.0
             # original-unit conversion: beta_orig = beta_scaled * s_y_g / s_x_gj
             factor = pdata.y_scale[g] / info.scale
             orig = arr[:, g] * factor
@@ -412,7 +423,8 @@ def coefficient_report(idata, pdata: PreparedData, outdir: str,
                 "n_active_train": n_active,
                 "feature_sd_train": round(sd, 4),
                 "scaling_method": info.method,
-                "data_support": _support_flag(sign, n_active, sd, info.method),
+                "data_support": _support_flag(sign, n_active, flag_sd,
+                                              info.method),
             }
             rows.append(row)
     df = pd.DataFrame(rows)
@@ -663,8 +675,7 @@ def fit_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                         top_n: int = 20, out_cfg: OutputConfig | None = None,
                         coef: pd.DataFrame | None = None,
-                        benchmark_mapping: str | None = None,
-                        benchmark_contribution: str | None = None):
+                        benchmark_mapping: str | None = None):
     out_cfg = out_cfg or OutputConfig()
     os.makedirs(outdir, exist_ok=True)
     G = len(pdata.region_names)
@@ -751,8 +762,7 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
 
     write_contribution_diagnostics(
         decomp, pdata, outdir, out_cfg, coef,
-        benchmark_mapping=benchmark_mapping,
-        benchmark_contribution=benchmark_contribution)
+        benchmark_mapping=benchmark_mapping)
     if not out_cfg.contribution_plots:
         return df
 

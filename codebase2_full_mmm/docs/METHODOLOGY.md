@@ -214,8 +214,15 @@ The full rules, tables and conversions are in the blueprint (§9). The order to 
 `mmm/data/prior_builder.py` turns a vendor decomposition into coefficient priors with:
 
 ```
-prior_mean = contribution ÷ support ÷ dv_agg          support = Σ of the RAW column
+region_coef   = contribution ÷ support ÷ dv_agg          support = Σ of the RAW column
+national mean = Σ region_coef over regions with support ÷ that count
 ```
+
+It writes two files - `feature_priors_national.csv` (hierarchical) and
+`feature_priors_regional.csv` (plus a row per region, independent) - with
+`scale_mode: none`, so they are only in the model's units with
+`dv_scale: mean`, `dv_scale_scope: region`. Codebase 2 must keep that pairing
+when it ports `resolve_scaling`, or warn the same way.
 
 - **Linear and carryover-only features:** this still holds. Normalised adstock preserves volume, so
   the support of the adstocked column is the support of the raw one (minus carryover past the end).

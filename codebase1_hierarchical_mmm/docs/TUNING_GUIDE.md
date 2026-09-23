@@ -357,14 +357,18 @@ combination driven by shrinkage rather than that region's data.
 | `dv_center` | `mean` (default) \| `none` | `none` sets `y_mean = 0`, which keeps the inverse transform correct automatically. **Never strip centring by editing one side of the transform.** |
 | `dv_scale` | `none` \| `sd` (default) \| `mean` \| `mean_positive` \| `max` | must match the denominator your priors were derived on |
 | `dv_scale_scope` | `region` (default) \| `global` | `global` only if the priors were built on one shared number |
+| `scaling_window` | `train` (default) \| `full` | which periods every centre/scale is computed on — features and KPI. `full` = the whole panel (matches a vendor decomposition's window; holdout no longer strictly out of sample; CV unaffected) |
 
 **Symptom of a mismatch:** every contribution off by a constant factor per
 region, and `mean_shift_in_prior_sd` large and same-signed across many features.
 
 ### 4.2 Features — `center_mode` / `scale_mode`
 
-| `center_mode` | `none` \| `mean` |
-| `scale_mode` | `none` \| `sd` \| `mean` \| `mean_positive` \| `max` |
+| `center_mode` | **`none` (default)** \| `mean` |
+| `scale_mode` | **`none` (default)** \| `sd` \| `mean` \| `mean_positive` \| `max` |
+
+A blank is `none` / `none` for every feature — the column is used exactly as it
+is in the datacube. Everything below is opt-in.
 
 > ⚠️ **An explicit `center_mode` beats the legacy `center` flag** and then
 > overwrites it. If your file has `center_mode=none`, setting `center=1` does
@@ -437,7 +441,7 @@ still sums to the fitted value.
 
 | Symptom | Most likely cause | Lever |
 |---|---|---|
-| Contribution too high/low vs a target, `contraction < 0.2` | it *is* your prior | `global_prior_mean` (§1.1) - paste the target into `benchmark_comparison.xlsx` and read column K |
+| Contribution too high/low vs a target, `contraction < 0.2` | it *is* your prior | `global_prior_mean` (§1.1) - paste the target into `benchmark_comparison.xlsx` and read `suggested_prior` (TOTAL for the national mean, a region block for its override) |
 | Too high/low, `contraction > 0.5` | the data disagrees | tighten `global_prior_sd` to impose, or accept (§1.3) |
 | `mean_shift` > 2 prior sd | **prior-data conflict** | check `dv_scale` units first (§4), then the prior |
 | Sign is wrong | free feature, wrong-signed mean | `sign_constraint`, or negate the mean (§1.4) |

@@ -63,8 +63,17 @@ SECTIONS = {
 EXCLUDED = {"model": ("features",)}
 
 DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format",
-             "benchmark_mapping", "vendor_contribution", "pillar_spend",
-             "dv_aggregation", "pre_model_dir")
+             "mapping_file", "share_file", "dv_aggregation", "pre_model_dir")
+
+# keys that used to exist, and what replaced them - so an old config gets told
+# what to do instead of a bare "unknown key"
+RENAMED_KEYS = {
+    "benchmark_mapping": "mapping_file (vendor_variable,our_variable[,region]"
+                         "[,contribution])",
+    "vendor_contribution": "the `contribution` column of mapping_file",
+    "pillar_spend": "share_file (section,pillar,pillar_share_pct,variable,"
+                    "spend,variable_share_pct)",
+}
 
 
 @dataclasses.dataclass
@@ -101,25 +110,26 @@ HELP: dict[str, dict[str, str]] = {
         "sheet": "Excel sheet name (null = first sheet). Ignored for .csv/.parquet",
         "feature_priors": "the feature/prior table - the list of modelled columns",
         "date_format": "explicit strptime format for the date column (null = infer)",
-        "benchmark_mapping": ("OPTIONAL csv/xlsx mapping our features to the benchmark's "
-                              "combined variables (feature,benchmark_group). When the vendor "
-                              "reports one line where we carry several columns, the benchmark "
-                              "sheet sums ours first so one row compares to one row. "
-                              "null = compare feature by feature. Sample: "
-                              "samples/benchmark_mapping_sample.csv"),
-        "vendor_contribution": ("OPTIONAL csv/xlsx of the vendor's contribution per feature "
-                                "(and region). When present the PRE-MODEL step inverts it into "
-                                "a sample feature-prior file and pre-fills the benchmark sheet. "
-                                "Sample: samples/vendor_contribution_sample.csv"),
-        "pillar_spend": ("OPTIONAL csv/xlsx used when there is NO vendor contribution: "
-                         "pillar, feature, feature_spend, pillar_share_pct. The pre-model step "
-                         "splits each pillar's share of sales across its features by spend. "
-                         "Sample: samples/pillar_spend_sample.csv"),
-        "dv_aggregation": ("how the KPI is aggregated per region when inverting a contribution: "
-                           "mean (default) | sum | median. Must match how the vendor expressed "
-                           "their number"),
-        "pre_model_dir": ("where the pre-model step writes the sample prior file and its "
-                          "calculation workbook. null = pre_model_outputs/"),
+        "mapping_file": ("OPTIONAL. vendor_variable, our_variable[, region][, contribution] - "
+                         "which vendor variable is which of ours. Replicate the vendor name "
+                         "across rows when we split it (period / sub-brand), or ours when "
+                         "they do. Every our_variable must be in data.feature_priors (which "
+                         "may carry more). Groups the benchmark sheet; WITH contributions it "
+                         "also drives the pre-model prior builder (case a) and pre-fills the "
+                         "sheet's benchmark cells. Sample: samples/mapping_sample.csv"),
+        "share_file": ("OPTIONAL. section, pillar, pillar_share_pct, variable, spend, "
+                       "variable_share_pct[, sign_constraint]. Sections: media, expert, "
+                       "comp_media, trade, baseline. Builds the prior file from shares of "
+                       "sales when the mapping has no contributions (cases b and c); always "
+                       "supplies pillars and the baseline flag. Sample: "
+                       "samples/share_sample.csv"),
+        "dv_aggregation": ("the per-region KPI level a generated coefficient is expressed "
+                           "against: mean (default) | sum | median. It must equal run.dv_scale, "
+                           "so keep mean and set run.dv_scale: mean when fitting with generated "
+                           "priors - the pre-model step warns otherwise"),
+        "pre_model_dir": ("where the pre-model step writes feature_priors_national.csv, "
+                          "feature_priors_regional.csv and the calculation workbook. null = "
+                          "pre_model_outputs/"),
     },
     "model": {
         "likelihood": "'normal' | 'student_t'. student_t is robust to promo/holiday spikes",
@@ -145,6 +155,11 @@ HELP: dict[str, dict[str, str]] = {
         "dv_center": "'mean' | 'none' - what is subtracted from the KPI before fitting",
         "dv_scale": "'none'|'sd'|'mean'|'mean_positive'|'max' - the unit your PRIORS live in",
         "dv_scale_scope": "'region' (own scale each) | 'global' (one number for all regions)",
+        "scaling_window": ("'train' | 'full' - which periods the centring/scaling statistics "
+                           "come from, for features AND the KPI. 'full' matches the window "
+                           "generated priors were computed over, but the holdout metrics are "
+                           "then not strictly out of sample. CV always uses each fold's train "
+                           "window"),
         "cadence": "'auto'|'weekly'|'monthly' - sets every period count downstream",
         "holdout_periods": ("last N dates held out per region for OOS metrics, as an ABSOLUTE "
                             "count. null = use holdout_fraction / the cadence policy"),
@@ -155,7 +170,8 @@ HELP: dict[str, dict[str, str]] = {
         "on_convergence_failure": "'warn' | 'fail' - 'fail' refuses to persist an unconverged fit",
         "zero_threshold_rel": "snap |v| < this * max|v| to 0 before scaling. ~1e-6 kills adstock dust",
         "min_feature_scale": "reject a scale-only feature whose scaling factor is below this",
-        "near_constant_sd": "warn when an always-on scaled feature is this flat (collinear with alpha)",
+        "near_constant_sd": ("warn when an always-on uncentred feature has sd / level below "
+                             "this (collinear with alpha)"),
     },
     "sampler": {
         "draws": "posterior draws kept per chain",
@@ -281,6 +297,9 @@ def _check_keys(got, valid, where: str) -> None:
         return
     bits = []
     for k in unknown:
+        if k in RENAMED_KEYS:
+            bits.append(f"{k!r} (REMOVED - use {RENAMED_KEYS[k]})")
+            continue
         near = difflib.get_close_matches(str(k), list(valid), n=1, cutoff=0.6)
         bits.append(f"{k!r}" + (f" (did you mean {near[0]!r}?)" if near else ""))
     raise ValueError(
@@ -315,8 +334,8 @@ def load_settings(path: str, features=None) -> Settings:
 
     data = dict(raw.get("data") or {})
     _check_keys(data, set(DATA_KEYS), "data")
-    for k in ("input_path", "feature_priors", "benchmark_mapping",
-              "vendor_contribution", "pillar_spend", "pre_model_dir"):
+    for k in ("input_path", "feature_priors", "mapping_file", "share_file",
+              "pre_model_dir"):
         if data.get(k):
             data[k] = _resolve_path(data[k], base_dir)
 
@@ -382,9 +401,8 @@ DEFAULT_DATA = {
     "sheet": None,
     "feature_priors": "feature_priors.csv",
     "date_format": None,
-    "benchmark_mapping": None,
-    "vendor_contribution": None,
-    "pillar_spend": None,
+    "mapping_file": None,
+    "share_file": None,
     "dv_aggregation": "mean",
     "pre_model_dir": None,
 }
@@ -536,8 +554,8 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     # file, turn it into a sample prior file (plus the working) before fitting.
     # It never overwrites `data.feature_priors` - you review it and point at it
     # yourself, because a generated prior is a proposal, not a decision.
-    if run_pre_model is not None and (settings.data.get("vendor_contribution")
-                                      or settings.data.get("pillar_spend")):
+    if run_pre_model is not None and (settings.data.get("mapping_file")
+                                      or settings.data.get("share_file")):
         with collect_warnings() as _pre:
             result_pre = run_pre_model(settings, df=panel)
         caught += list(_pre)
@@ -548,15 +566,12 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
                  save_trace=save_trace, out_cfg=settings.output,
                  cv_cfg=settings.cv, extra_warnings=caught,
                  assumption_cfg=settings.assumptions,
-                 benchmark_mapping=settings.data.get("benchmark_mapping"),
-                 benchmark_contribution=(
-                     result_pre.get("benchmark_contribution")
-                     or settings.data.get("vendor_contribution")))
+                 benchmark_mapping=settings.data.get("mapping_file"))
     if record_settings:
         dump_settings(settings, os.path.join(result["output_dir"], "01_data",
                                              "resolved_config.yaml"))
     result["settings"] = settings
-    if result_pre:
+    if result_pre and result_pre.get("case") != "d":
         result["pre_model"] = result_pre
     return result
 

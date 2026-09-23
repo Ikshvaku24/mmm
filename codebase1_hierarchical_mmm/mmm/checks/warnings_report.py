@@ -252,6 +252,70 @@ _RULES = (
             "Set `run.dv_center: mean`. The baseline then becomes the fixed "
             "training mean instead of a free parameter. TUNING_GUIDE section 2.2."),
     ),
+    dict(
+        slug="scaling_uses_holdout",
+        severity="review",
+        match=("scaling_window='full'",),
+        title="The scaling statistics include the holdout",
+        means=(
+            "`run.scaling_window: full` computes every centre and scale - the "
+            "KPI's included - on the whole panel. The holdout rows of "
+            "fit_metrics.csv therefore saw one number per region and column "
+            "from the test window; the KPI centre in particular carries the "
+            "holdout's sales level."),
+        why="Chosen deliberately, usually so dv_scale matches the window the "
+            "vendor contributions and generated priors were computed over.",
+        fix=("Nothing to fix if intended. Judge out-of-sample accuracy with "
+             "cross-validation (`cv.enabled: true`), which always scales on "
+             "each fold's own training window. CONFIG_GUIDE, run section."),
+    ),
+    dict(
+        slug="generated_prior_units",
+        severity="high",
+        match=("the generated priors are in different units",),
+        title="The generated prior file is in different units from this run",
+        means=(
+            "The pre-model step wrote each mean as contribution / SUM(raw x) / "
+            "the region's MEAN KPI. The model reads a coefficient against "
+            "`run.dv_scale`, per `run.dv_scale_scope`. When those differ, every "
+            "contribution fitted with the generated file is off by the ratio "
+            "of the two scales - and still reconciles to 100%, so no later "
+            "check can see it."),
+        why="`run.dv_scale` is not `mean`, `dv_scale_scope` is not `region`, "
+            "or `data.dv_aggregation` is not `mean`.",
+        fix=(
+            "Set `run.dv_scale: mean`, `run.dv_scale_scope: region` and keep "
+            "`data.dv_aggregation: mean` before fitting with the generated "
+            "file. FEATURE_PRIOR_GUIDE section 5."),
+    ),
+    dict(
+        slug="generated_prior_blank",
+        severity="medium",
+        match=("have no generated prior",),
+        title="Some variables got no generated prior mean",
+        means=(
+            "The pre-model step left these variables' `global_prior_mean` "
+            "blank: neither the mapping nor the share file covers them, or "
+            "they have no support in any region."),
+        why="The feature prior file lists more variables than the two input "
+            "files cover - which is allowed - or the extract is empty.",
+        fix="Fill the mean by hand, add the variable to the share file, or "
+            "drop it before fitting. FEATURE_PRIOR_GUIDE section 5.",
+    ),
+    dict(
+        slug="regional_prior_sign_skipped",
+        severity="review",
+        match=("run AGAINST their variable's sign",),
+        title="Some regions have no row in the regional prior file",
+        means=(
+            "In these regions the implied coefficient has the opposite sign "
+            "to the variable's `sign_constraint`. A region row holds a "
+            "magnitude and the sign is feature-level, so the region falls "
+            "back to the national prior."),
+        why="The vendor's contribution changes sign across regions.",
+        fix="Decide whether the variable is really signed; if the sign is "
+            "genuinely regional, make it `free`. FEATURE_PRIOR_GUIDE section 5.",
+    ),
 )
 
 _OTHER = dict(

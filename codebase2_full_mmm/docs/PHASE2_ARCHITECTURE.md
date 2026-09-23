@@ -270,7 +270,7 @@ How to read it:
 |---|---|---|---|---|---|
 | Cadence presets | `config.py::PeriodPlan`, `resolve_period_plan`, `infer_cadence` | weekly and monthly panels get sensible holdout, MAT and CV counts | hard-coded 13 / 52 | port | P2 |
 | Model selection | `cross_validation.py::scorecard`, `select_model`, `compare_cv_runs`; `CVConfig.enabled`, `resolved` | gate → accuracy beyond one standard error → stability → parsimony | `run_cv` with no scorecard | port; **keep** transform stability | P2 |
-| Benchmark sheet | `benchmark.py::write_benchmark_comparison`, `load_mapping`, `apply_mapping` | paste a vendor contribution; live formulas | none | **port + adapt** (§3, item 2) | P2 |
+| Benchmark sheet | `benchmark.py::write_benchmark_comparison`, `load_mapping`, `sheet_rows`, `benchmark_values` | paste a vendor contribution; live formulas; regions across the columns; group + member rows (R on the group, contraction per member) | none | **port + adapt** (§3, item 2) | P2 |
 
 ### J. Tests and shared modules
 

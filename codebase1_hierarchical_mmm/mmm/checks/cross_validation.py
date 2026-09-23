@@ -347,8 +347,11 @@ def run_cv(df: pd.DataFrame,
               f"test {test_span[0]}..{test_span[1]}")
 
         sub = d[d[dc] <= pd.Timestamp(dates[te - 1])]
+        # scaling_window is forced to "train": a fold that scaled on its own
+        # test periods would not be an out-of-sample test, which is the one
+        # thing CV exists to be
         fold_run = replace(run_cfg, holdout_periods=cv_cfg.horizon,
-                           cadence=plan.cadence)
+                           cadence=plan.cadence, scaling_window="train")
         pdata = prepare_data(sub, fold_run, model_cfg)
         region_sets.append(tuple(pdata.region_names))
 

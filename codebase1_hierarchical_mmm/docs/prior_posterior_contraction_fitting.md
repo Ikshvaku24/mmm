@@ -43,6 +43,107 @@ $$\mu_{\text{prior, new}} = \mu_{\text{prior, old}} \times R^{\left(\frac{1}{1 -
 
 Once $\mu_{\text{prior, new}}$ is set, **`global_prior_sd` must be tightened to $0.02 - 0.05$** (with `sd_basis = "relative"`). Without tightening `prior_sd`, sampling noise will cause the parameter to drift away from the new target mean during MCMC execution.
 
+> **Caveat on tightening in the same step.** The formula holds the prior sd
+> fixed — c is the contraction *at that sd*. Tighten the sd as well and c falls
+> towards 0, so the exponent falls towards 1. If you correct and tighten
+> together, set the new prior median to **current posterior median × R**
+> directly instead.
+
+---
+
+### 2b. Which contraction goes in the exponent — `glogbeta` or `beta`?
+
+**The log-scale one: the row marked `use_for_delta = TRUE` in
+`02_convergence/prior_posterior_contraction.csv`.** For a sign-constrained
+feature that is `glogbeta_*` (global pooling), `mu_logbeta_*` (hierarchical —
+the population location) or `logbeta_*` (independent — one per region). Never
+the `beta_*` row.
+
+#### The difference between `glogbeta` and `beta`
+
+A sign-constrained coefficient is built as $\beta = \pm\exp(\eta)$, with
+$\eta \sim \text{Normal}(\mu, \sigma)$. The two names are the two sides of that
+exponential:
+
+| | `glogbeta_<bucket>` (and `mu_logbeta_*`, `logbeta_*`) | `beta_<bucket>` |
+|---|---|---|
+| what it is | $\eta$ — the **log** of the coefficient's magnitude | $\beta = \pm\exp(\eta)$ — the coefficient itself, sign applied |
+| sampled or derived | **sampled**: the Normal parameter PyMC actually draws | **derived** (`pm.Deterministic`): computed from $\eta$ after sampling |
+| distribution | Normal — prior $\text{Normal}(\mu, \sigma)$ from `resolve_prior_params` | log-normal — skewed, strictly one-signed |
+| scale | log units: +0.1 = +10.5% | coefficient units, KPI per feature unit |
+| the name | **g**lobal **log** **beta** — global pooling. `mu_logbeta` is the hierarchical population location, `logbeta` the independent per-region one | the number reported in `coefficient_report.csv` |
+| under global pooling | one value | the same value repeated for every region (a broadcast) |
+
+The same holds for the priors: `global_prior_mean` is the **median** of
+$\beta$, i.e. $\exp(\mu)$ (`prior_mean_basis: median`), and `prior_sd` under
+`prior_sd_basis: log` is $\sigma$, the sd of $\eta$.
+
+A **free** feature has no exponential: $\beta \sim \text{Normal}(\mu, \sigma)$
+directly, and the sampled Normal *is* the natural-scale parameter (`gbeta_*`,
+`mu_beta_*`, or `beta_*` for independent pooling). Its `use_for_delta` row is
+that one.
+
+#### Why the exponent needs the log-scale contraction
+
+The correction formula is exact because of three facts, and all three are
+statements about $\eta$:
+
+1. **The contribution is proportional to $\exp(\eta)$.** With $\Sigma x$ and
+   `dv_scale` fixed, $C = \exp(\eta) \times \Sigma(x+\text{shift}) \times
+   \text{dv\_scale}$, so $\ln C = \eta + \text{const}$. Multiplying the
+   contribution by $R$ means *adding* $\ln R$ to $\eta$.
+2. **The update is linear in $\eta$.** For a Normal prior and a (near-)Gaussian
+   likelihood, $\eta_{\text{post}} = (1-c)\,\mu + c\,\eta_{\text{data}}$ with
+   $1 - c = \text{Var}_{\text{post}}(\eta) / \text{Var}_{\text{prior}}(\eta)$ —
+   the prior's precision weight. That is exactly how `contraction` is defined,
+   **on this row**.
+3. So moving the prior location by $\Delta$ moves the posterior by
+   $(1-c)\Delta$. To move the posterior by $\ln R$ you need
+   $\Delta = \ln R / (1-c)$ — and on the coefficient scale that is
+   $\exp(\mu_{\text{new}}) = \exp(\mu_{\text{old}}) \times R^{1/(1-c)}$.
+
+None of this holds on `beta_*`. $\beta$ is log-normal, and a log-normal's
+variance depends on its **location** as well as its spread:
+$\text{Var}(\beta) = (e^{\sigma^2}-1)\,e^{2\mu+\sigma^2}$. So `beta`'s
+contraction mixes "the data sharpened it" with "the data moved it" — it is not
+the precision weight, and it can even go **negative** when the data is
+informative, simply because the posterior moved up. Worked example, prior
+$\sigma = 0.5$, posterior $\sigma = 0.35$ on the log scale:
+
+| posterior moved up by (log units) | contraction on `glogbeta` | contraction on `beta` |
+|---|---|---|
+| 0.0 | **0.51** | 0.60 |
+| 0.3 (≈ +35%) | **0.51** | 0.26 |
+| 0.8 (≈ ×2.2) | **0.51** | **−1.00** — reads as "unidentified" |
+
+The data did exactly the same amount of work in all three rows (checked by
+simulation). Only the log-scale number says so. Feed the `beta` number into $R^{1/(1-c)}$ and the
+correction is too small in the middle row and nonsense in the last; feed it to
+the verdict and a well-identified feature is called unidentified. That is why
+the contraction report marks one family per feature `use_for_delta`, and why
+the benchmark sheet reads only that row.
+
+#### Limits to know
+
+- **Negative contraction (c ≤ 0) on the log row is a genuine signal** — the
+  posterior is wider than the prior. The sheet uses $\max(c, 0)$, so the
+  exponent is 1 and the prior scales by $R$ directly: the data is not moving
+  it, so its contribution follows its prior one-for-one. Strongly negative
+  values (below −0.2) are a collinearity problem to fix first (§5 below).
+- **A `free` feature is linear, not multiplicative.** Its update is
+  $\beta_{\text{post}} = (1-c)\mu + c\,\beta_{\text{data}}$ on the natural
+  scale, so the exact correction is additive:
+  $\mu_{\text{new}} = \mu_{\text{old}} + (R-1)\,\beta_{\text{post}} / (1-c)$.
+  The multiplicative $R^{1/(1-c)}$ agrees with it only when c is small (the
+  posterior ≈ the prior). For a free variable with high contraction — a spike
+  dummy the data pins — use the additive form.
+- **Split variables** use the GROUP's $R$ with each member's OWN log-scale
+  contraction: $\text{new}_m = \text{old}_m \times R^{1/(1-\max(c_m, 0))}$. See
+  `OUTPUTS_GUIDE.md`, `benchmark_comparison.xlsx`.
+- **Hierarchical pooling:** the `use_for_delta` row is the population
+  location `mu_logbeta_*`, so a region block's suggestion uses the
+  population's contraction — an approximation for any one region.
+
 ---
 
 ### 3. The `mat1/mat2` Prior Derivation Bug

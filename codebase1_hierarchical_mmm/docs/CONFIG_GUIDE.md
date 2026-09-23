@@ -77,11 +77,10 @@ Paths are relative **to the YAML file**, not the working directory.
 | `sheet` | `null` | Excel sheet name. `null` = first sheet. Ignored for csv/parquet |
 | `feature_priors` | `feature_priors.csv` | the feature/prior table — **the list of modelled columns**. Its `variable` values must match the data column names exactly |
 | `date_format` | `null` | explicit strptime format. `null` = infer |
-| `benchmark_mapping` | `null` | **optional.** Maps our features to a benchmark's combined variables. Sample: `samples/benchmark_mapping_sample.csv` |
-| `vendor_contribution` | `null` | **optional.** The vendor's contribution per feature (and region). Triggers the pre-model prior builder. Sample: `samples/vendor_contribution_sample.csv` |
-| `pillar_spend` | `null` | **optional.** Used when there is NO vendor contribution: `pillar, feature, feature_spend, pillar_share_pct`. Sample: `samples/pillar_spend_sample.csv` |
-| `dv_aggregation` | `mean` | `mean`/`sum`/`median` — how the KPI is aggregated per region when inverting a contribution. Must match how the vendor expressed theirs |
-| `pre_model_dir` | `null` | where the generated prior file and its calculation workbook go. `null` = `pre_model_outputs/` |
+| `mapping_file` | `null` | **optional.** `vendor_variable, our_variable[, region][, contribution]` — which vendor variable is which of ours. Every `our_variable` must be in `feature_priors` (which may carry more). Groups the benchmark sheet; **with contributions** it builds the priors (case a) and pre-fills the sheet's benchmark cells. Sample: `samples/mapping_sample.csv` |
+| `share_file` | `null` | **optional.** `section, pillar, pillar_share_pct, variable, spend, variable_share_pct[, sign_constraint]` — shares of sales by section (`media`, `expert`, `comp_media`, `trade`, `baseline`). Every `variable` must be in `feature_priors`. Builds the priors when there are no contributions (cases b, c) and always supplies pillars + the baseline flag. Sample: `samples/share_sample.csv` |
+| `dv_aggregation` | `mean` | `mean`/`sum`/`median` — the per-region KPI level a generated coefficient is expressed against. **Must equal `run.dv_scale`** — keep `mean` and set `run.dv_scale: mean` when fitting with a generated file |
+| `pre_model_dir` | `null` | where `feature_priors_national.csv`, `feature_priors_regional.csv` and the calculation workbook go. `null` = `pre_model_outputs/` |
 
 ---
 
@@ -123,6 +122,7 @@ This is the lever for "my baseline is eating the decomposition".
 | `dv_center` | `mean` | `mean` or `none` — what is subtracted from the KPI |
 | `dv_scale` | `sd` | `none`/`sd`/`mean`/`mean_positive`/`max` — **the unit your priors live in** |
 | `dv_scale_scope` | `region` | `region` (own scale each) or `global` (one number for all) |
+| `scaling_window` | `train` | **which periods every centre and scale is computed on — features AND the KPI.** `train` = the training window only (the holdout never touches the transform). `full` = the whole panel. See below |
 | `cadence` | `auto` | `auto`/`weekly`/`monthly` — sets every period count downstream |
 | `holdout_periods` | `0` | last N dates held out per region, **absolute**. `null` = use `holdout_fraction` / the policy |
 | `holdout_fraction` | `null` | holdout as a **fraction of the panel**, so it follows the data. `null` = the policy default (0.125) |
@@ -130,7 +130,35 @@ This is the lever for "my baseline is eating the decomposition".
 | `on_convergence_failure` | `warn` | `warn` or `fail` — `fail` refuses to persist an unconverged fit |
 | `zero_threshold_rel` | `0.0` | snap `abs(v) < this × max abs(v)` to 0. **Use `1.0e-6`** for pre-transformed data whose adstock tail leaves dust |
 | `min_feature_scale` | `1.0e-12` | reject a column whose own scale is dust |
-| `near_constant_sd` | `0.1` | warn when an always-on scaled feature is this flat |
+| `near_constant_sd` | `0.1` | warn when an always-on **uncentred** feature has `sd / level` below this (relative, so it reads the same scaled or not) |
+
+### `scaling_window` — train or the whole panel?
+
+`scale_mode: mean` divides a column by its mean — **over the training window by
+default**, not the whole panel. `scaling_window` switches that for every centre
+and every scale at once, the KPI included:
+
+| | `train` (default) | `full` |
+|---|---|---|
+| centres and scales computed on | the training window | all periods, holdout included |
+| holdout metrics | strictly out of sample | **not** strictly out of sample — the KPI centre carries the holdout's level (warned: `00_warnings/scaling_uses_holdout.md`) |
+| generated priors | exact: the pre-model step divides by the **training-window** KPI mean, i.e. the model's own `dv_scale` | exact: divides by the whole-panel mean |
+| cross-validation | each fold's training window | **still** each fold's training window — CV ignores `full`, or it would not be out of sample |
+
+Choose `full` when the holdout is not what you are judging the model on (you
+use CV for that) and you want the scaling to describe the same period as the
+vendor's decomposition. Otherwise keep `train`. Either way the pre-model step
+computes its divisor on the same window as the model, so the generated means
+stay in the model's units — it prints how far the two windows' KPI means differ.
+
+### Feature defaults: no centring, no scaling
+
+A blank `center_mode` / `scale_mode` in the prior file now means **`none` /
+`none`** for every feature, whatever its sign: the column is passed to the
+model exactly as it is in the datacube, and priors are per raw unit. (Until
+2026-09-22 a blank meant `mean_positive` for signed features and `mean`/`sd` for
+free ones.) Centring and scaling are opt-in per feature — see
+`FEATURE_PRIOR_GUIDE.md` §1 and `TUNING_GUIDE.md` §4.2.
 
 ### ⚠️ The scaling rule that keeps costing runs
 
@@ -206,18 +234,31 @@ inventing data.
 
 ## The PRE-MODEL step — generating a prior file
 
-If the client gave you a **vendor decomposition** or a **pillar/spend
-breakdown**, you do not write 65 prior means by hand.
+Two files, both optional. Every variable they name must be in
+`data.feature_priors` — the prior file may carry **more** variables than they
+do, never fewer (with no prior file configured yet, the datacube is the list):
 
 ```yaml
 data:
-  vendor_contribution: vendor_contribution.csv   # case A
-  benchmark_mapping:   benchmark_map.csv         # if they combine variables
-  dv_aggregation:      mean
-# ---- or ----
-data:
-  pillar_spend: pillar_spend.csv                 # case B
+  mapping_file: mapping.csv     # vendor_variable, our_variable[, region][, contribution]
+  share_file:   shares.csv      # section, pillar, pillar_share_pct, variable, spend, variable_share_pct
+  dv_aggregation: mean
+run:
+  dv_scale: mean                # the generated means are per unit of the region's MEAN KPI
+  dv_scale_scope: region
 ```
+
+> **`run.dv_scale: mean` is required to fit with a generated file.** The
+> template default is `sd`; with it every generated mean is off by the ratio
+> mean/sd and the decomposition still reconciles to 100%. The pre-model step
+> warns (`00_warnings/generated_prior_units.md`) when this is not set.
+
+| Case | You gave | It does |
+|---|---|---|
+| **a** | a mapping **with contributions** (share file optional) | inverts the vendor decomposition; a variable the vendor did not report falls back to its share |
+| **b** | a mapping **without** contributions + a share file | builds from the shares |
+| **c** | a share file only | builds from the shares |
+| **d** | neither (or a mapping with no contributions and no shares) | **nothing** — the run uses `data.feature_priors` as usual |
 
 It runs automatically at the front of `run_from_yaml`, or standalone:
 
@@ -225,20 +266,27 @@ It runs automatically at the front of `run_from_yaml`, or standalone:
 python -m mmm.data.prior_builder config.yaml
 ```
 
-and writes to `pre_model_outputs/`:
+and writes to `pre_model_outputs/` (or `data.pre_model_dir`):
 
 | File | What it is |
 |---|---|
-| `feature_priors_sample.csv` | the generated prior file — **review it** |
-| `prior_calculation.xlsx` | every intermediate number, the formula, and a sheet explaining the method |
-| `benchmark_contribution.csv` | the vendor's numbers, canonicalised — used later to **pre-fill column E** of the benchmark sheet so nobody pastes by hand |
+| `feature_priors_national.csv` | one row per model variable, the **national** mean = sum of the per-region coefficients over the regions with support ÷ that count. `pooling: hierarchical`. **Review it** |
+| `feature_priors_regional.csv` | the same rows plus **one override row per region** with that region's own coefficient. `pooling: independent` |
+| `prior_calculation.xlsx` | the working (every intermediate number and the formula), the resulting means, and a sheet explaining the method |
+
+Which file to point `data.feature_priors` at is your **pooling** decision. The
+builder writes `scale_mode: none` and `contribution_reference: zero` on every
+row (the units the means were derived in), `sign_constraint` from the sign
+rules (negative contribution → negative; positive → `free` for a dummy, else
+positive; the share file's own column otherwise).
 
 **It never overwrites `data.feature_priors`.** A generated prior is a proposal,
-not a decision: point at it yourself once you have read it. Give neither input
-and nothing is generated — the run proceeds as usual.
+not a decision. It also leaves `center_mode` blank — set `mean` on TDP, price
+and category yourself.
 
-Full method, including how zero support, negative contributions and combined
-vendor variables are handled: `FEATURE_PRIOR_GUIDE.md` §5.
+The two file layouts, the five share-file sections and their formulas, and how
+zero support, negative contributions, split variables and national numbers are
+handled: `FEATURE_PRIOR_GUIDE.md` §5.
 
 ---
 
@@ -370,29 +418,25 @@ candidate models — see `OUTPUTS_GUIDE.md` for the selection rule.
 
 ## Comparing to a benchmark
 
-`05_contributions/benchmark_comparison.xlsx` is written every run. Paste the
-vendor's contribution into **column E** and the gap, the ratio, `delta` and the
-corrected `global_prior_mean` recalculate in the sheet.
+`05_contributions/benchmark_comparison.xlsx` is written every run. **Regions
+run across the columns**: a TOTAL (national) block first, then one block per
+region, each with `our, benchmark, pct_diff, ratio, contraction, current_prior,
+suggested_prior`.
 
-**When the vendor combines variables** — one "Digital" line where the model
-carries four placements — give it a mapping:
+With a `mapping_file`, a vendor variable we split by period or sub-brand becomes
+a **group row** (the benchmark, the gap and the ratio R live here; its
+contribution is the SUM of its members) followed by its **member rows** (each
+with its OWN contraction and prior, corrected with the group's R:
+`current × R^(1/(1−max(c,0)))`).
 
-```yaml
-data:
-  benchmark_mapping: benchmark_map.csv
-```
+If the mapping carries **contributions, the benchmark cells are pre-filled** —
+no pasting. Regional numbers go in the region blocks and TOTAL is their sum; a
+national number goes in TOTAL and is spread over the regions in proportion to
+our contribution, so every region shows the same %diff: the honest statement,
+since only the national gap is known.
 
-```csv
-feature,benchmark_group
-btl_expert-samples_premium_mat1,Samples Premium
-btl_expert-samples_premium_mat2,Samples Premium
-media__digital-social_...,Digital
-```
-
-Our features are then summed **within a region** before the comparison, so one
-row compares to one row. Volumes and Σx add; contraction and the prior mean are
-volume-weighted (they cannot be summed), and a `members` column records what
-went into each row. A feature absent from the mapping is compared alone.
+The **same file** groups variables for the prior builder, so the grouping that
+built a prior is always the grouping that checks it.
 
 ---
 
@@ -402,11 +446,13 @@ went into each row. A feature absent from the mapping is compared alone.
 
 ```yaml
 model: {include_intercept: false, fourier_order: 2}
-run: {dv_center: mean, dv_scale_scope: region}
+run: {dv_center: mean, dv_scale: mean, dv_scale_scope: region}
 output: {period_split: mat}
 ```
 Plus `prior_sd_basis: relative` with a tight `global_prior_sd` in the prior CSV.
-Expect `contraction ≈ 0` — and say the contributions are assumptions.
+`dv_scale: mean` is what a prior generated from the vendor's contributions is
+expressed in. Expect `contraction ≈ 0` — and say the contributions are
+assumptions.
 
 **Let the data speak**
 

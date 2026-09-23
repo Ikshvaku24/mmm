@@ -1,0 +1,13 @@
+section,pillar,pillar_share_pct,variable,spend,variable_share_pct,sign_constraint
+media,TV & DTV,6.0,media_tv_all-plac_all-plat_all-camp_sub-brand-core_halo_grps,1800000,,
+media,TV & DTV,6.0,media_tv_all-plac_all-plat_all-camp_sub-brand-core_hero_grps,600000,,
+media,Online Media,4.5,media_digital-display_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions_mat1,450000,,
+media,Online Media,4.5,media_digital-display_all-plac_all-plat_all-camp_sub-brand-effervescent_hero_impressions_mat2,450000,,
+comp_media,Competitor Media,,media_competitor_all_tv_grps,,3.0,
+expert,Detailing,2.0,btl_expert-calls_premium_calls,300000,,
+expert,Samples,1.5,btl_expert-samples_core_samples,120000,,
+trade,Trade,,trade_tpr_depth,,4.0,
+baseline,Baseline,62.0,sales_distribution_tdp,,40.0,
+baseline,Baseline,62.0,sales_brand_all-benefit_price_base-price,,-35.0,
+baseline,Baseline,62.0,sales_category_volume,,20.0,
+baseline,Baseline,62.0,dummy_Jul25dip,,2.0,negative

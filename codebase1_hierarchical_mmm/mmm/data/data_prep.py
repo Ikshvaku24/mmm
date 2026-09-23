@@ -6,25 +6,30 @@ one row per region x period. Features arrive ALREADY transformed
 (adstock / saturation / lag done in preprocessing) - this codebase does not
 transform them further, it only scales for sampler geometry.
 
-Scaling (stats computed on the TRAINING window only, stored for reuse). Every
-column - features and KPI alike - goes through `resolve_scaling`, which returns
-a (centre, scale) pair and applies `(v - centre) / scale`:
+Scaling. Every column - features and KPI alike - goes through
+`resolve_scaling`, which returns a (centre, scale) pair and applies
+`(v - centre) / scale`. The statistics come from the window set by
+`RunConfig.scaling_window`: "train" (default - the holdout never touches the
+transform) or "full" (the whole panel - the window vendor contributions and
+generated priors are computed over).
 
-  DEFAULTS (unchanged from earlier versions)
-  - dv:            centre=mean, scale=sd, per region        (Meridian: KPI transformer)
-  - signed feats:  centre=none, scale=mean_positive         (Meridian: media transformer -
-                   no centering, zero stays zero)
-  - signed feats, center_mode=mean: centre=mean, scale=sd  (Meridian: non-media
-                   treatments transformer) - for always-on LEVEL variables such as
-                   distribution or price indices. Scale-only would leave them at
-                   ~1.0 every week, i.e. collinear with the region intercept.
-  - free feats:    centre=mean, scale=sd, per region        (Meridian: controls transformer)
+  DEFAULTS
+  - dv:        centre=mean, scale=sd, per region            (Meridian: KPI transformer)
+  - features:  centre=none, scale=none - the column passes through UNCHANGED,
+               whatever its sign. Priors are then per raw unit, which is what
+               the pre-model builder writes and what the real-data prior files
+               use. (Until 2026-09-22 a blank meant mean_positive for signed
+               features and mean/sd for free ones.)
 
-  OVERRIDES
-  - per feature: `center_mode` / `scale_mode` columns in the prior CSV
-  - for the KPI: `RunConfig.dv_center` / `dv_scale` / `dv_scale_scope`
-  - `center_mode=none, scale_mode=none` passes a column through UNCHANGED, for
-    data that arrives already on the scale your priors were derived on.
+  OPT-IN, per feature (`center_mode` / `scale_mode` in the prior CSV)
+  - scale_mode=mean_positive       Meridian's media transformer - zero stays zero
+  - center_mode=mean               for always-on LEVEL variables (distribution,
+                                   price index): uncentred they are near-constant
+                                   and trade off against the region intercept.
+                                   Pair with contribution_reference=zero.
+  - center_mode=mean, scale_mode=sd  Meridian's controls transformer
+
+  For the KPI: `RunConfig.dv_center` / `dv_scale` / `dv_scale_scope`.
 
 THE SCALE IS THE UNIT OF YOUR PRIORS. A coefficient means "moves the KPI by
 beta x dv_scale per feature_scale of input". Change either scale and every
@@ -50,8 +55,9 @@ def resolve_scaling(v_train: np.ndarray, center_mode: str, scale_mode: str,
                     label: str = "") -> tuple[float, float]:
     """The (centre, scale) a column is transformed by: (v - centre) / scale.
 
-    Both are computed on the TRAINING window only and then applied to every row,
-    so the holdout never leaks into the transform. One helper serves the
+    Both are computed on the rows it is given - the training window by default,
+    the whole panel under scaling_window="full" - and then applied to every
+    row. One helper serves the
     features and the KPI, which is what keeps the two consistent - a coefficient
     means 'moves the KPI by beta x dv_scale per feature_scale of input', and
     that identity only holds if both sides use the same convention.
@@ -164,6 +170,35 @@ class PreparedData:
                 "all": np.ones_like(self.train_mask, dtype=bool)}[which]
 
 
+def split_train(dates, run_cfg: RunConfig):
+    """(train_mask, holdout, plan) for a column of dates - the ONE place the
+    training window is decided, so the model and the pre-model prior builder
+    can never disagree about which periods are 'train'."""
+    dates = pd.to_datetime(pd.Series(dates)).reset_index(drop=True)
+    all_dates = np.sort(dates.unique())
+    # One cadence decision for the whole run. "auto" reads the observed date
+    # spacing, so a 104-week panel gets 13/52 and a 24-month panel gets 3/12
+    # without anyone remembering to change three separate numbers.
+    plan = resolve_period_plan(run_cfg.cadence, all_dates)
+    # absolute wins, then a fraction of THIS panel, then the policy default
+    holdout = resolve_count(run_cfg.holdout_periods, run_cfg.holdout_fraction,
+                            plan.n_periods, "holdout_periods")
+    if holdout is None:
+        holdout = plan.holdout_periods
+    if holdout >= len(all_dates):
+        raise ValueError(
+            f"holdout_periods={holdout} but the panel has only "
+            f"{len(all_dates)} {plan.unit}. A {plan.cadence} panel wants "
+            f"{plan.holdout_periods}; set RunConfig(holdout_periods=None) to "
+            "take that automatically.")
+    if holdout > 0:
+        cutoff = all_dates[-holdout]
+        train_mask = (dates < cutoff).to_numpy()
+    else:
+        train_mask = np.ones(len(dates), dtype=bool)
+    return train_mask, int(holdout), plan
+
+
 def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -> PreparedData:
     d = df.copy()
     dc, rc, yc = run_cfg.date_col, run_cfg.region_col, run_cfg.dv_col
@@ -199,28 +234,22 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     validate_region_priors(model_cfg.features, regions)
 
     # ---- train / holdout split by date ------------------------------------
-    all_dates = np.sort(d[dc].unique())
-    # One cadence decision for the whole run. "auto" reads the observed date
-    # spacing, so a 104-week panel gets 13/52 and a 24-month panel gets 3/12
-    # without anyone remembering to change three separate numbers.
-    plan = resolve_period_plan(run_cfg.cadence, all_dates)
-    # absolute wins, then a fraction of THIS panel, then the policy default
-    holdout = resolve_count(run_cfg.holdout_periods, run_cfg.holdout_fraction,
-                            plan.n_periods, "holdout_periods")
-    if holdout is None:
-        holdout = plan.holdout_periods
-    if holdout >= len(all_dates):
-        raise ValueError(
-            f"holdout_periods={holdout} but the panel has only "
-            f"{len(all_dates)} {plan.unit}. A {plan.cadence} panel wants "
-            f"{plan.holdout_periods}; set RunConfig(holdout_periods=None) to "
-            "take that automatically.")
-    if holdout > 0:
-        cutoff = all_dates[-holdout]
-        train_mask = (d[dc] < cutoff).to_numpy()
-    else:
-        train_mask = np.ones(len(d), dtype=bool)
+    train_mask, holdout, plan = split_train(d[dc], run_cfg)
     test_mask = ~train_mask
+    # The window the centring/scaling statistics come from, for features AND
+    # the KPI alike (RunConfig.scaling_window). "train" keeps the holdout out
+    # of the transform; "full" uses the whole panel - the same window a
+    # vendor contribution and the pre-model priors are computed over.
+    stat_mask = (np.ones(len(d), dtype=bool)
+                 if run_cfg.scaling_window == "full" else train_mask)
+    if run_cfg.scaling_window == "full" and holdout > 0:
+        warnings.warn(
+            f"scaling_window='full': the centring/scaling statistics include "
+            f"the {holdout} holdout {plan.unit}, so the holdout rows of "
+            "fit_metrics.csv are no longer strictly out of sample (the KPI "
+            "centre in particular carries the holdout's level). Judge "
+            "out-of-sample accuracy with cross-validation, which always "
+            "scales on each fold's own training window.")
 
     # per-region training support and seasonality sanity (config validation)
     for g, r in enumerate(regions):
@@ -235,7 +264,7 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                           f"{n_dates_tr} training periods - risk of overfitting "
                           "the seasonal cycle")
 
-    # ---- dv scaling (train stats; see RunConfig.dv_center / dv_scale) ------
+    # ---- dv scaling (see RunConfig.dv_center / dv_scale / scaling_window) --
     # y = (y_orig - y_mean[g]) / y_scale[g], and every inverse transform in
     # outputs.py is exactly y_scaled * y_scale[g] + y_mean[g]. Both halves come
     # from here, so turning centring off sets y_mean to 0 and the inverse stays
@@ -247,10 +276,10 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         # ONE scale for every region. The scaled KPI is then proportional to
         # region size, so each region needs its own coefficient magnitude -
         # only use this when the priors were derived on that same single scale.
-        _, sc_all = resolve_scaling(y_orig[train_mask], "none",
+        _, sc_all = resolve_scaling(y_orig[stat_mask], "none",
                                     run_cfg.dv_scale, f"{yc} (global)")
     for g in range(G):
-        m = (region_idx == g) & train_mask
+        m = (region_idx == g) & stat_mask
         c_g, s_g = resolve_scaling(y_orig[m], run_cfg.dv_center,
                                    run_cfg.dv_scale, f"{yc} [{regions[g]}]")
         y_mean[g] = c_g
@@ -287,24 +316,31 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
         for g in range(G):
             m_all = region_idx == g
             m_tr = m_all & train_mask
+            m_st = m_all & stat_mask
             n_active = int((v[m_tr] != 0).sum())    # activity on the RAW column
-            mu, sc = resolve_scaling(v[m_tr], spec.center_mode, spec.scale_mode,
+            mu, sc = resolve_scaling(v[m_st], spec.center_mode, spec.scale_mode,
                                      f"{spec.name} [{regions[g]}]")
             # `method` stays the two-valued label the reporting code keys off:
             # what it really asks is "is zero still meaningful for this column?"
             method = "center_scale" if spec.center_mode == "mean" else "scale_only"
-            if method == "scale_only" and spec.scale_mode != "none"                     and (v[m_tr] > 0).any() and sc < run_cfg.min_feature_scale:
+            if method == "scale_only" and spec.scale_mode != "none"                     and (v[m_st] > 0).any() and sc < run_cfg.min_feature_scale:
                 degenerate.append((spec.name, regions[g], sc))
             X[m_all, j] = (v[m_all] - mu) / sc
             scale_rows.append((regions[g], spec.name, method, mu, sc, n_active,
                                spec.center_mode, spec.scale_mode))
             if method == "scale_only":
                 # always on but barely moving => x ~ constant, which the region
-                # intercept already spans (see the near-constant guard below)
-                col_tr = X[m_tr, j]
-                if (len(col_tr) and (col_tr != 0).mean() > 0.9
-                        and col_tr.std() < run_cfg.near_constant_sd):
-                    near_constant.setdefault(spec.name, []).append(regions[g])
+                # intercept already spans (see the near-constant guard below).
+                # Measured RELATIVE to the column's own level (sd / mean of
+                # the non-zero values), so it means the same thing whatever
+                # scale_mode is - an unscaled TDP of 80 +/- 0.5 is as
+                # collinear with the intercept as a scaled one of 1.0 +/- 0.006.
+                raw = v[m_st]
+                nz = raw[raw != 0]
+                if len(raw) and (raw != 0).mean() > 0.9 and len(nz):
+                    level = float(np.mean(np.abs(nz)))
+                    if level > 0 and raw.std() / level < run_cfg.near_constant_sd:
+                        near_constant.setdefault(spec.name, []).append(regions[g])
 
     if degenerate:
         feats = sorted({f for f, _, _ in degenerate})
@@ -337,22 +373,23 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     if getattr(model_cfg, "include_intercept", True):
         for name, regs in near_constant.items():
             warnings.warn(
-                f"{name}: always on but nearly constant after scaling without "
-                f"centring (scaled sd < {run_cfg.near_constant_sd:g}) in regions "
+                f"{name}: always on but nearly constant without centring "
+                f"(sd / level < {run_cfg.near_constant_sd:g}) in regions "
                 f"{regs}. It is "
                 "almost collinear with the region intercept, so the sampler cannot "
                 "separate its coefficient from the baseline - expect poor mixing "
                 "(high R-hat, low ESS, saturated tree depth) and a huge coefficient "
                 "that is offset by the baseline or by another level variable. "
-                "Set center=1 (or center_mode=mean) for this feature in the feature "
-                "config. If the column must stay untransformed, this warning is the "
+                "Set center_mode=mean for this feature in the feature config "
+                "(with contribution_reference=zero). If the column must stay "
+                "untransformed, this warning is the "
                 "price: the intercept and this coefficient are trading off, so read "
                 "neither on its own.")
     elif len(near_constant) > 1:
         warnings.warn(
             f"{', '.join(sorted(near_constant))}: {len(near_constant)} features "
-            "are always on and nearly constant after scaling without centring "
-            f"(scaled sd < {run_cfg.near_constant_sd:g}). There is no region "
+            "are always on and nearly constant without centring "
+            f"(sd / level < {run_cfg.near_constant_sd:g}). There is no region "
             "intercept to compete with (include_intercept=False), but they are "
             "near-constant columns and therefore collinear with EACH OTHER - "
             "only their SUM is identified, so the split between them is set by "

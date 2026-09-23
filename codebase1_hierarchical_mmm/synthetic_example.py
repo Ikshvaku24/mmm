@@ -87,8 +87,14 @@ def make_data(G=4, T=156, holdout_periods=13):
 
 def main():
     df, true, feats = make_data()
+    # The data above was generated on the SCALED axes (media / mean of positive
+    # values, free features standardised), so the specs ask for exactly that.
+    # The pipeline default is now no centring and no scaling - leaving these
+    # out would fit raw columns against a truth defined on scaled ones.
     features = [FeatureSpec(name=n, hierarchical=True, sign=s,
-                            prior_mean=(0.05 if s != "free" else 0.0))
+                            prior_mean=(0.05 if s != "free" else 0.0),
+                            center_mode=("mean" if s == "free" else "none"),
+                            scale_mode=("sd" if s == "free" else "mean_positive"))
                 for n, s in feats.items()]
     res = run(df,
               ModelConfig(features=features, fourier_order=2),

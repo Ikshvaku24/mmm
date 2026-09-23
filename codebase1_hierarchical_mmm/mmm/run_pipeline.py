@@ -59,8 +59,7 @@ def run(df: pd.DataFrame,
         cv_cfg: CVConfig | None = None,
         extra_warnings: list | None = None,
         assumption_cfg: AssumptionConfig | None = None,
-        benchmark_mapping: str | None = None,
-        benchmark_contribution: str | None = None):
+        benchmark_mapping: str | None = None):
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
@@ -98,7 +97,7 @@ def run(df: pd.DataFrame,
 
         result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
                              dirs, root, save_trace, assumption_cfg,
-                             benchmark_mapping, benchmark_contribution)
+                             benchmark_mapping)
 
     # Warnings raised while the CONFIG was being read happen before this
     # function is reached (load_feature_config runs in the caller), so the
@@ -121,8 +120,7 @@ def run(df: pd.DataFrame,
 
 
 def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
-                save_trace, assumption_cfg=None, benchmark_mapping=None,
-                benchmark_contribution=None):
+                save_trace, assumption_cfg=None, benchmark_mapping=None):
     """The five reporting stages. Split out so `run` can wrap them all in one
     warning-capture block without indenting the whole body twice."""
     print("[1/5] preparing data")
@@ -167,7 +165,6 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     # coefficient beside the volume it produces, without re-stacking the trace
     contrib = contribution_report(decomp, pdata, dirs["05_contributions"],
                                   benchmark_mapping=benchmark_mapping,
-                                  benchmark_contribution=benchmark_contribution,
                                   out_cfg=out_cfg, coef=coef)
 
     if save_trace:

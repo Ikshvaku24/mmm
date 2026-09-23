@@ -35,24 +35,24 @@ data:
   feature_priors: feature_priors.csv
   # explicit strptime format for the date column (null = infer)
   date_format: null
-  # OPTIONAL csv/xlsx mapping our features to the benchmark's combined variables
-  # (feature,benchmark_group). When the vendor reports one line where we carry several columns,
-  # the benchmark sheet sums ours first so one row compares to one row. null = compare feature
-  # by feature. Sample: samples/benchmark_mapping_sample.csv
-  benchmark_mapping: null
-  # OPTIONAL csv/xlsx of the vendor's contribution per feature (and region). When present the
-  # PRE-MODEL step inverts it into a sample feature-prior file and pre-fills the benchmark
-  # sheet. Sample: samples/vendor_contribution_sample.csv
-  vendor_contribution: null
-  # OPTIONAL csv/xlsx used when there is NO vendor contribution: pillar, feature, feature_spend,
-  # pillar_share_pct. The pre-model step splits each pillar's share of sales across its features
-  # by spend. Sample: samples/pillar_spend_sample.csv
-  pillar_spend: null
-  # how the KPI is aggregated per region when inverting a contribution: mean (default) | sum |
-  # median. Must match how the vendor expressed their number
+  # OPTIONAL. vendor_variable, our_variable[, region][, contribution] - which vendor variable is
+  # which of ours. Replicate the vendor name across rows when we split it (period / sub-brand),
+  # or ours when they do. Every our_variable must be in data.feature_priors (which may carry
+  # more). Groups the benchmark sheet; WITH contributions it also drives the pre-model prior
+  # builder (case a) and pre-fills the sheet's benchmark cells. Sample:
+  # samples/mapping_sample.csv
+  mapping_file: null
+  # OPTIONAL. section, pillar, pillar_share_pct, variable, spend, variable_share_pct[,
+  # sign_constraint]. Sections: media, expert, comp_media, trade, baseline. Builds the prior
+  # file from shares of sales when the mapping has no contributions (cases b and c); always
+  # supplies pillars and the baseline flag. Sample: samples/share_sample.csv
+  share_file: null
+  # the per-region KPI level a generated coefficient is expressed against: mean (default) | sum
+  # | median. It must equal run.dv_scale, so keep mean and set run.dv_scale: mean when fitting
+  # with generated priors - the pre-model step warns otherwise
   dv_aggregation: mean
-  # where the pre-model step writes the sample prior file and its calculation workbook. null =
-  # pre_model_outputs/
+  # where the pre-model step writes feature_priors_national.csv, feature_priors_regional.csv and
+  # the calculation workbook. null = pre_model_outputs/
   pre_model_dir: null
 
 
@@ -102,6 +102,10 @@ run:
   dv_scale: sd
   # 'region' (own scale each) | 'global' (one number for all regions)
   dv_scale_scope: region
+  # 'train' | 'full' - which periods the centring/scaling statistics come from, for features AND
+  # the KPI. 'full' matches the window generated priors were computed over, but the holdout
+  # metrics are then not strictly out of sample. CV always uses each fold's train window
+  scaling_window: train
   # 'auto'|'weekly'|'monthly' - sets every period count downstream
   cadence: auto
   # last N dates held out per region for OOS metrics, as an ABSOLUTE count. null = use
@@ -118,7 +122,7 @@ run:
   zero_threshold_rel: 0.0
   # reject a scale-only feature whose scaling factor is below this
   min_feature_scale: 1.0e-12
-  # warn when an always-on scaled feature is this flat (collinear with alpha)
+  # warn when an always-on uncentred feature has sd / level below this (collinear with alpha)
   near_constant_sd: 0.1
 
 

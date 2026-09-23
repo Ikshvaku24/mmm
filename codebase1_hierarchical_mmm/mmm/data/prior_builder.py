@@ -1,47 +1,107 @@
 """Pre-model workflow: turn what the client gave you into a feature-prior file.
 
-Nobody should be hand-computing 65 prior means in a spreadsheet, and the two
-ways of getting them are both mechanical:
+Two input files, both optional, both named in `config.yaml`:
 
-**A. A vendor decomposition exists.** Invert it. A contribution is
-`beta x SUM(x) x dv_scale`, so the coefficient that reproduces it is
+  data.mapping_file   vendor_variable, our_variable[, region][, contribution]
+                      which vendor variable is which of ours (samples/mapping_sample.csv)
+  data.share_file     section, pillar, pillar_share_pct, variable, spend,
+                      variable_share_pct[, sign_constraint]
+                      what share of sales each piece is expected to carry
+                      (samples/share_sample.csv)
 
-    prior_mean[f, r] = contribution[f, r] / support[f, r] / dv_agg[r]
+Four cases, in order of precedence:
 
-computed per region and then averaged across the regions that actually have
-support. That average is the `global_prior_mean` the model samples around.
+  a. mapping WITH contributions        -> invert the vendor decomposition
+  b. mapping without contributions,    -> build from the shares
+     plus a share file
+  c. a share file only                 -> build from the shares
+  d. neither                           -> no prior file is generated; the run
+                                          uses data.feature_priors as usual
 
-**B. No decomposition.** Assume marketing delivers a plausible share of sales,
-split that share across pillars, and split each pillar across its features in
-proportion to spend (METHODOLOGY.md section 2, "Setting a level-1 mean from
-spend"). Deliberately gives every feature in a pillar the same implied
-efficiency - the least-informative start that still has the right total. How far
-each one moves from it afterwards is the result.
+If a mapping carries contributions AND a share file is given, the contributions
+win for the MEANS wherever they exist - they are evidence, the shares are an
+assumption. A variable the vendor never reported falls back to its share-based
+prior rather than a blank, and each row's `basis` says which it got. The share
+file always supplies the pillar names, the baseline flag and the default signs,
+because those are definitions rather than estimates.
 
-Neither path guesses. If the inputs are absent the workflow does nothing and the
-run proceeds as usual with whatever prior file is already configured.
+A. Inverting a vendor decomposition
+-----------------------------------
+A contribution is `beta x SUM(x) x dv_scale`, so the coefficient that
+reproduces it is
 
-The awkward bits, handled explicitly
-------------------------------------
-* **Zero support.** A feature that never ran in a region contributes nothing
-  there and `contribution / 0` is not a number. That region is skipped, and the
-  average divides by however many regions DID have support - not by the region
-  count. A feature with no support anywhere gets no prior and is reported.
-* **Negative contributions.** The model reads `global_prior_mean` as a
-  MAGNITUDE and takes direction from `sign_constraint`. A negative contribution
-  therefore becomes `sign_constraint=negative` with the absolute value, never a
-  negative mean.
-* **Signs that disagree across regions.** Flagged, with the sign of the total
-  used. A driver that genuinely helps in one region and hurts in another is not
-  a prior problem.
-* **Combined vendor variables.** A deck reports one "Digital" line where the
-  model carries four columns. With a mapping file the SUPPORT is summed first,
-  one prior mean is computed for the group, and that mean is replicated to every
-  member - which is right, because they share an implied coefficient.
+    prior_mean[group, region] = contribution / support / dv_agg
 
-Everything is shown, never just asserted: `prior_calculation.xlsx` carries one
-row per feature x region with every intermediate number and the arithmetic that
-produced it.
+A GROUP is a connected component of the mapping (see `mmm.data.mapping`): one
+vendor variable and the several of ours it was split into, usually. Its support
+is the SUM of its members' supports, and the one mean it produces is replicated
+to every member. A contribution given without a region is national, and is
+allocated to the regions in proportion to support, so each region still gets
+its own `dv_agg`.
+
+National and regional
+---------------------
+Every route ends with one coefficient PER REGION. Two files are written from
+them, because which one applies is the modeller's pooling decision:
+
+  feature_priors_national.csv   one row per variable. The mean is the SUM of
+                                the per-region coefficients over the regions
+                                with support, DIVIDED BY THAT COUNT - two
+                                regions with support out of five divide by 2.
+                                For pooling=hierarchical (the default).
+  feature_priors_regional.csv   the same national rows, plus one override row
+                                per region with that region's own coefficient.
+                                Written with pooling=independent.
+
+A sign-constrained variable cannot carry a region whose coefficient has the
+opposite sign (the mean is a magnitude; the sign is feature-level), so that
+region gets no override row and falls back to the national one - flagged.
+
+Units. The mean is per RAW unit of the variable, per unit of the region's KPI
+`dv_agg`. That is the model's unit only with `scale_mode=none` on the variable
+(written for you, and now the default), `run.dv_scale: mean` and
+`run.dv_scale_scope: region`. `run_pre_model` warns when the run is set up
+otherwise. `dv_agg` is taken over the model's own scaling window
+(`run.scaling_window`: the training window by default, the whole panel under
+"full"), so it is exactly the number the model divides the KPI by.
+
+B/C. Building from shares
+-------------------------
+The share file has five SECTIONS, each optional, each with its own formula
+(`sales` is the region's total KPI over the window):
+
+  media       pillars inside media, each with a share; spend per variable.
+              C = pillar_share x sales x spend / pillar_spend
+              (pillar_spend is the sum over that pillar's variables - computed,
+              never typed)
+  expert      exactly like media: pillars, a share each, spend per variable
+  comp_media  a share per variable, no spend split.   C = variable_share x sales
+  trade       trade IS a pillar, nothing inside it.   C = variable_share x sales
+  baseline    the whole baseline share, and each variable's share WITHIN it -
+              which is what the stage-1 baseline-only run (METHODOLOGY section
+              1) gives you.     C = baseline_share x variable_share x sales
+
+and then, for every section, `region_coef = C / support / dv_agg`, averaged
+over the regions that have support (C carries the variable's sign).
+
+Signs
+-----
+  vendor contribution   negative -> negative. Positive -> `free` when the
+                        variable is a dummy ("dummy" in its name), else
+                        positive.
+  share file            its own `sign_constraint` column. A blank falls back
+                        to: a negative share -> negative; a dummy -> free;
+                        comp_media -> negative; everything else -> positive.
+
+For a signed variable the mean is a magnitude. For a `free` one it keeps its
+sign, because a free coefficient is Normal(mean, sd) - no exponential.
+
+Names. Every variable named in either file must be in the feature prior file
+(`data.feature_priors`) - the prior file may carry MORE variables than the
+mapping or share file, never fewer. With no prior file configured yet, the
+datacube's columns are the list instead. Every model variable appears in the
+output - the ones neither file covers get a blank mean, so nothing silently
+falls out of the model.
 """
 from __future__ import annotations
 
@@ -51,112 +111,187 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from mmm.data.mapping import (ALL_REGIONS, DATACUBE, PRIOR_FILE, _read_any,
+                              _sniff, check_names, group_contributions,
+                              group_members, has_contribution, is_dummy,
+                              load_mapping_table)
+
 VALID_DV_AGG = ("mean", "sum", "median")
+SECTIONS = ("media", "expert", "comp_media", "trade", "baseline")
+# sections whose variables are split by SPEND inside a pillar
+SPEND_SECTIONS = ("media", "expert")
+# sections where each variable carries its OWN share of sales
+DIRECT_SECTIONS = ("comp_media", "trade")
+DEFAULT_PILLAR = {"comp_media": "Competitor Media", "trade": "Trade",
+                  "baseline": "Baseline"}
+DEFAULT_SIGN = {"comp_media": "negative"}
 
-# column sniffing - these files come from decks and clients, never a schema
-_FEATURE_HINTS = ("feature", "variable", "driver", "channel", "name")
-_REGION_HINTS = ("region", "retailer", "account", "market", "geo", "banner")
-_CONTRIB_HINTS = ("contribution", "true_contribution", "vendor_contribution",
-                  "volume", "value")
-_PILLAR_HINTS = ("pillar", "group", "category")
-_SHARE_HINTS = ("pillar_share_pct", "share_pct", "marketing_share_pct",
-                "share", "target_share")
-_SPEND_HINTS = ("feature_spend", "spend", "investment", "cost")
-
-
-def _sniff(cols, hints, exclude=()):
-    low = {str(c).strip().lower(): c for c in cols if c not in exclude}
-    for h in hints:
-        if h in low:
-            return low[h]
-    for h in hints:
-        for k, c in low.items():
-            if h in k:
-                return c
-    return None
-
-
-def _read_any(path: str) -> pd.DataFrame:
-    return (pd.read_csv(path) if str(path).lower().endswith(".csv")
-            else pd.read_excel(path))
+_SECTION_HINTS = ("section", "type", "data_piece", "piece", "block")
+_PILLAR_HINTS = ("pillar", "group")
+_PSHARE_HINTS = ("pillar_share_pct", "pillar_share", "pillar_pct")
+_VAR_HINTS = ("variable", "feature", "our_variable", "name")
+_SPEND_HINTS = ("spend", "feature_spend", "investment", "cost")
+_VSHARE_HINTS = ("variable_share_pct", "variable_share", "share_pct",
+                 "var_share")
+_SIGN_HINTS = ("sign_constraint", "sign")
 
 
 # --------------------------------------------------------------------------- #
-# inputs
+# the share file
 # --------------------------------------------------------------------------- #
-def load_vendor_contribution(path: str, feature_col=None, region_col=None,
-                             value_col=None) -> pd.DataFrame:
-    """feature / region / contribution, in whatever shape the deck arrived."""
+def load_share_file(path: str, known_columns=None,
+                    against: str = DATACUBE) -> pd.DataFrame:
+    """section / pillar / pillar_share_pct / variable / spend /
+    variable_share_pct / sign_constraint - validated per section."""
+    if not path:
+        return pd.DataFrame()
+    if not os.path.exists(path):
+        raise SystemExit(f"share file not found: {path}. Fix "
+                         "`data.share_file` in config.yaml, or remove it.")
     df = _read_any(path)
-    f = feature_col or _sniff(df.columns, _FEATURE_HINTS)
-    r = region_col or _sniff(df.columns, _REGION_HINTS, exclude={f})
-    v = value_col or _sniff(df.columns, _CONTRIB_HINTS, exclude={f, r})
-    if f is None or v is None:
+    sec = _sniff(df.columns, _SECTION_HINTS)
+    var = _sniff(df.columns, _VAR_HINTS, exclude={sec})
+    if sec is None or var is None:
         raise SystemExit(
-            f"{path}: need a feature column and a contribution column; found "
-            f"{list(df.columns)}. Pass the column names explicitly.")
+            f"{path}: need a `section` column and a `variable` column; found "
+            f"{list(df.columns)}. See samples/share_sample.csv.")
+    pil = _sniff(df.columns, _PILLAR_HINTS, exclude={sec, var})
+    psh = _sniff(df.columns, _PSHARE_HINTS, exclude={sec, var, pil})
+    spd = _sniff(df.columns, _SPEND_HINTS, exclude={sec, var, pil, psh})
+    vsh = _sniff(df.columns, _VSHARE_HINTS, exclude={sec, var, pil, psh, spd})
+    sgn = _sniff(df.columns, _SIGN_HINTS, exclude={sec, var, pil, psh, spd, vsh})
+
+    def col(name, numeric=False):
+        # an optional column that is absent still has to be a Series, so the
+        # string methods chained on it below work either way
+        if name is None:
+            return pd.Series(np.nan if numeric else "", index=df.index,
+                             dtype=float if numeric else object)
+        s = df[name]
+        return pd.to_numeric(s, errors="coerce") if numeric \
+            else s.fillna("").astype(str).str.strip()
+
     out = pd.DataFrame({
-        "feature": df[f].astype(str).str.strip(),
-        "region": (df[r].astype(str).str.strip() if r else "__all__"),
-        "contribution": pd.to_numeric(df[v], errors="coerce"),
-    }).dropna(subset=["contribution"])
-    print(f"[prior] vendor contribution: {len(out)} rows, "
-          f"{out['feature'].nunique()} features, {out['region'].nunique()} regions")
-    return out
-
-
-def load_pillar_spend(path: str) -> pd.DataFrame:
-    """pillar / feature / feature_spend / pillar_share_pct.
-
-    One row per feature. `pillar_share_pct` is a property of the PILLAR, so it
-    may be written once or repeated on every row of that pillar; a pillar whose
-    rows disagree is an error rather than a silent pick.
-    """
-    df = _read_any(path)
-    f = _sniff(df.columns, _FEATURE_HINTS)
-    p = _sniff(df.columns, _PILLAR_HINTS, exclude={f})
-    sh = _sniff(df.columns, _SHARE_HINTS, exclude={f, p})
-    sp = _sniff(df.columns, _SPEND_HINTS, exclude={f, p, sh})
-    if f is None or p is None or sh is None:
-        raise SystemExit(
-            f"{path}: need feature, pillar and pillar_share_pct columns; found "
-            f"{list(df.columns)}. See docs/FEATURE_PRIOR_GUIDE.md for the "
-            "expected layout.")
-    out = pd.DataFrame({
-        "feature": df[f].astype(str).str.strip(),
-        "pillar": df[p].astype(str).str.strip(),
-        "pillar_share_pct": pd.to_numeric(df[sh], errors="coerce"),
-        "feature_spend": (pd.to_numeric(df[sp], errors="coerce")
-                          if sp else np.nan),
+        "section": col(sec).str.lower().str.replace(" ", "_")
+        .str.replace("-", "_"),
+        "pillar": col(pil),
+        "pillar_share_pct": col(psh, True),
+        "variable": col(var),
+        "spend": col(spd, True),
+        "variable_share_pct": col(vsh, True),
+        "sign_constraint": col(sgn).str.lower(),
     })
-    per_pillar = out.groupby("pillar")["pillar_share_pct"].nunique(dropna=True)
-    bad = per_pillar[per_pillar > 1]
-    if len(bad):
+    out = out[(out["variable"] != "") & (out["variable"].str.lower() != "nan")]
+    bad = sorted(set(out["section"]) - set(SECTIONS))
+    if bad:
         raise SystemExit(
-            f"{path}: these pillars have more than one pillar_share_pct: "
-            f"{list(bad.index)}. The share belongs to the pillar - write it "
-            "once, or repeat the same number on every row of that pillar.")
-    out["pillar_share_pct"] = out.groupby("pillar")["pillar_share_pct"] \
-        .transform(lambda x: x.ffill().bfill())
-    total = out.drop_duplicates("pillar")["pillar_share_pct"].sum()
-    print(f"[prior] pillar spend: {len(out)} features across "
-          f"{out['pillar'].nunique()} pillars, shares total {total:.1f}%")
-    if total > 100.0 + 1e-6:
+            f"{path}: unknown section(s) {bad}. Use one of {list(SECTIONS)}. "
+            "(Consumption data such as TDP and price belongs in `baseline`.)")
+    dup = out["variable"][out["variable"].duplicated()].unique()
+    if len(dup):
+        raise SystemExit(f"{path}: variables listed more than once: "
+                         f"{list(dup)[:8]}. Each variable belongs to exactly "
+                         "one section.")
+    check_names(out["variable"], known_columns, path, against=against)
+
+    # default pillars for the sections that are a pillar in themselves
+    for s_, p_ in DEFAULT_PILLAR.items():
+        m = (out["section"] == s_) & (out["pillar"] == "")
+        out.loc[m, "pillar"] = p_
+
+    # a share that belongs to a PILLAR must be one number per pillar
+    for s_ in SPEND_SECTIONS + ("baseline",):
+        sub = out[out["section"] == s_]
+        if sub.empty:
+            continue
+        n = sub.groupby("pillar")["pillar_share_pct"].nunique(dropna=True)
+        clash = n[n > 1]
+        if len(clash):
+            raise SystemExit(
+                f"{path}: section {s_!r}, pillar(s) {list(clash.index)} carry "
+                "more than one pillar_share_pct. The share belongs to the "
+                "pillar - write it once, or repeat the same number.")
+        filled = (sub.groupby("pillar")["pillar_share_pct"]
+                  .transform(lambda x: x.ffill().bfill()))
+        out.loc[sub.index, "pillar_share_pct"] = filled
+        missing = sub.loc[filled.isna(), "pillar"].unique()
+        if len(missing):
+            raise SystemExit(f"{path}: section {s_!r} pillar(s) {list(missing)} "
+                             "have no pillar_share_pct.")
+
+    for s_ in DIRECT_SECTIONS + ("baseline",):
+        sub = out[out["section"] == s_]
+        if len(sub) and sub["variable_share_pct"].isna().any():
+            raise SystemExit(
+                f"{path}: section {s_!r} needs variable_share_pct on every row "
+                f"({list(sub.loc[sub['variable_share_pct'].isna(), 'variable'])[:5]} "
+                "have none).")
+
+    base = out[out["section"] == "baseline"]
+    if len(base) and base["variable_share_pct"].abs().sum() > 100 + 1e-6:
         warnings.warn(
-            f"pillar shares total {total:.1f}%, which is more than all of "
-            "sales. The generated priors will imply a decomposition above "
-            "100% before the model has seen anything.")
-    return out
+            "baseline variable shares add up to "
+            f"{base['variable_share_pct'].abs().sum():.1f}% of the baseline. "
+            "They are shares WITHIN the baseline, so they should total at most "
+            "100 (less, when the intercept/trend/seasonality takes some).")
+    total = _implied_total(out)
+    print(f"[share] {len(out)} variables across "
+          f"{out['section'].nunique()} sections; implied total "
+          f"{total:.1f}% of sales")
+    if total > 100 + 1e-6:
+        warnings.warn(
+            f"the shares imply {total:.1f}% of sales - more than all of it. "
+            "The generated priors will over-claim before the model has seen "
+            "anything.")
+    return out.reset_index(drop=True)
 
 
+def _implied_total(s: pd.DataFrame) -> float:
+    """How much of sales the share file claims in total, in percent."""
+    tot = 0.0
+    for sec_, sub in s.groupby("section"):
+        if sec_ in SPEND_SECTIONS:
+            tot += sub.drop_duplicates("pillar")["pillar_share_pct"].abs().sum()
+        elif sec_ in DIRECT_SECTIONS:
+            tot += sub["variable_share_pct"].abs().sum()
+        elif sec_ == "baseline":
+            tot += float(sub["pillar_share_pct"].abs().iloc[0])
+    return float(tot)
+
+
+def _sign_for(row) -> str:
+    """The share file's sign: its own column, else the fallbacks in order."""
+    s = str(row.get("sign_constraint", "")).strip().lower()
+    if s in ("positive", "negative", "free"):
+        return s
+    share = row["variable_share_pct"] if pd.notna(row.get("variable_share_pct")) \
+        else row.get("pillar_share_pct")
+    if pd.notna(share) and float(share) < 0:
+        return "negative"
+    if is_dummy(row.get("variable", "")):
+        return "free"
+    return DEFAULT_SIGN.get(row["section"], "positive")
+
+
+def sign_from_contribution(total: float, name: str) -> str:
+    """The vendor-contribution rule. Negative is negative whatever the name;
+    a positive dummy is left free - a dummy marks an event whose direction the
+    data should decide, and a vendor's positive number for it is thin
+    evidence."""
+    if pd.notna(total) and float(total) < 0:
+        return "negative"
+    return "free" if is_dummy(name) else "positive"
+
+
+# --------------------------------------------------------------------------- #
+# the datacube side
+# --------------------------------------------------------------------------- #
 def support_table(df: pd.DataFrame, features: list, region_col: str,
                   date_col: str = None, train_mask=None) -> pd.DataFrame:
     """SUM of each RAW feature per region - the denominator of the inversion.
 
     Raw, not scaled: the vendor's contribution is in raw units, so the
-    coefficient that reproduces it has to be derived against the raw sum. The
-    pipeline's own scaling is applied later and `prior_summary.csv` reports
-    both sides.
+    coefficient that reproduces it has to be derived against the raw sum.
     """
     rows = []
     d = df if train_mask is None else df[train_mask]
@@ -168,12 +303,13 @@ def support_table(df: pd.DataFrame, features: list, region_col: str,
             rows.append({"region": str(region), "feature": str(f),
                          "support": float(v.sum()),
                          "n_active": int((v != 0).sum())})
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=["region", "feature", "support",
+                                       "n_active"])
 
 
 def dv_aggregate(df: pd.DataFrame, dv_col: str, region_col: str,
                  how: str = "mean") -> pd.Series:
-    """The per-region KPI level the contribution is expressed against."""
+    """The per-region KPI level a coefficient is expressed against."""
     if how not in VALID_DV_AGG:
         raise ValueError(f"dv_aggregation must be one of {VALID_DV_AGG}, "
                          f"got {how!r}")
@@ -181,159 +317,260 @@ def dv_aggregate(df: pd.DataFrame, dv_col: str, region_col: str,
     return v.groupby(df[region_col].astype(str)).agg(how)
 
 
+def dv_for_model(df: pd.DataFrame, run, how: str = "mean") -> pd.Series:
+    """dv_agg as the MODEL will compute its dv_scale: over the same window.
+
+    The divisor has to be the number the model divides the KPI by, and the
+    model takes it over `run.scaling_window` - the training window by default,
+    the whole panel under "full". The contribution and the support stay
+    whole-panel: they are a matched pair (the vendor's number is over the
+    whole panel, and so is SUM(x)), and only the KPI scale is the model's.
+    """
+    window = str(getattr(run, "scaling_window", "train"))
+    full = dv_aggregate(df, run.dv_col, run.region_col, how)
+    if window == "full":
+        print("[prior] dv_agg = the KPI mean over the WHOLE panel "
+              "(run.scaling_window: full) - exactly the model's dv_scale")
+        return full
+    from mmm.data.data_prep import split_train
+    mask, holdout, plan = split_train(df[run.date_col], run)
+    if holdout == 0:
+        return full
+    trn = dv_aggregate(df[np.asarray(mask)], run.dv_col, run.region_col, how)
+    gap = float((trn / full - 1.0).abs().max() * 100)
+    print(f"[prior] dv_agg = the KPI mean over the TRAINING window (the last "
+          f"{holdout} {plan.unit} held out; run.scaling_window: train) - the "
+          f"model's dv_scale. It differs from the whole-panel mean by up to "
+          f"{gap:.1f}%; set run.scaling_window: full to use the whole panel "
+          "for both")
+    return trn
+
+
+def region_sales(df: pd.DataFrame, dv_col: str, region_col: str) -> pd.Series:
+    """Total KPI per region over the window - what a share is a share OF."""
+    v = pd.to_numeric(df[dv_col], errors="coerce")
+    return v.groupby(df[region_col].astype(str)).sum()
+
+
+# --------------------------------------------------------------------------- #
+# the shared averaging step
+# --------------------------------------------------------------------------- #
+def _average_over_supported(work: pd.DataFrame, key: str) -> pd.DataFrame:
+    """The NATIONAL coefficient: the SUM of the signed per-region coefficients
+    over the regions that HAD support, divided by how many there were.
+
+    Signed, so a region whose contribution runs the other way pulls the
+    average towards zero rather than being counted as agreement.
+    """
+    use = work[work["usable"]]
+    agg = (use.groupby(key, as_index=False)
+           .agg(sum_of_region_coefs=("prior_mean_region", "sum"),
+                n_regions_used=("prior_mean_region", "size")))
+    n_all = (work.groupby(key, as_index=False)["region"].nunique()
+             .rename(columns={"region": "n_regions_total"}))
+    agg = n_all.merge(agg, on=key, how="left")
+    agg["n_regions_used"] = agg["n_regions_used"].fillna(0).astype(int)
+    agg["national_coef"] = np.where(
+        agg["n_regions_used"] > 0,
+        agg["sum_of_region_coefs"] / agg["n_regions_used"].replace(0, np.nan),
+        np.nan)
+    return agg
+
+
+def _prior_mean(coef: float, sign: str) -> float:
+    """What goes in `global_prior_mean`: a magnitude for a signed variable,
+    the signed value for a free one (Normal(mean, sd), no exponential)."""
+    if pd.isna(coef):
+        return np.nan
+    return float(coef) if sign == "free" else abs(float(coef))
+
+
+def _divide(work: pd.DataFrame) -> pd.DataFrame:
+    """prior_mean_region = contribution / support / dv_agg (signed), with the
+    reason recorded for every cell that could not be computed."""
+    c, s, d = work["contribution"], work["support"], work["dv_agg"]
+    ok = c.notna() & s.notna() & (s != 0) & d.notna() & (d != 0)
+    work["usable"] = ok
+    work["prior_mean_region"] = np.where(
+        ok, c / s.replace(0, np.nan) / d.replace(0, np.nan), np.nan)
+    work["skipped_because"] = np.select(
+        [c.isna(), s.fillna(0) == 0, d.fillna(0) == 0],
+        ["no contribution for this cell",
+         "support is 0 - the feature never ran here, so it contributes "
+         "nothing whatever its coefficient",
+         "KPI aggregate is 0"], default="")
+    work["formula"] = np.where(
+        ok, (c.round(2).astype(str) + " / " + s.round(4).astype(str) + " / "
+             + d.round(2).astype(str)), "")
+    return work
+
+
 # --------------------------------------------------------------------------- #
 # A. invert a vendor decomposition
 # --------------------------------------------------------------------------- #
-def priors_from_contribution(contrib: pd.DataFrame, support: pd.DataFrame,
-                             dv_agg: pd.Series, mapping: dict | None = None
-                             ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """(per-feature priors, the full working) from a vendor decomposition.
-
-    Returns the calculation table too, because a prior nobody can check is
-    just a number somebody typed.
-    """
-    mapping = mapping or {}
-    sup = support.copy()
-    sup["group"] = sup["feature"].map(mapping).fillna(sup["feature"])
-    # combined vendor line -> sum the support of its members FIRST, so the one
-    # reported contribution is divided by the volume that actually produced it
+def priors_from_mapping(mapping: pd.DataFrame, support: pd.DataFrame,
+                        dv_agg: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(one row per OUR variable, the full working) from a mapping that
+    carries contributions."""
+    mem = group_members(mapping)
+    contrib = group_contributions(mapping)
+    sup = support.merge(mem.rename(columns={"our_variable": "feature"}),
+                        on="feature", how="inner")
     grp_sup = (sup.groupby(["group", "region"], as_index=False)
                .agg(support=("support", "sum"),
-                    n_active=("n_active", "sum"),
-                    members=("feature", lambda x: " + ".join(sorted(x))),
-                    n_members=("feature", "size")))
+                    n_members=("feature", "size"),
+                    members=("feature", lambda x: " + ".join(sorted(x)))))
 
-    c = contrib.copy()
-    c["group"] = c["feature"].map(mapping).fillna(c["feature"])
-    c = (c.groupby(["group", "region"], as_index=False)["contribution"].sum())
+    # a national contribution is spread over the regions by support share, so
+    # every region is still divided by its OWN dv_agg
+    nat = contrib[contrib["region"] == ALL_REGIONS]
+    reg = contrib[contrib["region"] != ALL_REGIONS]
+    if len(nat):
+        tot = grp_sup.groupby("group")["support"].transform("sum")
+        alloc = grp_sup.assign(share=np.where(tot > 0, grp_sup["support"] / tot,
+                                              0.0))
+        alloc = alloc.merge(nat[["group", "contribution"]], on="group")
+        alloc["contribution"] = alloc["contribution"] * alloc["share"]
+        alloc["contribution_basis"] = "national, allocated by support"
+        reg = pd.concat([reg.assign(contribution_basis="regional"),
+                         alloc[["group", "region", "contribution",
+                                "contribution_basis"]]], ignore_index=True)
+    else:
+        reg = reg.assign(contribution_basis="regional")
 
-    work = c.merge(grp_sup, on=["group", "region"], how="outer")
+    work = grp_sup.merge(reg, on=["group", "region"], how="outer")
     work["dv_agg"] = work["region"].map(dv_agg)
-    ok = (work["support"].notna() & (work["support"] != 0)
-          & work["dv_agg"].notna() & (work["dv_agg"] != 0)
-          & work["contribution"].notna())
-    work["usable"] = ok
-    work["prior_mean_region"] = np.where(
-        ok, work["contribution"] / work["support"].replace(0, np.nan)
-        / work["dv_agg"].replace(0, np.nan), np.nan)
-    work["skipped_because"] = np.where(
-        work["contribution"].isna(), "no vendor contribution for this cell",
-        np.where(work["support"].fillna(0) == 0,
-                 "support is 0 - the feature never ran here, so it contributes "
-                 "nothing whatever the coefficient",
-                 np.where(work["dv_agg"].fillna(0) == 0,
-                          "KPI aggregate is 0", "")))
-    work["formula"] = np.where(
-        ok, ("contribution / support / dv_agg = "
-             + work["contribution"].round(2).astype(str) + " / "
-             + work["support"].round(4).astype(str) + " / "
-             + work["dv_agg"].round(2).astype(str)), "")
+    work = _divide(work)
 
-    # average over the regions that HAVE support - divide by that count, not by
-    # the number of regions
-    agg = (work[work["usable"]]
-           .groupby("group", as_index=False)
-           .agg(prior_mean_abs=("prior_mean_region",
-                                lambda x: float(np.mean(np.abs(x)))),
-                n_regions_used=("prior_mean_region", "size"),
-                total_contribution=("contribution", "sum"),
-                n_positive=("contribution", lambda x: int((x > 0).sum())),
-                n_negative=("contribution", lambda x: int((x < 0).sum()))))
-    n_all = work.groupby("group", as_index=False)["region"].nunique() \
-        .rename(columns={"region": "n_regions_total"})
-    agg = agg.merge(n_all, on="group", how="right")
-    agg["prior_mean_abs"] = agg["prior_mean_abs"].astype(float)
-    agg["n_regions_used"] = agg["n_regions_used"].fillna(0).astype(int)
+    agg = _average_over_supported(work, "group")
+    signs = (work.dropna(subset=["contribution"]).groupby("group")
+             ["contribution"].agg(total="sum",
+                                  n_pos=lambda x: int((x > 0).sum()),
+                                  n_neg=lambda x: int((x < 0).sum()))
+             .reset_index())
+    agg = agg.merge(signs, on="group", how="left")
+    agg["mixed_signs"] = (agg["n_pos"].fillna(0) > 0) & (agg["n_neg"].fillna(0) > 0)
 
-    # the model reads global_prior_mean as a MAGNITUDE; direction is the
-    # sign_constraint. So a negative contribution becomes negative + |mean|.
-    agg["sign_constraint"] = np.where(
-        agg["total_contribution"].fillna(0) < 0, "negative", "positive")
-    agg["mixed_signs"] = (agg["n_positive"].fillna(0) > 0) & \
-                         (agg["n_negative"].fillna(0) > 0)
-    agg["note"] = np.where(
-        agg["n_regions_used"] == 0,
-        "NO prior: support is 0 in every region - drop the feature or fix the "
-        "extract",
-        np.where(agg["mixed_signs"],
-                 "contribution sign DIFFERS across regions; the sign of the "
-                 "total was used", ""))
-
-    # replicate a group's mean back onto each member feature
-    members = sup[["feature", "group"]].drop_duplicates()
-    out = members.merge(agg, on="group", how="left")
-    out = out.rename(columns={"prior_mean_abs": "global_prior_mean"})
-    out["from_combined_group"] = out["group"] != out["feature"]
+    out = mem.rename(columns={"our_variable": "feature"}).merge(
+        agg, on="group", how="left")
+    # the sign is decided per MEMBER: a group shares a contribution, but
+    # whether a member is a dummy is a property of its own name
+    out["sign_constraint"] = [
+        sign_from_contribution(t, f"{f} {g}")
+        for t, f, g in zip(out["total"], out["feature"], out["group"])]
+    out["global_prior_mean"] = [
+        _prior_mean(c, s) for c, s in zip(out["national_coef"],
+                                          out["sign_constraint"])]
+    # a signed variable whose regional coefficients disagree can average out
+    # on the far side of zero from the sign of the total
+    nc = out["national_coef"].fillna(0.0)
+    wrong_side = (((out["sign_constraint"] == "positive") & (nc < 0))
+                  | ((out["sign_constraint"] == "negative") & (nc > 0)))
+    out["note"] = np.select(
+        [out["n_regions_used"] == 0, wrong_side, out["mixed_signs"]],
+        ["NO prior: support is 0 in every region - drop the feature or fix the "
+         "extract",
+         "the regional coefficients AVERAGE to the opposite sign of the total "
+         "contribution - the magnitude is written, but review this variable",
+         "the contribution sign DIFFERS across regions; the sign of the total "
+         "was used"], default="")
+    out["basis"] = "vendor contribution"
+    out["from_combined_group"] = out.groupby("group")["feature"] \
+        .transform("size") > 1
     cols = ["feature", "group", "global_prior_mean", "sign_constraint",
-            "n_regions_used", "n_regions_total", "total_contribution",
-            "mixed_signs", "from_combined_group", "note"]
+            "national_coef", "sum_of_region_coefs", "n_regions_used",
+            "n_regions_total", "mixed_signs", "from_combined_group", "basis",
+            "note"]
     return out[cols].sort_values("feature"), work.sort_values(["group", "region"])
 
 
 # --------------------------------------------------------------------------- #
-# B. spend-share priors, when there is no decomposition
+# B/C. build from shares
 # --------------------------------------------------------------------------- #
-def priors_from_spend(pillar_spend: pd.DataFrame, support: pd.DataFrame,
-                      dv_agg: pd.Series, total_sales: float
-                      ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """METHODOLOGY section 2: a pillar's share of sales, split by spend.
-
-        contribution_f = pillar_share_pct/100 * total_sales * spend_f/pillar_spend
-        prior_mean_f   = contribution_f / support_f / dv_agg
-
-    A pillar whose features have no spend (a baseline pillar usually does not)
-    is split by SUPPORT share instead, which is the only other thing that
-    distinguishes its features.
-    """
-    ps = pillar_spend.copy()
-    sup_tot = (support.groupby("feature", as_index=False)["support"].sum()
-               .rename(columns={"support": "support_total"}))
-    ps = ps.merge(sup_tot, on="feature", how="left")
-    ps["support_total"] = ps["support_total"].fillna(0.0)
-
-    dv_mean = float(np.mean(list(dv_agg.values))) if len(dv_agg) else np.nan
+def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
+                       dv_agg: pd.Series, sales: pd.Series
+                       ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """(one row per variable in the share file, the full working)."""
     rows = []
-    for pillar, g in ps.groupby("pillar", sort=False):
-        share = float(g["pillar_share_pct"].iloc[0]) / 100.0
-        spend = g["feature_spend"].fillna(0.0)
-        basis, weights = "spend", spend
-        if spend.sum() <= 0:
-            # no spend in this pillar (baseline drivers, dummies): split by the
-            # only other thing that distinguishes its features
-            basis, weights = "support", g["support_total"]
-        wsum = float(weights.sum())
-        for (_, r), w in zip(g.iterrows(), weights):
-            frac = (float(w) / wsum) if wsum > 0 else (1.0 / len(g))
-            contribution = share * float(total_sales) * frac
-            sup = float(r["support_total"])
-            pm = (contribution / sup / dv_mean
-                  if sup > 0 and np.isfinite(dv_mean) and dv_mean != 0
-                  else np.nan)
-            rows.append({
-                "feature": r["feature"], "pillar": pillar,
-                "pillar_share_pct": r["pillar_share_pct"],
-                "split_basis": basis,
-                "feature_spend": r["feature_spend"],
-                "weight": float(w), "pillar_weight_total": wsum,
-                "share_of_pillar": frac,
-                "implied_contribution": contribution,
-                "support_total": sup, "dv_agg_mean": dv_mean,
-                "global_prior_mean": pm,
-                "formula": (f"{share:.4f} * {total_sales:,.0f} * {frac:.4f}"
-                            f" / {sup:,.4f} / {dv_mean:,.2f}"),
-                "note": ("" if sup > 0 else
-                         "NO prior: support is 0 - drop the feature"),
-            })
-    work = pd.DataFrame(rows)
-    out = work[["feature", "pillar", "global_prior_mean", "note"]].copy()
-    out["sign_constraint"] = "positive"     # a spend-derived prior is a lift
+    for sec_, sub in shares.groupby("section", sort=False):
+        pillar_spend = (sub.groupby("pillar")["spend"]
+                        .transform(lambda x: x.fillna(0).sum()))
+        for idx, r in sub.iterrows():
+            f = r["variable"]
+            split, note = 1.0, ""
+            if sec_ in SPEND_SECTIONS:
+                share = r["pillar_share_pct"] / 100.0
+                ps = float(pillar_spend.loc[idx])
+                sp = float(r["spend"]) if pd.notna(r["spend"]) else 0.0
+                if ps <= 0:
+                    note = ("pillar has no spend at all - cannot split its "
+                            "share. Add spend, or move the variables to a "
+                            "direct section")
+                    split = np.nan
+                elif sp <= 0:
+                    note = "no spend given for this variable"
+                    split = np.nan
+                else:
+                    split = sp / ps
+                formula = (f"{r['pillar_share_pct']:g}% x sales x "
+                           f"{sp:,.0f}/{ps:,.0f}")
+            elif sec_ in DIRECT_SECTIONS:
+                share = r["variable_share_pct"] / 100.0
+                formula = f"{r['variable_share_pct']:g}% x sales"
+            else:  # baseline
+                share = (r["pillar_share_pct"] / 100.0) \
+                    * (r["variable_share_pct"] / 100.0)
+                formula = (f"{r['pillar_share_pct']:g}% x "
+                           f"{r['variable_share_pct']:g}% x sales")
+            sign = _sign_for(r)
+            # the coefficient carries the RESOLVED sign: an explicit
+            # `negative` on a positive share is negative; `free` keeps the
+            # share's own sign
+            direction = {"positive": 1.0, "negative": -1.0}.get(
+                sign, -1.0 if share < 0 else 1.0)
+            for region, s_r in sales.items():
+                sup = support[(support["feature"] == f)
+                              & (support["region"] == str(region))]
+                rows.append({
+                    "variable": f, "group": f, "section": sec_,
+                    "pillar": r["pillar"], "region": str(region),
+                    "share_of_sales": abs(share) if np.isfinite(split) else np.nan,
+                    "spend_split": split,
+                    "sales_region": float(s_r),
+                    "contribution": (direction * abs(share) * split * float(s_r)
+                                     if np.isfinite(split) else np.nan),
+                    "support": float(sup["support"].iloc[0]) if len(sup) else 0.0,
+                    "dv_agg": float(dv_agg.get(str(region), np.nan)),
+                    "share_formula": formula, "row_note": note,
+                    "sign_constraint": sign,
+                })
+    work = _divide(pd.DataFrame(rows))
+    agg = _average_over_supported(work, "variable")
+    meta = (work.drop_duplicates("variable")
+            [["variable", "section", "pillar", "sign_constraint", "row_note"]])
+    out = agg.merge(meta, on="variable", how="left")
+    out["global_prior_mean"] = [
+        _prior_mean(c, s) for c, s in zip(out["national_coef"],
+                                          out["sign_constraint"])]
+    out["note"] = np.where(
+        out["row_note"] != "", out["row_note"],
+        np.where(out["n_regions_used"] == 0,
+                 "NO prior: support is 0 in every region - drop the feature "
+                 "or fix the extract", ""))
+    out = out.rename(columns={"variable": "feature"})
     out["group"] = out["feature"]
+    out["basis"] = "share of sales"
     out["from_combined_group"] = False
-    return out.sort_values("feature"), work.sort_values(["pillar", "feature"])
+    out["mixed_signs"] = False
+    cols = ["feature", "group", "section", "pillar", "global_prior_mean",
+            "sign_constraint", "national_coef", "sum_of_region_coefs",
+            "n_regions_used", "n_regions_total", "basis", "note"]
+    return out[cols].sort_values(["section", "feature"]), \
+        work.sort_values(["section", "variable", "region"])
 
 
 # --------------------------------------------------------------------------- #
-# writing
+# the prior file
 # --------------------------------------------------------------------------- #
 PRIOR_COLUMNS = ["variable", "region", "pooling", "sign_constraint",
                  "global_prior_mean", "global_prior_sd", "regional_sd_prior",
@@ -342,42 +579,113 @@ PRIOR_COLUMNS = ["variable", "region", "pooling", "sign_constraint",
                  "prior_mean_basis"]
 
 
-def to_prior_file(priors: pd.DataFrame, default_sd: float = 0.5,
-                  regional_sd: float = 0.3, pillars: dict | None = None,
-                  sd_basis: str = "relative") -> pd.DataFrame:
-    """Lay the computed means out as a real feature-prior CSV.
+def to_prior_file(priors: pd.DataFrame, all_features: list | None = None,
+                  shares: pd.DataFrame | None = None,
+                  default_sd: float = 0.5, regional_sd: float = 0.3,
+                  sd_basis: str = "relative",
+                  pooling: str = "hierarchical") -> pd.DataFrame:
+    """Lay the NATIONAL means out as a real feature-prior CSV, one row per
+    MODEL variable.
 
-    `global_prior_sd` deliberately defaults to 0.5 (wide), not 0.02. A prior
-    derived from a benchmark and then pinned reproduces the benchmark and
-    validates nothing - the agreement is circular. Start wide, read
-    `contraction`, and tighten only where you can name the evidence.
+    Variables neither file covers still get a row - with a blank mean - so
+    nothing silently falls out of the model. `global_prior_sd` defaults to 0.5
+    (wide) on purpose: a prior derived from a benchmark and then pinned
+    reproduces the benchmark and validates nothing.
+
+    The units are written, not assumed. The mean is per RAW unit of the
+    variable, so `scale_mode=none`; and it was derived from a contribution
+    measured against ZERO, so `contribution_reference=zero` - which also keeps
+    it right if the modeller later sets `center_mode=mean` on a level
+    variable. `center_mode=none` is written - the default - and switching an
+    always-on level (TDP, price) to `mean` is the modeller's call: it helps
+    the sampler and leaves the prior mean valid.
     """
-    pillars = pillars or {}
-    out = pd.DataFrame({"variable": priors["feature"]})
-    out["region"] = ""
-    out["pooling"] = "hierarchical"
-    out["sign_constraint"] = priors.get("sign_constraint", "positive")
-    out["global_prior_mean"] = priors["global_prior_mean"].round(10)
-    out["global_prior_sd"] = default_sd
-    out["regional_sd_prior"] = regional_sd
-    out["baseline"] = 0
-    out["pillar"] = priors["feature"].map(
-        pillars) if pillars else priors.get("pillar", "")
-    out["contribution_reference"] = "auto"
-    out["center_mode"] = ""
-    out["scale_mode"] = ""
-    out["prior_sd_basis"] = sd_basis
-    out["prior_mean_basis"] = "median"
-    out = out[PRIOR_COLUMNS]
-    missing = priors["global_prior_mean"].isna()
-    if missing.any():
-        names = list(priors.loc[missing, "feature"])
+    feats = list(dict.fromkeys(list(all_features or []) + list(priors["feature"])))
+    p = priors.drop_duplicates("feature", keep="last").set_index("feature")
+    meta = shares.set_index("variable") if shares is not None and len(shares) \
+        else None
+    rows = []
+    for f in feats:
+        has = f in p.index
+        mean = p.loc[f, "global_prior_mean"] if has else np.nan
+        sign = p.loc[f, "sign_constraint"] if has else ""
+        pillar, baseline = "", 0
+        if meta is not None and f in meta.index:
+            pillar = meta.loc[f, "pillar"]
+            baseline = int(meta.loc[f, "section"] == "baseline")
+            if not has or not sign:
+                sign = _sign_for(meta.loc[f].to_dict()
+                                 | {"section": meta.loc[f, "section"],
+                                    "variable": f})
+        if not sign:
+            sign = "free" if is_dummy(f) else "positive"
+        rows.append({
+            "variable": f, "region": "", "pooling": pooling,
+            "sign_constraint": sign,
+            "global_prior_mean": (round(float(mean), 12)
+                                  if pd.notna(mean) else np.nan),
+            "global_prior_sd": default_sd if pd.notna(mean) else np.nan,
+            "regional_sd_prior": regional_sd,
+            "baseline": baseline, "pillar": pillar or "",
+            "contribution_reference": "zero", "center_mode": "none",
+            "scale_mode": "none", "prior_sd_basis": sd_basis,
+            "prior_mean_basis": "median"})
+    out = pd.DataFrame(rows, columns=PRIOR_COLUMNS)
+    blank = out["global_prior_mean"].isna()
+    if blank.any():
+        names = list(out.loc[blank, "variable"])
         warnings.warn(
-            f"{int(missing.sum())} features have no computable prior "
-            f"({names[:6]}{'...' if len(names) > 6 else ''}). They are written "
-            "with a blank global_prior_mean so the file still loads - either "
-            "drop them or fill the mean by hand.")
+            f"{int(blank.sum())} variables have no generated prior "
+            f"({names[:6]}{'...' if len(names) > 6 else ''}) - they are in "
+            "neither file, or have no support. Their mean is left BLANK: fill "
+            "it by hand or drop the variable before fitting.")
     return out
+
+
+def region_coefficients(priors: pd.DataFrame, work: pd.DataFrame
+                        ) -> pd.DataFrame:
+    """feature / region / region_coef (signed): every usable per-region cell,
+    replicated to each member of its group."""
+    w = work[work["usable"]]
+    if w.empty:
+        return pd.DataFrame(columns=["feature", "region", "region_coef"])
+    return (priors[["feature", "group"]]
+            .merge(w[["group", "region", "prior_mean_region"]], on="group")
+            .rename(columns={"prior_mean_region": "region_coef"})
+            [["feature", "region", "region_coef"]])
+
+
+def regional_prior_file(national: pd.DataFrame, region_coefs: pd.DataFrame,
+                        pooling: str = "independent"
+                        ) -> tuple[pd.DataFrame, list]:
+    """The national rows plus one override row per region with support.
+
+    Returns (the file, the region cells that could NOT be written). A signed
+    variable's region row holds a magnitude and the sign is feature-level, so
+    a region whose coefficient runs the other way cannot be expressed - it
+    gets no row and falls back to the national prior.
+    """
+    base = national.assign(pooling=pooling)
+    signs = base.set_index("variable")["sign_constraint"]
+    has_mean = set(base.loc[base["global_prior_mean"].notna(), "variable"])
+    rows, skipped = [], []
+    for f, region, coef in region_coefs.itertuples(index=False):
+        if f not in has_mean or pd.isna(coef):
+            continue
+        sign = signs.get(f, "positive")
+        if (sign == "positive" and coef <= 0) or (sign == "negative" and coef >= 0):
+            skipped.append((f, region, float(coef)))
+            continue
+        rows.append({"variable": f, "region": str(region),
+                     "global_prior_mean": round(_prior_mean(coef, sign), 12)})
+    reg = pd.DataFrame(rows, columns=PRIOR_COLUMNS)
+    out = pd.concat([base, reg], ignore_index=True)
+    order = {v: i for i, v in enumerate(base["variable"])}
+    out["_o"] = out["variable"].map(order)
+    out["_r"] = out["region"].fillna("").astype(str) != ""
+    out = (out.sort_values(["_o", "_r", "region"], kind="stable")
+           .drop(columns=["_o", "_r"]).reset_index(drop=True))
+    return out, skipped
 
 
 def write_calculation_workbook(work: pd.DataFrame, priors: pd.DataFrame,
@@ -390,31 +698,24 @@ def write_calculation_workbook(work: pd.DataFrame, priors: pd.DataFrame,
         from openpyxl.utils import get_column_letter
 
         wb = Workbook()
-        ws = wb.active
-        ws.title = "calculation"
-        ws.append(list(work.columns))
-        for c in range(1, len(work.columns) + 1):
-            ws.cell(row=1, column=c).font = Font(bold=True)
-        for _, r in work.iterrows():
-            ws.append([None if (isinstance(v, float) and not np.isfinite(v))
-                       else v for v in r.tolist()])
-        for j, name in enumerate(work.columns, start=1):
-            ws.column_dimensions[get_column_letter(j)].width = \
-                40 if name in ("feature", "group", "members", "formula",
-                               "skipped_because", "note") else 16
-        ws.freeze_panes = "B2"
-
-        ws2 = wb.create_sheet("prior_mean")
-        ws2.append(list(priors.columns))
-        for c in range(1, len(priors.columns) + 1):
-            ws2.cell(row=1, column=c).font = Font(bold=True)
-        for _, r in priors.iterrows():
-            ws2.append([None if (isinstance(v, float) and not np.isfinite(v))
-                        else v for v in r.tolist()])
-        for j, name in enumerate(priors.columns, start=1):
-            ws2.column_dimensions[get_column_letter(j)].width = \
-                40 if name in ("feature", "group", "note") else 16
-
+        for i, (title, frame) in enumerate((("calculation", work),
+                                            ("prior_mean", priors))):
+            ws = wb.active if i == 0 else wb.create_sheet(title)
+            ws.title = title
+            ws.append(list(frame.columns))
+            for c in range(1, len(frame.columns) + 1):
+                ws.cell(row=1, column=c).font = Font(bold=True)
+            for _, r in frame.iterrows():
+                ws.append([None if (isinstance(v, float) and not np.isfinite(v))
+                           else (bool(v) if isinstance(v, np.bool_) else v)
+                           for v in r.tolist()])
+            for j, name in enumerate(frame.columns, start=1):
+                ws.column_dimensions[get_column_letter(j)].width = (
+                    42 if name in ("feature", "variable", "group", "members",
+                                   "formula", "share_formula",
+                                   "skipped_because", "note", "row_note")
+                    else 16)
+            ws.freeze_panes = "B2"
         ws3 = wb.create_sheet("how this was computed")
         for line in _EXPLAIN[basis]:
             ws3.append([line])
@@ -436,60 +737,83 @@ _EXPLAIN = {
     "contribution": [
         "HOW THE PRIOR MEAN WAS COMPUTED - inverting a vendor decomposition",
         "",
-        "A contribution is  beta x SUM(x) x dv_scale, so the coefficient that",
-        "reproduces it is:",
+        "    region_coef[group, region] = contribution / support / dv_agg",
+        "    national_coef[group]       = SUM(region_coef over regions with",
+        "                                 support) / n_regions_used",
         "",
-        "    prior_mean[feature, region] = contribution / support / dv_agg",
-        "",
-        "  contribution  the vendor's number for that feature in that region",
-        "  support       SUM of the RAW feature over the modelling window",
+        "  group         a connected component of the mapping file: one vendor",
+        "                variable and the several of ours it was split into",
+        "                (by period or sub-brand), or the reverse",
+        "  contribution  the vendor's number for that group in that region. A",
+        "                vendor number replicated across several of our rows is",
+        "                counted ONCE. A national number is allocated to the",
+        "                regions in proportion to support",
+        "  support       SUM of the group members' RAW values over the window",
         "  dv_agg        the region's KPI aggregate (mean by default)",
         "",
-        "The per-region values are then averaged, DIVIDING BY THE NUMBER OF",
-        "REGIONS THAT HAD SUPPORT - not by the region count. A feature that",
-        "never ran in a region contributes nothing there whatever its",
-        "coefficient, so including a zero would drag the average down.",
+        "NATIONAL vs REGIONAL. national_coef DIVIDES BY THE NUMBER OF REGIONS",
+        "THAT HAD SUPPORT - not by the region count: contribution and support",
+        "in 2 regions out of 5 means the sum of 2 coefficients divided by 2.",
+        "feature_priors_national.csv carries it (pooling=hierarchical).",
+        "feature_priors_regional.csv adds one override row per region with",
+        "that region's own region_coef (pooling=independent).",
         "",
-        "SIGNS. The model reads global_prior_mean as a MAGNITUDE and takes",
-        "direction from sign_constraint. A negative contribution therefore",
-        "becomes sign_constraint=negative with the absolute value. Where the",
-        "sign differs across regions the sign of the TOTAL is used and the row",
-        "is flagged.",
+        "The group's one mean is replicated to every member. That is right:",
+        "they share an implied coefficient, and splitting it by support would",
+        "invent a difference the vendor never measured.",
         "",
-        "COMBINED VENDOR VARIABLES. Where the deck reports one line for several",
-        "model columns, the SUPPORT of the members is summed first, one mean is",
-        "computed for the group, and that mean is replicated to every member.",
-        "The `members` column names them.",
+        "SIGNS. A negative contribution -> sign_constraint=negative. A positive",
+        "one -> free for a dummy ('dummy' in the name), else positive. For a",
+        "signed variable global_prior_mean is the MAGNITUDE; for a free one it",
+        "keeps its sign. Where signs disagree across regions the sign of the",
+        "total is used and the row is flagged; a region on the other side of",
+        "zero gets no override row in the regional file.",
         "",
-        "WHAT TO DO NEXT. global_prior_sd is written WIDE (0.5) on purpose. A",
-        "prior derived from a benchmark and then pinned reproduces the benchmark",
-        "and validates nothing - the agreement is circular. Fit, read",
-        "`contraction` in 02_convergence, and tighten only where you can name",
-        "the evidence. See docs/METHODOLOGY.md section 2.",
+        "UNITS. The mean is per RAW unit of the variable (scale_mode=none,",
+        "written for you) per unit of the region's mean KPI. It matches the",
+        "model only with run.dv_scale: mean and run.dv_scale_scope: region.",
+        "",
+        "global_prior_sd is written WIDE (0.5) on purpose. A prior derived from",
+        "a benchmark and then pinned reproduces the benchmark and validates",
+        "nothing - the agreement is circular. See docs/FEATURE_PRIOR_GUIDE.md.",
     ],
-    "spend": [
-        "HOW THE PRIOR MEAN WAS COMPUTED - spend shares, no decomposition",
+    "share": [
+        "HOW THE PRIOR MEAN WAS COMPUTED - shares of sales",
         "",
-        "    contribution[f] = pillar_share_pct/100 x total_sales",
-        "                      x spend[f] / total spend of that pillar",
-        "    prior_mean[f]   = contribution[f] / support[f] / dv_agg",
+        "    media / expert   C = pillar_share x sales x spend / pillar_spend",
+        "    comp_media       C = variable_share x sales",
+        "    trade            C = variable_share x sales",
+        "    baseline         C = baseline_share x variable_share x sales",
         "",
-        "This deliberately gives every feature in a pillar the SAME implied",
-        "efficiency. That is not a claim that they are equally efficient - it is",
-        "the least-informative starting point that still has the right total.",
-        "With a wide global_prior_sd the data has room to move them apart, and",
-        "HOW FAR EACH ONE MOVES IS THE RESULT.",
+        "    region_coef[variable, region] = C / support / dv_agg",
+        "    national_coef[variable]       = SUM(region_coef over regions with",
+        "                                    support) / n_regions_used",
         "",
-        "A pillar whose features carry no spend (baseline drivers, dummies) is",
-        "split by SUPPORT share instead - the only other thing distinguishing",
-        "them. The `split_basis` column says which was used.",
+        "  sales         the region's total KPI over the window",
+        "  pillar_spend  the SUM of spend over that pillar's variables -",
+        "                computed, never typed",
+        "  baseline      variable_share is the share WITHIN the baseline, from",
+        "                the stage-1 baseline-only run (METHODOLOGY section 1)",
         "",
-        "SANITY-CHECK THE TOTAL, NOT THE PARTS. If the pillar shares say",
-        "marketing is 15% of sales and the fitted model returns 7%, that is a",
-        "finding worth investigating (usually a missing category or competitor",
-        "variable), not a prior to force.",
+        "feature_priors_national.csv carries national_coef; the regional file",
+        "adds one override row per region with support.",
         "",
-        "See docs/METHODOLOGY.md section 2 and docs/FEATURE_PRIOR_GUIDE.md.",
+        "SIGNS come from the share file's sign_constraint column. A blank one",
+        "falls back to: negative share -> negative; a dummy -> free;",
+        "comp_media -> negative; otherwise positive. C carries that sign.",
+        "",
+        "UNITS. Per RAW unit (scale_mode=none) per unit of the region's mean",
+        "KPI - run.dv_scale: mean, run.dv_scale_scope: region.",
+        "",
+        "Inside a media or expert pillar every variable gets the SAME implied",
+        "efficiency. That is not a claim that they are equally efficient - it",
+        "is the least-informative start that still has the right total. With a",
+        "wide global_prior_sd the data has room to move them apart, and HOW FAR",
+        "EACH ONE MOVES IS THE RESULT.",
+        "",
+        "SANITY-CHECK THE TOTAL. If the shares say marketing is 15% of sales",
+        "and the fit returns 7%, that is a finding (usually a missing category",
+        "or competitor variable), not a prior to force.",
     ],
 }
 
@@ -497,71 +821,157 @@ _EXPLAIN = {
 # --------------------------------------------------------------------------- #
 # the workflow
 # --------------------------------------------------------------------------- #
+def decide_case(mapping: pd.DataFrame, shares: pd.DataFrame) -> str:
+    """a / b / c / d - see the module docstring."""
+    if has_contribution(mapping):
+        return "a"
+    if shares is not None and len(shares):
+        return "b" if len(mapping) else "c"
+    return "d"
+
+
+CASE_TEXT = {
+    "a": "vendor contribution in the mapping file -> inverting it",
+    "b": "mapping without contributions + a share file -> building from shares",
+    "c": "share file only -> building from shares",
+    "d": "neither a contribution nor a share file -> no prior file generated",
+}
+
+
 def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
     """Generate a sample prior file (and its working) from whatever was given.
 
-    Returns {} and does nothing when neither a vendor contribution nor a
-    pillar/spend file is configured - the run then proceeds with the prior file
-    already named by `data.feature_priors`.
+    Returns {"case": "d"} and writes nothing when there is nothing to build
+    from; the run then uses `data.feature_priors` as usual.
     """
     data = settings.data
-    contrib_path = data.get("vendor_contribution")
-    spend_path = data.get("pillar_spend")
-    if not contrib_path and not spend_path:
-        return {}
-
-    from mmm.reporting.benchmark import load_mapping
+    map_path, share_path = data.get("mapping_file"), data.get("share_file")
+    if not map_path and not share_path:
+        return {"case": "d"}
     if df is None:
         from mmm.core.settings import load_panel
         df = load_panel(settings)
+    run = settings.run
+    known = [c for c in df.columns
+             if c not in (run.date_col, run.region_col, run.dv_col)]
+    # The feature prior file is the list the mapping and share files must sit
+    # INSIDE: it may carry more variables than they do, never fewer. With no
+    # prior file configured yet, the datacube is the list.
+    configured = [s.name for s in settings.model.features]
+    allowed, against = (configured, PRIOR_FILE) if configured else \
+        (known, DATACUBE)
+
+    mapping = load_mapping_table(map_path, allowed, against) if map_path else \
+        load_mapping_table(None)
+    shares = (load_share_file(share_path, allowed, against) if share_path
+              else pd.DataFrame())
+    case = decide_case(mapping, shares)
+    print(f"[prior] case {case}: {CASE_TEXT[case]}")
+    if case == "d":
+        return {"case": "d"}
+    if case == "a" and len(shares):
+        print("[prior] the share file supplies pillars, the baseline flag and "
+              "default signs; the MEANS come from the vendor contribution, "
+              "which is evidence rather than an assumption")
+    dv_how = data.get("dv_aggregation") or "mean"
+    check_units(run, dv_how)
+
     outdir = outdir or data.get("pre_model_dir") or "pre_model_outputs"
     os.makedirs(outdir, exist_ok=True)
-
-    run = settings.run
-    features = [s.name for s in settings.model.features] or [
-        c for c in df.columns
-        if c not in (run.date_col, run.region_col, run.dv_col)]
-    mapping = load_mapping(data.get("benchmark_mapping")) \
-        if data.get("benchmark_mapping") else {}
+    features = configured or known
     sup = support_table(df, features, run.region_col)
-    dv = dv_aggregate(df, run.dv_col, run.region_col,
-                      data.get("dv_aggregation") or "mean")
+    dv = dv_for_model(df, run, dv_how)
 
-    written = {}
-    if contrib_path:
-        contrib = load_vendor_contribution(contrib_path)
-        priors, work = priors_from_contribution(contrib, sup, dv, mapping)
+    if case == "a":
+        priors, work = priors_from_mapping(mapping, sup, dv)
+        rcoef = region_coefficients(priors, work)
         basis = "contribution"
-        # the vendor numbers, in the canonical shape benchmark.py can pre-fill
-        contrib.to_csv(os.path.join(outdir, "benchmark_contribution.csv"),
-                       index=False)
-        written["benchmark_contribution"] = os.path.join(
-            outdir, "benchmark_contribution.csv")
+        if len(shares):
+            # the vendor contribution wins WHERE IT EXISTS. A variable the
+            # vendor never reported (a channel they did not model) has nothing
+            # to conflict with, so it takes its share-based prior rather than a
+            # blank - each row's `basis` says which it got.
+            sp, sw = priors_from_shares(
+                shares, sup, dv, region_sales(df, run.dv_col, run.region_col))
+            have = set(priors.loc[priors["global_prior_mean"].notna(), "feature"])
+            fill = sp[~sp["feature"].isin(have) & sp["global_prior_mean"].notna()]
+            if len(fill):
+                fw = sw[sw["variable"].isin(fill["feature"])]
+                priors = pd.concat([priors[~priors["feature"].isin(
+                    fill["feature"])], fill], ignore_index=True)
+                work = pd.concat([work, fw], ignore_index=True)
+                rcoef = pd.concat([rcoef[~rcoef["feature"].isin(fill["feature"])],
+                                   region_coefficients(fill, fw)],
+                                  ignore_index=True)
+                print(f"[prior] {len(fill)} variables the vendor did not report "
+                      "took their share-based prior instead of a blank")
     else:
-        ps = load_pillar_spend(spend_path)
-        total_sales = float(pd.to_numeric(df[run.dv_col],
-                                          errors="coerce").sum())
-        priors, work = priors_from_spend(ps, sup, dv, total_sales)
-        basis = "spend"
+        priors, work = priors_from_shares(
+            shares, sup, dv, region_sales(df, run.dv_col, run.region_col))
+        rcoef = region_coefficients(priors, work)
+        basis = "share"
 
-    pillars = {}
-    if basis == "spend":
-        pillars = dict(zip(priors["feature"], priors["pillar"]))
-    pf = to_prior_file(priors, pillars=pillars)
-    prior_path = os.path.join(outdir, "feature_priors_sample.csv")
-    pf.to_csv(prior_path, index=False)
+    national = to_prior_file(priors, all_features=features, shares=shares)
+    regional, skipped = regional_prior_file(national, rcoef)
+    nat_path = os.path.join(outdir, "feature_priors_national.csv")
+    reg_path = os.path.join(outdir, "feature_priors_regional.csv")
+    national.to_csv(nat_path, index=False)
+    regional.to_csv(reg_path, index=False)
     calc = write_calculation_workbook(work, priors, outdir, basis)
-
-    written.update({"feature_priors_sample": prior_path,
-                    "prior_calculation": calc, "basis": basis})
-    n_ok = int(pf["global_prior_mean"].notna().sum())
-    print(f"[prior] {basis}-based priors for {n_ok}/{len(pf)} features "
-          f"-> {prior_path}")
+    n_ok = int(national["global_prior_mean"].notna().sum())
+    n_reg = int((regional["region"].fillna("").astype(str) != "").sum())
+    print(f"[prior] national priors for {n_ok}/{len(national)} variables -> "
+          f"{nat_path}")
+    print(f"[prior] regional: the same plus {n_reg} region rows -> {reg_path}")
+    if skipped:
+        ex = ", ".join(f"{f}@{r}" for f, r, _ in skipped[:5])
+        warnings.warn(
+            f"{len(skipped)} region cells run AGAINST their variable's sign "
+            f"({ex}{'...' if len(skipped) > 5 else ''}) and have no row in the "
+            "regional file - a signed variable's region row is a magnitude. "
+            "Those regions fall back to the national prior.")
     print(f"[prior] the working -> {calc}")
-    print("[prior] REVIEW IT before pointing data.feature_priors at it - "
-          "global_prior_sd is deliberately wide (0.5), and a benchmark-derived "
-          "prior that is then pinned validates nothing.")
-    return written
+    print("[prior] REVIEW before pointing data.feature_priors at either file - "
+          "national for pooling=hierarchical, regional for independent. "
+          "global_prior_sd is deliberately wide (0.5). center_mode is none "
+          "everywhere - consider mean on level variables (TDP, price, "
+          "category); the prior mean stays valid either way.")
+    return {"case": case, "basis": basis,
+            "feature_priors_national": nat_path,
+            "feature_priors_regional": reg_path,
+            "regional_rows_skipped": skipped, "prior_calculation": calc}
+
+
+def check_units(run, dv_how: str = "mean") -> list:
+    """Warn when the run would read the generated means in different units.
+
+    A generated mean is `C / SUM(raw x) / dv_agg`: per raw unit of the
+    variable, per unit of the region's KPI aggregate. The model reads a
+    coefficient as `beta x SUM(x_scaled) x dv_scale`. Those agree only when
+    the KPI scale IS that aggregate, per region. Otherwise every contribution
+    comes out wrong by a constant multiple - and still reconciles to 100%,
+    so no downstream check can see it (the v5 BMC failure).
+    """
+    problems = []
+    if dv_how != "mean":
+        problems.append(
+            f"data.dv_aggregation is {dv_how!r}, but no run.dv_scale divides "
+            "the KPI by that - use 'mean'")
+    if getattr(run, "dv_scale", "mean") != "mean":
+        problems.append(
+            f"run.dv_scale is {run.dv_scale!r}; the generated means are per "
+            "unit of the region's MEAN KPI - set run.dv_scale: mean")
+    if getattr(run, "dv_scale_scope", "region") != "region":
+        problems.append(
+            f"run.dv_scale_scope is {run.dv_scale_scope!r}; each region was "
+            "divided by its OWN KPI - set run.dv_scale_scope: region")
+    if problems:
+        warnings.warn(
+            "the generated priors are in different units from this run:\n  - "
+            + "\n  - ".join(problems)
+            + "\nFix config.yaml before fitting with them, or every mean is "
+            "off by the ratio of the two scales.")
+    return problems
 
 
 if __name__ == "__main__":
@@ -571,6 +981,6 @@ if __name__ == "__main__":
 
     cfg = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     res = run_pre_model(load_settings(cfg))
-    if not res:
-        print("[prior] neither data.vendor_contribution nor data.pillar_spend "
-              "is set - nothing to build. Model as usual.")
+    if res.get("case") == "d":
+        print("[prior] neither data.mapping_file (with contributions) nor "
+              "data.share_file is set - nothing to build. Model as usual.")
