@@ -63,7 +63,8 @@ SECTIONS = {
 EXCLUDED = {"model": ("features",)}
 
 DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format",
-             "mapping_file", "share_file", "dv_aggregation", "pre_model_dir")
+             "mapping_file", "share_file", "dv_aggregation", "national_basis",
+             "pre_model_dir")
 
 # keys that used to exist, and what replaced them - so an old config gets told
 # what to do instead of a bare "unknown key"
@@ -127,6 +128,13 @@ HELP: dict[str, dict[str, str]] = {
                            "against: mean (default) | sum | median. It must equal run.dv_scale, "
                            "so keep mean and set run.dv_scale: mean when fitting with generated "
                            "priors - the pre-model step warns otherwise"),
+        "national_basis": ("how the per-region coefficients become ONE national prior: "
+                           "average (default - their mean, the centre of the regions; right "
+                           "for pooling hierarchical/independent) | weighted "
+                           "(SUM(contribution)/SUM(support x dv_agg) - the coefficient that "
+                           "reproduces the national TOTAL; right for pooling: global). They "
+                           "differ when a contribution is concentrated in a few regions; the "
+                           "step warns and the workbook prints both"),
         "pre_model_dir": ("where the pre-model step writes feature_priors_national.csv, "
                           "feature_priors_regional.csv and the calculation workbook. null = "
                           "pre_model_outputs/"),
@@ -404,6 +412,7 @@ DEFAULT_DATA = {
     "mapping_file": None,
     "share_file": None,
     "dv_aggregation": "mean",
+    "national_basis": "average",
     "pre_model_dir": None,
 }
 
@@ -529,7 +538,8 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     Cross-validation runs afterwards only when `cv.enabled` is true - it is a
     full refit per fold, so it is opt-in rather than part of every run.
     """
-    from mmm.run_pipeline import run
+    # `run_pipeline` pulls in PyMC. It is imported AFTER the no-features branch
+    # below, so generating a prior file works on a laptop that has no sampler.
     from mmm.checks.warnings_report import collect_warnings
     try:
         from mmm.data.prior_builder import run_pre_model
@@ -545,10 +555,29 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
         with collect_warnings() as c:
             settings = load_settings(path)
         caught += list(c)
-    if not settings.model.features:
-        raise ValueError(
-            f"{path}: no features. Set data.feature_priors to the prior CSV.")
     panel = load_panel(settings) if df is None else df
+
+    # No prior file yet? Generate one from the datacube (plus the mapping /
+    # share files if they are set) and stop, rather than refusing with a
+    # chicken-and-egg error: you should not need a feature prior file to
+    # produce a feature prior file.
+    if not settings.model.features:
+        if run_pre_model is None:
+            raise ValueError(
+                f"{path}: no features. Set data.feature_priors to the prior CSV.")
+        with collect_warnings() as _gen:
+            made = run_pre_model(settings, df=panel)
+        for w in _gen:
+            print(f"[prior] {w}")
+        generated = made.get("feature_priors_national")
+        raise ValueError(
+            f"{path}: data.feature_priors is not set, so there is nothing to "
+            f"fit yet.\nA prior file was generated from the datacube:\n"
+            f"  {generated}\nReview it - fill in global_prior_mean, "
+            "sign_constraint and global_prior_sd where you can - then set "
+            "data.feature_priors to it and run again.")
+
+    from mmm.run_pipeline import run
 
     # PRE-MODEL: if the client gave us a vendor decomposition or a pillar/spend
     # file, turn it into a sample prior file (plus the working) before fitting.

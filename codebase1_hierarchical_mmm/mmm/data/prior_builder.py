@@ -355,26 +355,58 @@ def region_sales(df: pd.DataFrame, dv_col: str, region_col: str) -> pd.Series:
 # --------------------------------------------------------------------------- #
 # the shared averaging step
 # --------------------------------------------------------------------------- #
-def _average_over_supported(work: pd.DataFrame, key: str) -> pd.DataFrame:
-    """The NATIONAL coefficient: the SUM of the signed per-region coefficients
-    over the regions that HAD support, divided by how many there were.
+VALID_NATIONAL_BASIS = ("average", "weighted")
 
-    Signed, so a region whose contribution runs the other way pulls the
-    average towards zero rather than being counted as agreement.
+
+def _average_over_supported(work: pd.DataFrame, key: str,
+                            basis: str = "average") -> pd.DataFrame:
+    """The NATIONAL coefficient, both ways, because they can differ by 4x.
+
+    `average`   the SUM of the signed per-region coefficients over the regions
+                that HAD support, divided by how many there were. The centre of
+                the regions - right when each region gets its own coefficient
+                (pooling hierarchical / independent).
+    `weighted`  SUM(contribution) / SUM(support x dv_agg): the ONE coefficient
+                that reproduces the NATIONAL TOTAL. Right under pooling=global,
+                where a single beta serves every region.
+
+    They agree only when the per-region coefficients are equal. When a vendor's
+    contribution sits almost entirely in one region (say 99% of it) but the
+    variable has support in four, the average divides that region's coefficient
+    by four and the national total comes out ~4x short - which is exactly the
+    shape of a gap that no amount of correcting can close, because the next
+    refit re-imposes it. Both columns are always written so the ratio is
+    visible.
     """
-    use = work[work["usable"]]
+    basis = str(basis or "average").strip().lower()
+    if basis not in VALID_NATIONAL_BASIS:
+        raise ValueError(f"national_basis must be one of {VALID_NATIONAL_BASIS}, "
+                         f"got {basis!r}")
+    use = work[work["usable"]].copy()
+    use["_w"] = use["support"] * use["dv_agg"]          # the total's denominator
     agg = (use.groupby(key, as_index=False)
            .agg(sum_of_region_coefs=("prior_mean_region", "sum"),
-                n_regions_used=("prior_mean_region", "size")))
+                n_regions_used=("prior_mean_region", "size"),
+                _contrib=("contribution", "sum"),
+                _weight=("_w", "sum")))
     n_all = (work.groupby(key, as_index=False)["region"].nunique()
              .rename(columns={"region": "n_regions_total"}))
     agg = n_all.merge(agg, on=key, how="left")
     agg["n_regions_used"] = agg["n_regions_used"].fillna(0).astype(int)
-    agg["national_coef"] = np.where(
+    agg["national_coef_average"] = np.where(
         agg["n_regions_used"] > 0,
         agg["sum_of_region_coefs"] / agg["n_regions_used"].replace(0, np.nan),
         np.nan)
-    return agg
+    agg["national_coef_weighted"] = np.where(
+        agg["_weight"].fillna(0) != 0,
+        agg["_contrib"] / agg["_weight"].replace(0, np.nan), np.nan)
+    agg["national_basis"] = basis
+    agg["national_coef"] = agg[f"national_coef_{basis}"]
+    # how far the two disagree: >1 means the plain average UNDER-delivers the
+    # national total by that factor, which is the R you would otherwise chase
+    agg["weighted_over_average"] = (agg["national_coef_weighted"]
+                                    / agg["national_coef_average"].replace(0, np.nan))
+    return agg.drop(columns=["_contrib", "_weight"])
 
 
 def _prior_mean(coef: float, sign: str) -> float:
@@ -409,7 +441,8 @@ def _divide(work: pd.DataFrame) -> pd.DataFrame:
 # A. invert a vendor decomposition
 # --------------------------------------------------------------------------- #
 def priors_from_mapping(mapping: pd.DataFrame, support: pd.DataFrame,
-                        dv_agg: pd.Series) -> tuple[pd.DataFrame, pd.DataFrame]:
+                        dv_agg: pd.Series, national_basis: str = "average"
+                        ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(one row per OUR variable, the full working) from a mapping that
     carries contributions."""
     mem = group_members(mapping)
@@ -442,7 +475,7 @@ def priors_from_mapping(mapping: pd.DataFrame, support: pd.DataFrame,
     work["dv_agg"] = work["region"].map(dv_agg)
     work = _divide(work)
 
-    agg = _average_over_supported(work, "group")
+    agg = _average_over_supported(work, "group", national_basis)
     signs = (work.dropna(subset=["contribution"]).groupby("group")
              ["contribution"].agg(total="sum",
                                   n_pos=lambda x: int((x > 0).sum()),
@@ -478,9 +511,10 @@ def priors_from_mapping(mapping: pd.DataFrame, support: pd.DataFrame,
     out["from_combined_group"] = out.groupby("group")["feature"] \
         .transform("size") > 1
     cols = ["feature", "group", "global_prior_mean", "sign_constraint",
-            "national_coef", "sum_of_region_coefs", "n_regions_used",
-            "n_regions_total", "mixed_signs", "from_combined_group", "basis",
-            "note"]
+            "national_coef", "national_coef_average", "national_coef_weighted",
+            "weighted_over_average", "national_basis", "sum_of_region_coefs",
+            "n_regions_used", "n_regions_total", "mixed_signs",
+            "from_combined_group", "basis", "note"]
     return out[cols].sort_values("feature"), work.sort_values(["group", "region"])
 
 
@@ -488,7 +522,8 @@ def priors_from_mapping(mapping: pd.DataFrame, support: pd.DataFrame,
 # B/C. build from shares
 # --------------------------------------------------------------------------- #
 def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
-                       dv_agg: pd.Series, sales: pd.Series
+                       dv_agg: pd.Series, sales: pd.Series,
+                       national_basis: str = "average"
                        ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """(one row per variable in the share file, the full working)."""
     rows = []
@@ -545,7 +580,7 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
                     "sign_constraint": sign,
                 })
     work = _divide(pd.DataFrame(rows))
-    agg = _average_over_supported(work, "variable")
+    agg = _average_over_supported(work, "variable", national_basis)
     meta = (work.drop_duplicates("variable")
             [["variable", "section", "pillar", "sign_constraint", "row_note"]])
     out = agg.merge(meta, on="variable", how="left")
@@ -563,8 +598,10 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
     out["from_combined_group"] = False
     out["mixed_signs"] = False
     cols = ["feature", "group", "section", "pillar", "global_prior_mean",
-            "sign_constraint", "national_coef", "sum_of_region_coefs",
-            "n_regions_used", "n_regions_total", "basis", "note"]
+            "sign_constraint", "national_coef", "national_coef_average",
+            "national_coef_weighted", "weighted_over_average",
+            "national_basis", "sum_of_region_coefs", "n_regions_used",
+            "n_regions_total", "basis", "note"]
     return out[cols].sort_values(["section", "feature"]), \
         work.sort_values(["section", "variable", "region"])
 
@@ -579,27 +616,37 @@ PRIOR_COLUMNS = ["variable", "region", "pooling", "sign_constraint",
                  "prior_mean_basis"]
 
 
-def to_prior_file(priors: pd.DataFrame, all_features: list | None = None,
+def to_prior_file(priors: pd.DataFrame | None = None,
+                  all_features: list | None = None,
                   shares: pd.DataFrame | None = None,
-                  default_sd: float = 0.5, regional_sd: float = 0.3,
-                  sd_basis: str = "relative",
-                  pooling: str = "hierarchical") -> pd.DataFrame:
-    """Lay the NATIONAL means out as a real feature-prior CSV, one row per
-    MODEL variable.
+                  sd_basis: str = "relative", mean_basis: str = "median",
+                  pooling: str = "") -> pd.DataFrame:
+    """The feature-prior CSV: one row per MODEL variable, filled only where
+    something was actually given.
 
-    Variables neither file covers still get a row - with a blank mean - so
-    nothing silently falls out of the model. `global_prior_sd` defaults to 0.5
-    (wide) on purpose: a prior derived from a benchmark and then pinned
-    reproduces the benchmark and validates nothing.
+    The file is a TEMPLATE, and a blank cell is a real answer - "nobody has
+    said, so the model's default applies". Only four columns are ever written:
 
-    The units are written, not assumed. The mean is per RAW unit of the
-    variable, so `scale_mode=none`; and it was derived from a contribution
-    measured against ZERO, so `contribution_reference=zero` - which also keeps
-    it right if the modeller later sets `center_mode=mean` on a level
-    variable. `center_mode=none` is written - the default - and switching an
-    always-on level (TDP, price) to `mean` is the modeller's call: it helps
-    the sampler and leaves the prior mean valid.
+      variable            every column of the datacube (or every configured
+                          feature), so nothing silently falls out of the model
+      sign_constraint     from the vendor contribution's sign, or the share
+                          file's column. BLANK when neither covered it
+      global_prior_mean   the generated coefficient. BLANK likewise - which is
+                          exactly the state of a NEW variable you are testing
+      prior_sd_basis /    `relative` and `median`, so a sd you type later reads
+      prior_mean_basis    as a percentage and a mean reads as the median
+
+    `pillar` and `baseline` are carried over when the SHARE file states them,
+    because that file says so in as many words. Everything else - `pooling`,
+    `global_prior_sd`, `regional_sd_prior`, `contribution_reference`,
+    `center_mode`, `scale_mode` - is left blank for the modeller, and blank
+    means the documented default (`hierarchical`, no centring, no scaling,
+    `auto` reference). Those defaults are what the generated means are in the
+    units of, so an untouched file is already consistent.
     """
+    priors = pd.DataFrame(columns=["feature", "global_prior_mean",
+                                   "sign_constraint"]) if priors is None \
+        else priors
     feats = list(dict.fromkeys(list(all_features or []) + list(priors["feature"])))
     p = priors.drop_duplicates("feature", keep="last").set_index("feature")
     meta = shares.set_index("variable") if shares is not None and len(shares) \
@@ -609,36 +656,34 @@ def to_prior_file(priors: pd.DataFrame, all_features: list | None = None,
         has = f in p.index
         mean = p.loc[f, "global_prior_mean"] if has else np.nan
         sign = p.loc[f, "sign_constraint"] if has else ""
-        pillar, baseline = "", 0
+        pillar, baseline = "", ""
         if meta is not None and f in meta.index:
             pillar = meta.loc[f, "pillar"]
-            baseline = int(meta.loc[f, "section"] == "baseline")
-            if not has or not sign:
+            baseline = 1 if meta.loc[f, "section"] == "baseline" else ""
+            if not sign:
                 sign = _sign_for(meta.loc[f].to_dict()
                                  | {"section": meta.loc[f, "section"],
                                     "variable": f})
-        if not sign:
-            sign = "free" if is_dummy(f) else "positive"
         rows.append({
             "variable": f, "region": "", "pooling": pooling,
-            "sign_constraint": sign,
+            "sign_constraint": sign or "",
             "global_prior_mean": (round(float(mean), 12)
                                   if pd.notna(mean) else np.nan),
-            "global_prior_sd": default_sd if pd.notna(mean) else np.nan,
-            "regional_sd_prior": regional_sd,
+            "global_prior_sd": np.nan, "regional_sd_prior": np.nan,
             "baseline": baseline, "pillar": pillar or "",
-            "contribution_reference": "zero", "center_mode": "none",
-            "scale_mode": "none", "prior_sd_basis": sd_basis,
-            "prior_mean_basis": "median"})
+            "contribution_reference": "", "center_mode": "",
+            "scale_mode": "", "prior_sd_basis": sd_basis,
+            "prior_mean_basis": mean_basis})
     out = pd.DataFrame(rows, columns=PRIOR_COLUMNS)
     blank = out["global_prior_mean"].isna()
-    if blank.any():
+    if blank.any() and len(priors):
         names = list(out.loc[blank, "variable"])
         warnings.warn(
             f"{int(blank.sum())} variables have no generated prior "
             f"({names[:6]}{'...' if len(names) > 6 else ''}) - they are in "
             "neither file, or have no support. Their mean is left BLANK: fill "
-            "it by hand or drop the variable before fitting.")
+            "it by hand, or leave it if this is a variable you are testing "
+            "(it then starts free and centred on zero).")
     return out
 
 
@@ -672,7 +717,7 @@ def regional_prior_file(national: pd.DataFrame, region_coefs: pd.DataFrame,
     for f, region, coef in region_coefs.itertuples(index=False):
         if f not in has_mean or pd.isna(coef):
             continue
-        sign = signs.get(f, "positive")
+        sign = str(signs.get(f) or "free")     # blank = free, as the loader reads it
         if (sign == "positive" and coef <= 0) or (sign == "negative" and coef >= 0):
             skipped.append((f, region, float(coef)))
             continue
@@ -834,19 +879,61 @@ CASE_TEXT = {
     "a": "vendor contribution in the mapping file -> inverting it",
     "b": "mapping without contributions + a share file -> building from shares",
     "c": "share file only -> building from shares",
-    "d": "neither a contribution nor a share file -> no prior file generated",
+    "d": "neither a contribution nor a share file -> the SKELETON, one row "
+         "per datacube variable with the means and signs blank",
 }
 
 
-def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
-    """Generate a sample prior file (and its working) from whatever was given.
+def warn_concentrated(priors: pd.DataFrame, basis: str = "average",
+                      tol: float = 1.25) -> pd.DataFrame:
+    """Flag the variables where the two national aggregations disagree.
 
-    Returns {"case": "d"} and writes nothing when there is nothing to build
-    from; the run then uses `data.feature_priors` as usual.
+    The plain average and the total-preserving weighted value differ when the
+    contribution is concentrated in a few regions but the variable has support
+    in many. Under `pooling: global` - ONE coefficient for every region - the
+    average then under-delivers the national total by exactly that ratio, and
+    the gap survives every correction because the next refit re-imposes it.
+    """
+    if "weighted_over_average" not in priors.columns:
+        return pd.DataFrame()
+    r = pd.to_numeric(priors["weighted_over_average"], errors="coerce")
+    bad = priors[(r > tol) | (r < 1 / tol)].copy()
+    if not len(bad):
+        return bad
+    ex = ", ".join(
+        f"{f} x{v:.1f}" for f, v in zip(bad["feature"], bad["weighted_over_average"])
+    if pd.notna(v))
+    warnings.warn(
+        f"{len(bad)} variables whose contribution is CONCENTRATED in a few "
+        f"regions: the total-preserving coefficient differs from the plain "
+        f"average by more than {tol:.2f}x ({ex[:300]}). You are generating "
+        f"national_basis={basis!r}. Under pooling: global - one coefficient "
+        "for every region - the average under-delivers the national total by "
+        "that factor, and no correction closes it because the next refit "
+        "re-imposes it. Use data.national_basis: weighted for a global model, "
+        "or give the variable per-region priors "
+        "(feature_priors_regional.csv + pooling: independent).")
+    return bad
+
+
+def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
+    """Generate the feature prior file (and its working) from whatever was given.
+
+    The variable list comes from the DATACUBE - `date`, `region` and `dv`
+    aside, every column is a row - so there is no chicken-and-egg: you do not
+    need a feature prior file to generate a feature prior file. When one IS
+    configured it is the list instead, and the mapping/share files must sit
+    inside it.
+
+    With neither a mapping nor a share file (case d) it still writes the
+    SKELETON - one row per datacube column, means and signs blank - unless a
+    prior file is already configured, in which case there is nothing to add
+    and it returns {"case": "d"}.
     """
     data = settings.data
     map_path, share_path = data.get("mapping_file"), data.get("share_file")
-    if not map_path and not share_path:
+    configured_path = data.get("feature_priors")
+    if not map_path and not share_path and configured_path:
         return {"case": "d"}
     if df is None:
         from mmm.core.settings import load_panel
@@ -867,13 +954,12 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
               else pd.DataFrame())
     case = decide_case(mapping, shares)
     print(f"[prior] case {case}: {CASE_TEXT[case]}")
-    if case == "d":
-        return {"case": "d"}
     if case == "a" and len(shares):
         print("[prior] the share file supplies pillars, the baseline flag and "
               "default signs; the MEANS come from the vendor contribution, "
               "which is evidence rather than an assumption")
     dv_how = data.get("dv_aggregation") or "mean"
+    nat_basis = data.get("national_basis") or "average"
     check_units(run, dv_how)
 
     outdir = outdir or data.get("pre_model_dir") or "pre_model_outputs"
@@ -883,7 +969,7 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
     dv = dv_for_model(df, run, dv_how)
 
     if case == "a":
-        priors, work = priors_from_mapping(mapping, sup, dv)
+        priors, work = priors_from_mapping(mapping, sup, dv, nat_basis)
         rcoef = region_coefficients(priors, work)
         basis = "contribution"
         if len(shares):
@@ -892,7 +978,8 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
             # to conflict with, so it takes its share-based prior rather than a
             # blank - each row's `basis` says which it got.
             sp, sw = priors_from_shares(
-                shares, sup, dv, region_sales(df, run.dv_col, run.region_col))
+                shares, sup, dv, region_sales(df, run.dv_col, run.region_col),
+                nat_basis)
             have = set(priors.loc[priors["global_prior_mean"].notna(), "feature"])
             fill = sp[~sp["feature"].isin(have) & sp["global_prior_mean"].notna()]
             if len(fill):
@@ -905,20 +992,36 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
                                   ignore_index=True)
                 print(f"[prior] {len(fill)} variables the vendor did not report "
                       "took their share-based prior instead of a blank")
+    elif case == "d":
+        # nothing to build FROM: write the skeleton so the modeller has the
+        # variable list and the two basis columns, and fills the rest in
+        priors = work = rcoef = None
+        basis = "skeleton"
     else:
         priors, work = priors_from_shares(
-            shares, sup, dv, region_sales(df, run.dv_col, run.region_col))
+            shares, sup, dv, region_sales(df, run.dv_col, run.region_col),
+            nat_basis)
         rcoef = region_coefficients(priors, work)
         basis = "share"
 
+    if priors is not None:
+        warn_concentrated(priors, nat_basis)
     national = to_prior_file(priors, all_features=features, shares=shares)
-    regional, skipped = regional_prior_file(national, rcoef)
     nat_path = os.path.join(outdir, "feature_priors_national.csv")
-    reg_path = os.path.join(outdir, "feature_priors_regional.csv")
     national.to_csv(nat_path, index=False)
+    n_ok = int(national["global_prior_mean"].notna().sum())
+    if case == "d":
+        print(f"[prior] skeleton: {len(national)} variables from the datacube, "
+              f"means and signs BLANK -> {nat_path}")
+        print("[prior] fill in global_prior_mean / sign_constraint / "
+              "global_prior_sd, then point data.feature_priors at it. A blank "
+              "mean is a variable that starts free and centred on zero.")
+        return {"case": case, "basis": basis,
+                "feature_priors_national": nat_path}
+    regional, skipped = regional_prior_file(national, rcoef)
+    reg_path = os.path.join(outdir, "feature_priors_regional.csv")
     regional.to_csv(reg_path, index=False)
     calc = write_calculation_workbook(work, priors, outdir, basis)
-    n_ok = int(national["global_prior_mean"].notna().sum())
     n_reg = int((regional["region"].fillna("").astype(str) != "").sum())
     print(f"[prior] national priors for {n_ok}/{len(national)} variables -> "
           f"{nat_path}")
@@ -932,10 +1035,11 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
             "Those regions fall back to the national prior.")
     print(f"[prior] the working -> {calc}")
     print("[prior] REVIEW before pointing data.feature_priors at either file - "
-          "national for pooling=hierarchical, regional for independent. "
-          "global_prior_sd is deliberately wide (0.5). center_mode is none "
-          "everywhere - consider mean on level variables (TDP, price, "
-          "category); the prior mean stays valid either way.")
+          "national for pooling=hierarchical, regional for independent. Only "
+          "the variable, the mean, the sign and the two basis columns are "
+          "filled; global_prior_sd is BLANK, so write the width you can "
+          "defend (0.02 pins it, 0.5 lets the data speak), and consider "
+          "center_mode=mean on level variables (TDP, price, category).")
     return {"case": case, "basis": basis,
             "feature_priors_national": nat_path,
             "feature_priors_regional": reg_path,
@@ -981,6 +1085,7 @@ if __name__ == "__main__":
 
     cfg = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
     res = run_pre_model(load_settings(cfg))
-    if res.get("case") == "d":
-        print("[prior] neither data.mapping_file (with contributions) nor "
-              "data.share_file is set - nothing to build. Model as usual.")
+    if res.get("case") == "d" and not res.get("feature_priors_national"):
+        print("[prior] data.feature_priors is already set and there is no "
+              "mapping or share file to build from - nothing to do. To get a "
+              "fresh skeleton from the datacube, clear data.feature_priors.")

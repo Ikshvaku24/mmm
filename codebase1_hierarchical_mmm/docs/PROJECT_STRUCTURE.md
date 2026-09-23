@@ -99,7 +99,7 @@ outputs/<run_name>/
 Plus, when the pre-model step runs:
 
 ```
-pre_model_outputs/        (or data.pre_model_dir) - cases a-c only
+pre_model_outputs/        (or data.pre_model_dir)
 ├── feature_priors_national.csv   one national mean per variable (hierarchical)
 ├── feature_priors_regional.csv   + one override row per region (independent)
 └── prior_calculation.xlsx        every intermediate number and the formula
@@ -119,7 +119,7 @@ pre_model_outputs/        (or data.pre_model_dir) - cases a-c only
 
 ## Tests
 
-`../tests/run_all.py` — 1293 checks, ~10s, no PyMC needed. They import the
+`../tests/run_all.py` — 1326 checks, ~10s, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

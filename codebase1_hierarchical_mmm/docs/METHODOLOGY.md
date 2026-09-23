@@ -347,6 +347,17 @@ The easy way: paste `V` into the TOTAL `benchmark` cell of the variable's row in
 `benchmark_comparison.xlsx` and read `suggested_prior`. Example: 2% now, you
 believe 6%, c = 0.15 → R = 3 → new = old × 3^(1/0.85) = **old × 3.64**.
 
+> **Worked example (`real_data_v9`).** `ucm`: prior median 0.08015,
+> `prior_sd 0.6` relative → `sigma_log = sqrt(ln(1+0.6²)) = 0.5545`;
+> `mean_shift_in_prior_sd = −1.947`, so the posterior median is
+> `0.08015 × exp(−1.947 × 0.5545) = 0.0272` — the data cut it to a third — and
+> its share came out **4.45%**. Because the contribution is linear in the
+> coefficient, the coefficient that delivers 8% is
+> `0.0272 × 8/4.45 = 0.0490`. Write that as the mean; to make it land, **pin
+> it** (`global_prior_sd: 0.02–0.05`) — at c = 0.41 with a wide prior the data
+> takes two-thirds of any move straight back. §2c is the full procedure,
+> including which variables give up the 3.55pp.
+
 For a first prior, before any run: `beta = V / Σ(x − ref) / dv_scale`, with
 `ref = 0` under `contribution_reference: zero` and `ref = min(x)` under `min`,
 and `dv_scale` the region's mean KPI (`run.dv_scale: mean`). The pre-model
@@ -391,6 +402,208 @@ the prior to **current posterior median × R** directly.
   absorb anything and its share means little.
   `04_fit/exogeneity_cross_correlation.csv` flags it. Prefer an equity series
   built from brand-tracking data (awareness, consideration, trust scores).
+
+---
+
+## 2c. The secondary model — a vendor decomposition you are not allowed to move
+
+A **secondary model** is one where a primary decomposition (the vendor's)
+already exists and is, for most pillars, the answer. You are not re-estimating
+media; you are adding or testing something the vendor did not have — a new
+variable, a re-split, a different baseline story — while everything else
+reproduces their numbers.
+
+Its signature settings are `model.include_intercept: false` (no free term may
+absorb sales) and a prior file where most variables are **pinned** to the
+vendor-implied coefficient. That combination makes one constraint exact:
+
+```
+Σ contributions  =  fitted sales  ≈  actual sales
+```
+
+**Every unit of contribution your new variable gains is taken from another
+variable.** There is no slack term to take it from. So the question is never
+"how do I raise X" on its own; it is always "raise X **out of what**".
+
+### The register: the prior sd is the valve
+
+Give every variable a role before you run. The `global_prior_sd` column *is*
+the mechanism — it decides who absorbs change and who does not.
+
+| Role | `global_prior_sd` (`prior_sd_basis: relative`) | What it does | Typical members |
+|---|---|---|---|
+| **LOCKED** | `0.02` (±2%) | contraction ≈ 0, so the coefficient IS the prior: the variable reproduces the vendor and cannot donate | all media, competitor media, trade, expert, price and the other negative variables, any dummy you trust |
+| **DONOR** | `0.3 – 0.5` | free to move: this is where the new variable's volume comes from | the positive baseline variables you nominate — distribution/TDP, category volume |
+| **CANDIDATE** | `0.5 – 0.7`, or pinned once you are imposing a share | the variable under test | the new variable (a UCM equity series, a new trade lever) |
+
+**Whatever is loosest is the donor, whether you meant it or not.** A free dummy
+with a wide prior is the most willing donor in the model: it has no sign
+constraint and a handful of active periods, so it can move a long way at almost
+no cost to the fit. If you do not lock your dummies, they will quietly fund
+everything you do elsewhere — and their contributions will come out at −100% of
+the vendor's, which is how you find out.
+
+### Testing a new variable so it draws only from the positive baseline
+
+1. **Lock the untouchables.** Media, competitor, trade, expert, price, and every
+   dummy you are not deliberately testing: `global_prior_sd: 0.02`,
+   `prior_sd_basis: relative`, means from the vendor decomposition.
+2. **Nominate the donors.** The positive baseline variables that are allowed to
+   give up volume: `global_prior_sd: 0.3–0.5`. This is the *only* thing that
+   decides where the volume comes from.
+3. **Run stage A — without the candidate.** This is the reference state. Confirm
+   every LOCKED variable reproduces the vendor within a couple of percent
+   (`benchmark_comparison.xlsx`, `pct_diff`). If one does not, its prior is
+   wrong, not the model.
+4. **Run stage B — add the candidate** with a wide prior, `sign_constraint`
+   set, `baseline: 1` and the right `pillar`.
+5. **Audit the donors.** Put the two `contribution_summary.csv` files side by
+   side and difference them:
+
+   ```
+   Δ(candidate) + Σ Δ(donors) + Δ(locked) + Δ(residual) ≈ 0
+   ```
+
+   That table is the answer to "where did it come from". Acceptance:
+   `Δ(locked)` is within your tolerance (±2–3% of each locked contribution) and
+   the donors carry the rest. If a locked media variable moved more than that,
+   its lock is too loose — tighten to `0.01` and re-run.
+6. **Check the fit did not pay for it.** `fit_metrics.csv` before and after, and
+   CV if the decision matters. A new variable that adds share while degrading
+   wMAPE beyond one standard error is not evidence, it is an imposition.
+
+### Controlling a variable's % share
+
+The same machinery sets a target share, and **pinning is what makes it land**.
+Chasing a share with a wide prior and the `R^(1/(1−c))` multiplier is what
+oscillates (§2d).
+
+```
+V        = target_share × Σ sales                  (the volume you want)
+V_now    = its contribution now                    (contribution_summary.csv)
+beta*    = posterior_median_now × V / V_now        (contribution is linear in beta)
+         = V / Σ(x − reference) / dv_scale         (equivalently, from scratch)
+```
+
+Write `beta*` as `global_prior_mean` and set `global_prior_sd: 0.02–0.05`. With
+the prior pinned, contraction ≈ 0, the posterior *is* the prior, and the
+contribution lands on `V` — the donors absorb the difference because they are
+the only ones who can.
+
+> `posterior_median_now` comes from `coefficient_report.csv`, or from the
+> contraction file: `prior_median × exp(mean_shift_in_prior_sd × prior_sd)` on
+> the `use_for_delta` row.
+
+**Share of a pillar rather than of sales.** If the baseline pillar must stay at
+B% of sales and the candidate is to be s% *of the baseline*, then
+`V = s × B × Σ sales`, and **the donors must sit inside the same pillar** — or
+the pillar total moves and you have solved a different problem. The share
+file's `baseline` section does exactly this arithmetic
+(`baseline_share × variable_share × sales`), so the pre-model step can generate
+the prior for you (`FEATURE_PRIOR_GUIDE.md` §5).
+
+**One donor at a time.** If you want the volume to come out of distribution
+rather than category, leave distribution loose and lock category. Releasing one
+variable at a time is the only way to know which one paid.
+
+### What this model can and cannot tell you
+
+- The LOCKED contributions are **assumptions**, not findings. They agree with
+  the vendor because they were told to. Never present that agreement as
+  validation (`contraction ≈ 0` on those rows says so in the output).
+- The DONOR and CANDIDATE contributions are the only estimated quantities in
+  the run. They carry the whole residual of a model whose other coefficients
+  are frozen, so read them as "what is left over once the vendor's numbers are
+  imposed", not as independent estimates.
+- With `include_intercept: false`, `04_fit/structural_checks.csv` and the
+  residual battery matter more, not less: nothing can absorb a specification
+  error, so it lands in the donors.
+
+---
+
+## 2d. Why correcting a prior mean twice does not converge
+
+You compute `R = vendor / ours`, multiply the prior mean by
+`R^(1/(1−c))`, refit — and the gap is still there. Then you do it again, and it
+overshoots the other way. This is not a mistake in the formula; it is the
+formula being used outside the conditions that make it true. Before the second
+correction, check these five things, in this order.
+
+**1. Is the gap the same sign in every region?** Look at `pct_diff` across the
+region blocks of `benchmark_comparison.xlsx`, not just TOTAL. A variable that is
+−15% in the region carrying 90% of its contribution and +1400% in a small one
+has a *distribution* problem, not a level problem. A national multiplier moves
+all the regions together and cannot fix it — the total can be made to match
+while every region is still wrong.
+
+**2. Is the variable `pooling: global`?** Then one coefficient serves every
+region, and the regional split of its contribution is forced to follow
+`support × dv_scale`. It is not tunable at all: no prior, of any size, changes
+it. To match a vendor's regional pattern the variable must be `independent`
+(or `hierarchical`) with per-region priors — `feature_priors_regional.csv`.
+
+**3. Was the national prior built as a plain average of the per-region
+coefficients?** Then it reproduces the national total only if those
+coefficients are equal. When a vendor's contribution is concentrated — say 99%
+of it in one region — while the variable has support in four, the average
+divides that region's coefficient by four and the total comes out ~4× short.
+That gap is baked into the prior and every refit re-imposes it. The fix is the
+aggregation, not the correction: `data.national_basis: weighted` writes
+`Σ contribution / Σ(support × dv_agg)`, the one coefficient that reproduces the
+total. The workbook prints both and `weighted_over_average` is the factor —
+which is the same number you have been chasing as R.
+
+**4. Has `contraction` moved between runs?** It is not a constant. In a real
+case it went `0.607 → 0.923 → 0.965` over three iterations as the prior was
+pushed away from the data, and the exponent went with it:
+
+| c | 1/(1−c) | multiplier for R = 1.1 |
+|---|---|---|
+| 0.4 | 1.7 | 1.18 |
+| 0.6 | 2.5 | 1.27 |
+| 0.92 | 12.5 | 3.3 |
+| 0.99 | 100 | 13,780 |
+
+Above c ≈ 0.7 the correction is an extrapolation, not an adjustment: a small
+error in R becomes an enormous move in the prior, the next run overshoots, and
+the one after that overshoots back. **Recompute c every time, and stop using
+this lever once c > 0.5** — at that contraction the data, not the prior, owns
+the number.
+
+**5. Who else did you move?** The formula holds "everything else fixed".
+Correcting several **collinear** variables in the same pass — distribution,
+category volume and a latent equity series are all slow-moving levels — makes
+each correction wrong, because each was computed assuming the others stayed
+put. They also cannot all rise: the contributions must still sum to sales.
+Correct **one variable per refit** when they are correlated, and check
+`posterior_correlation.csv` to find out which ones are.
+
+### The deeper reason, and the stopping rule
+
+The correction assumes the likelihood is a fixed Gaussian in `log β`. For a
+positive coefficient in a decomposition that must sum to sales, it is not: there
+is a **wall**. Raising the coefficient past the point where the fitted line
+starts to break costs likelihood exponentially, so the posterior stops moving
+however far you push the prior — while the measured contraction climbs towards
+1 and the next multiplier explodes. In the case above, cutting a prior mean by
+4.4× moved the reported contribution by 1.4 percentage points.
+
+**The stopping rule.**
+
+| Situation | Do |
+|---|---|
+| regional gaps share a sign, c < 0.3, nothing else correlated moved | apply the correction. **Once.** |
+| c > 0.5 | stop correcting the mean. Either accept the data's number, or **impose** it: set the mean to `posterior_median × R` and pin `global_prior_sd: 0.02` — the result is then an assumption, and must be reported as one |
+| regional gaps differ in sign | fix the aggregation (`national_basis`) or give the variable per-region priors. No national correction will work |
+| the second correction is bigger than the first | the iteration is diverging. Go back to the last sane prior file and change the specification instead |
+
+And one structural warning: the vendor's numbers are the solution of **their**
+model. Under your design matrix — different regional structure, different
+pooling, a different KPI scale — there may be **no** set of coefficients that
+reproduces all of them at once. Chasing them one at a time is then an
+inconsistent system, and it will oscillate forever. Decide which ones you
+impose, impose them properly (pinned), and report the rest as what your data
+says.
 
 ---
 

@@ -4,9 +4,10 @@ One row per feature. This file is the source of truth for **which columns are
 modelled** and **what the model believes about each one before it sees the
 data**. Everything else lives in `config.yaml` (see `CONFIG_GUIDE.md`).
 
-You do not have to write it by hand. Give the pre-model step a **mapping
-file** (with the vendor's contributions) and/or a **share file**, and it
-generates it for you — jump to §5.
+**You do not write this file from scratch, and you do not need one to get
+one.** The pre-model step builds it from the **datacube** — every column that
+is not `date`, `region` or `dv` becomes a row — and fills in the means and
+signs if you also hand it a mapping or share file. Jump to §5.
 
 ---
 
@@ -37,6 +38,19 @@ generates it for you — jump to §5.
 > *Until 2026-09-22 a blank meant `mean_positive` for signed features and
 > `mean`/`sd` for free ones.* The built-in fallback `global_prior_mean` (0.05)
 > was sized for scaled inputs — on raw columns always write your own.
+
+> **A blank cell is legal everywhere, and means "take the default".** A file
+> with nothing but a `variable` column loads and runs. A blank
+> `sign_constraint` is `free`; a blank `global_prior_mean` is the built-in
+> default (0.05 signed, 0.0 free) and the run warns, once, with the list of
+> variables it applied to. That is the state of a **new variable you are
+> testing** — and of every row of a freshly generated file that neither input
+> covered. *(Until 2026-09-24 a blank `sign_constraint` cell crashed the
+> loader with `sign must be one of ... got 'nan'`.)*
+>
+> One consequence worth knowing: a blank `global_prior_sd` is the default
+> `1.0`, and with `prior_sd_basis: relative` that reads as **±100%** — very
+> wide. Write the width you can defend.
 
 > **`center` has been REMOVED.** `center_mode` is the only centring setting. A
 > file that still carries a `center` column is rejected with instructions —
@@ -148,9 +162,25 @@ it up only when you can name the evidence.
 
 ## 5. Generating the file — the pre-model step
 
-You do not write 65 prior means by hand. Give the pre-model step up to **two
-files** and it writes **two prior files** plus `prior_calculation.xlsx` showing
-every intermediate number:
+You do not write 65 prior means by hand, and you do not need an existing
+prior file to make one. **The variable list comes from the datacube**: every
+column except `date`, `region` and `dv` becomes a row. Give the step up to
+**two optional files** and it also fills in the means and the signs.
+
+```yaml
+data:
+  input_path: input_datacube.xlsx     # date, region, dv, then one column per variable
+  feature_priors: null                # nothing yet - that is the point
+```
+
+```bash
+python -m mmm.data.prior_builder config.yaml
+```
+
+With neither input file that writes the **skeleton**: one row per variable,
+`prior_sd_basis: relative`, `prior_mean_basis: median`, everything else blank.
+With a mapping or share file it writes **two prior files** plus
+`prior_calculation.xlsx` showing every intermediate number:
 
 | File | Rows | Use it when |
 |---|---|---|
@@ -187,7 +217,7 @@ point at it yourself.
 | **a** | ✓ | ✓ | optional | invert the vendor decomposition |
 | **b** | ✓ | — | ✓ | build from the shares |
 | **c** | — | — | ✓ | build from the shares |
-| **d** | — or ✓ without contributions | — | — | **no prior file** — the run uses `data.feature_priors` as usual |
+| **d** | — or ✓ without contributions | — | — | the **skeleton** from the datacube — variable names only. (With `data.feature_priors` already set there is nothing to add, so nothing is written) |
 
 When contributions **and** shares are both given, **the contribution wins
 wherever it exists** — it is evidence, the share is an assumption. A variable
@@ -195,6 +225,46 @@ the vendor never reported (a channel they did not model) falls back to its
 share-based prior rather than a blank. The share file always supplies the
 **pillar** names, the **baseline** flag and the default **signs**, because
 those are definitions rather than estimates.
+
+### What each input file must contain
+
+Both files are validated before anything is computed, and both stop the run
+rather than silently skipping a row.
+
+**The mapping file** (`data.mapping_file`)
+
+| Column | Required | Rule |
+|---|---|---|
+| `vendor_variable` | **yes** | the vendor's name. Never checked against anything — it is theirs |
+| `our_variable` | **yes** | must be a **datacube column** (or, when `data.feature_priors` is set, one of its variables) |
+| `region` | no | blank, or the column absent, means **national**. A name that is not a region in the data is not caught here — it simply never matches |
+| `contribution` | no | the vendor's number. Without it the file only **groups** variables (case b/d) |
+
+- The contribution belongs to the **vendor variable**. Replicated across
+  several of our rows, it is counted **once** — repeat the same number or
+  leave the copies blank. **Two different numbers for the same
+  `vendor_variable` + `region` is an error.**
+- A variable may appear in only one group; groups are the connected components
+  of the vendor ↔ ours links, so linking A–B and B–C makes one group of three.
+- Header names are sniffed, not fixed: `vendor`, `their_variable`,
+  `model_variable`, `volume` and similar are all recognised.
+
+**The share file** (`data.share_file`)
+
+| Column | Required | Rule |
+|---|---|---|
+| `section` | **yes** | one of `media`, `expert`, `comp_media`, `trade`, `baseline`. Anything else stops the run (consumption data goes in `baseline`) |
+| `variable` | **yes** | must be a datacube column / prior-file variable, and may appear in **one section only** |
+| `pillar` | media, expert | the roll-up group. `comp_media`, `trade` and `baseline` default to *Competitor Media* / *Trade* / *Baseline* |
+| `pillar_share_pct` | media, expert, baseline | one number **per pillar** — write it once or repeat the same value; two different values for one pillar is an error. For `baseline` it is the whole-baseline share |
+| `spend` | media, expert | how the pillar's share is split. A pillar with no spend at all cannot be split and stops the run |
+| `variable_share_pct` | comp_media, trade, baseline | the variable's own share. Missing on any row of those sections is an error |
+| `sign_constraint` | no | `positive`/`negative`/`free`. Blank falls back to: negative share → negative, a dummy → free, `comp_media` → negative, else positive |
+
+- Shares are **percentages**, not fractions: write `6.0`, not `0.06`.
+- Baseline `variable_share_pct` is a share **of the baseline**, not of sales,
+  and they should total ≤ 100 (it warns otherwise).
+- The step prints the implied total share of sales and warns if it exceeds 100%.
 
 ### Every name must be in the feature prior file
 
@@ -285,6 +355,12 @@ national_coef[group]       = SUM(region_coef over regions WITH support)
   pulls it towards zero rather than counting as agreement.
 - `national_coef` → `feature_priors_national.csv`. Each `region_coef` → one
   override row in `feature_priors_regional.csv`.
+- **`data.national_basis` picks the aggregation**: `average` (default, the mean
+  above) or `weighted` = `Σ C / Σ(support × dv_agg)` — the single coefficient
+  that reproduces the national **total**, which is what `pooling: global`
+  needs. They differ when a contribution is concentrated in a few regions; the
+  workbook prints both plus `weighted_over_average`, and the step warns when
+  that ratio exceeds 1.25. See `CONFIG_GUIDE.md`.
 - The group's one mean is **replicated to every member**. They share an implied
   coefficient; splitting it would invent a difference the vendor never measured.
 - A **national** contribution (no region) is allocated to the regions in
@@ -383,23 +459,38 @@ variable), not a prior to force.
 
 ### What the generated file contains — and deliberately does not
 
-- **Every model variable gets a row**: the configured features, or every
-  datacube column when none are configured yet. A variable neither file covers
-  gets a **blank** mean, so nothing silently falls out of the model — fill it by
-  hand or drop the variable (`00_warnings/generated_prior_blank.md` lists them).
-- `global_prior_sd: 0.5` (**wide**), not 0.02. See the ladder in §4.
-- `prior_sd_basis: relative`, so 0.5 reads as ±50%.
-- `pillar` and `baseline` from the share file.
-- **`scale_mode: none`** and **`contribution_reference: zero`** on every row —
-  see "Units" below.
-- **`center_mode: none`** is written — the default. Switching an always-on
-  level (TDP, price, category) to `mean` is a judgement about what the variable
-  *is*; it helps the sampler and, with `contribution_reference: zero`, leaves
-  the mean valid.
-- Region override rows fill **only** `variable`, `region` and
-  `global_prior_mean` — the only columns a region row is read for (§3).
-- Features with no support anywhere get a blank mean and a note. Drop them or
-  fix the extract.
+**The file is a template, and a blank is an answer.** Only what was actually
+given is written:
+
+| Column | Filled with | When it is blank |
+|---|---|---|
+| `variable` | every datacube column (or every configured feature) | never |
+| `global_prior_mean` | the generated coefficient | neither input file covered the variable, or it has no support anywhere |
+| `sign_constraint` | the contribution's sign, or the share file's column | same — and a blank reads as `free` |
+| `pillar`, `baseline` | the **share file**, which states them in as many words | no share file, or the variable is not in it |
+| `prior_sd_basis`, `prior_mean_basis` | `relative` and `median`, always | never |
+| `pooling`, `global_prior_sd`, `regional_sd_prior`, `contribution_reference`, `center_mode`, `scale_mode` | — | **always.** Blank is the documented default: `hierarchical`, no centring, no scaling, `auto` reference |
+
+The blanks are not laziness — they are the defaults the generated means are
+already in the units of (no scaling, no centring, measured against zero), so an
+untouched file is consistent. Two columns are worth your judgement before you
+fit:
+
+- **`global_prior_sd`** — the width, and it is blank on purpose. `0.02` pins
+  the variable to the number you imported (an assumption); `0.3–0.5` lets the
+  data speak. See §4 and `METHODOLOGY.md` §2c. Blank means the default `1.0`,
+  which under `relative` is ±100%.
+- **`center_mode`** — `mean` for an always-on level (TDP, price, category).
+  The prior mean stays valid either way; pair it with
+  `contribution_reference: zero`.
+
+Region override rows fill **only** `variable`, `region` and
+`global_prior_mean` — the only columns a region row is read for (§3). Features
+with no support anywhere get a blank mean and a note
+(`00_warnings/generated_prior_blank.md` lists them). **A blank row is also
+exactly what you want for a variable you are testing** — a UCM equity series
+the vendor never had: it starts free, centred on zero, and the data speaks
+first.
 
 ### Units — the one setting that makes a generated file silently wrong
 
@@ -409,9 +500,9 @@ unit of the region's mean KPI.** The model reads a coefficient as
 
 | Setting | Must be | Written for you? |
 |---|---|---|
-| `scale_mode` (prior file) | `none` — x stays in raw units | **yes** (and the default) |
-| `center_mode` (prior file) | `none` or `mean` — either is fine for the mean | `none` written (the default) |
-| `contribution_reference` (prior file) | `zero` — the vendor decomposes against zero | **yes** |
+| `scale_mode` (prior file) | `none` — x stays in raw units | blank = `none`, the default |
+| `center_mode` (prior file) | `none` or `mean` — either is fine for the mean | blank = `none` |
+| `contribution_reference` (prior file) | `zero` — the vendor decomposes against zero | blank = `auto`, which IS zero while the variable is uncentred |
 | `run.dv_scale` | `mean` | no — config.yaml's default is `sd` |
 | `run.dv_scale_scope` | `region` | default |
 | `data.dv_aggregation` | `mean` | default |

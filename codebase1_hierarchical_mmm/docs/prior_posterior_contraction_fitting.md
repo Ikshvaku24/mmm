@@ -123,6 +123,33 @@ the verdict and a well-identified feature is called unidentified. That is why
 the contraction report marks one family per feature `use_for_delta`, and why
 the benchmark sheet reads only that row.
 
+#### When the correction is applied twice and still does not close
+
+The formula is a **one-shot** correction that assumes the likelihood is a fixed
+Gaussian in $\eta$, that $c$ stays where it was, and that nothing else moved.
+Iterating it — correct, refit, correct again — breaks all three assumptions at
+once, and in a real vendor-anchored run (`snapshots/real_data_ouptut_v9`) it
+oscillated instead of converging:
+
+| run | `tdp_base` R | c | multiplier applied |
+|---|---|---|---|
+| v2 | 4.10 (ours 76% below) | 0.607 | ×36.2 |
+| v3 | 0.892 (ours 12% above) | **0.923** | ×0.227 |
+| v4 | ours still ~11% above — the 4.4× cut moved it 1.4pp | — | — |
+
+Three things to read off that table: **c is not a constant** (it climbed as the
+prior was pushed away from the data, and $1/(1-c)$ went from 2.5 to 13); the
+response to a prior move **died** once the posterior hit the likelihood's wall;
+and the sign of the error flipped each time — the signature of a fixed-point
+iteration whose gain is far too high.
+
+The full diagnosis — regional gaps with opposite signs, `pooling: global`
+making the regional split untunable, a national prior built as a plain average
+of per-region coefficients, collinear variables corrected in the same pass, and
+the stopping rule — is in **`METHODOLOGY.md` §2d**. The short version: apply
+this correction **once**, only when $c < 0.3$; above $c = 0.5$ stop moving the
+mean and either accept the data's number or impose it by pinning.
+
 #### Limits to know
 
 - **Negative contraction (c ≤ 0) on the log row is a genuine signal** — the

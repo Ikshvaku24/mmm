@@ -291,8 +291,10 @@ the priors implied. The run now warns when `prior_sd < 0.05`.
 
 ## 🆕 `pre_model_outputs/` — before the model runs at all
 
-Written only in cases a–c: `data.mapping_file` carries contributions, or
-`data.share_file` is given.
+Written whenever there is something to write: `data.mapping_file` carries
+contributions, `data.share_file` is given, or **`data.feature_priors` is not
+set yet** — in which case the step writes the SKELETON (one row per datacube
+variable, means and signs blank) and the run stops so you can fill it in.
 
 | File | Contents |
 |---|---|
@@ -301,9 +303,9 @@ Written only in cases a–c: `data.mapping_file` carries contributions, or
 | `prior_calculation.xlsx` | sheet 1 the working, sheet 2 the resulting means, sheet 3 the method in prose |
 
 Point `data.feature_priors` at whichever matches your pooling decision, after
-reviewing it. Both carry `scale_mode: none` and `contribution_reference: zero`,
-and are only in the model's units with `run.dv_scale: mean` — the step warns
-otherwise.
+reviewing it. Both leave `scale_mode` and `contribution_reference` blank —
+blank is `none` and `auto`, the units the means were derived in — and are only
+in the model's units with `run.dv_scale: mean`; the step warns otherwise.
 
 **How to read the calculation sheet.** Every row shows `C / support / dv_agg`
 (signed) with the numbers substituted, so a prior can be checked rather than
@@ -324,6 +326,14 @@ Sheet 2 shows the national arithmetic: `national_coef = sum_of_region_coefs /
 n_regions_used` — the divisor is the number of regions **with support**, not the
 region count (2 of 5 regions with support → divide by 2). `global_prior_mean` is
 its magnitude for a signed variable, the signed value for a `free` one.
+
+It also prints the other aggregation next to it: `national_coef_average`,
+`national_coef_weighted` (`Σ contribution / Σ(support × dv_agg)` — the one that
+reproduces the national total, for `pooling: global`), `weighted_over_average`
+(the ratio) and `national_basis` (which one was written). A ratio far from 1
+means the contribution is concentrated in a few regions, and the run warns:
+that factor is exactly the gap a national correction would chase and never
+close (`METHODOLOGY.md` §2d).
 
 Method and every edge case: `FEATURE_PRIOR_GUIDE.md` §5.
 

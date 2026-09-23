@@ -51,6 +51,12 @@ data:
   # | median. It must equal run.dv_scale, so keep mean and set run.dv_scale: mean when fitting
   # with generated priors - the pre-model step warns otherwise
   dv_aggregation: mean
+  # how the per-region coefficients become ONE national prior: average (default - their mean,
+  # the centre of the regions; right for pooling hierarchical/independent) | weighted
+  # (SUM(contribution)/SUM(support x dv_agg) - the coefficient that reproduces the national
+  # TOTAL; right for pooling: global). They differ when a contribution is concentrated in a few
+  # regions; the step warns and the workbook prints both
+  national_basis: average
   # where the pre-model step writes feature_priors_national.csv, feature_priors_regional.csv and
   # the calculation workbook. null = pre_model_outputs/
   pre_model_dir: null
@@ -61,7 +67,7 @@ data:
 # --------------------------------------------------------------------------
 model:
   # 'normal' | 'student_t'. student_t is robust to promo/holiday spikes
-  likelihood: normal
+  likelihood: student_t
   # annual seasonality harmonics. 0 = no seasonality block. 2 is a good start
   fourier_order: 0
   # period of the seasonal cycle in days (365.25 = annual)
@@ -73,7 +79,7 @@ model:
   # the decomposition. Note the level does not vanish: with run.dv_center: mean the baseline
   # becomes the FIXED historical mean (zero posterior width) instead of a free parameter. Only
   # sane with run.dv_center: mean
-  include_intercept: true
+  include_intercept: false
   # prior sd of the POPULATION intercept (KPI is standardised, so 0.5 is wide)
   alpha_prior_sd: 0.5
   # prior scale of how far region intercepts spread around it
@@ -97,9 +103,9 @@ run:
   # name of the KPI/dependent column. Pass it RAW - scaling happens here
   dv_col: dv
   # 'mean' | 'none' - what is subtracted from the KPI before fitting
-  dv_center: mean
+  dv_center: none
   # 'none'|'sd'|'mean'|'mean_positive'|'max' - the unit your PRIORS live in
-  dv_scale: sd
+  dv_scale: mean
   # 'region' (own scale each) | 'global' (one number for all regions)
   dv_scale_scope: region
   # 'train' | 'full' - which periods the centring/scaling statistics come from, for features AND
@@ -110,7 +116,7 @@ run:
   cadence: auto
   # last N dates held out per region for OOS metrics, as an ABSOLUTE count. null = use
   # holdout_fraction / the cadence policy
-  holdout_periods: 0
+  holdout_periods: null
   # holdout as a FRACTION of the panel, so it follows the data: 0.125 is 13 weeks on 2 years and
   # 26 on 4. Ignored when holdout_periods is an integer. null = the policy default (0.125)
   holdout_fraction: null
@@ -143,7 +149,7 @@ sampler:
   # 'numpyro' (JAX/GPU) | 'pymc' | 'advi'
   sampler: numpyro
   # numpyro only: 'sequential' | 'parallel' | 'vectorized' (best on one GPU)
-  chain_method: sequential
+  chain_method: vectorized
   # extra kwargs for the NUTS kernel only (mapping, {} for none)
   nuts_kwargs: {}
   # prior draws - these feed the contraction report, keep >= 500

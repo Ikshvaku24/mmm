@@ -75,11 +75,12 @@ Paths are relative **to the YAML file**, not the working directory.
 |---|---|---|
 | `input_path` | `input_datacube.xlsx` | the panel: one row per region × date, with date/region/dv/feature columns. `.xlsx`, `.csv` or `.parquet` |
 | `sheet` | `null` | Excel sheet name. `null` = first sheet. Ignored for csv/parquet |
-| `feature_priors` | `feature_priors.csv` | the feature/prior table — **the list of modelled columns**. Its `variable` values must match the data column names exactly |
+| `feature_priors` | `feature_priors.csv` | the feature/prior table — **the list of modelled columns**. Its `variable` values must match the data column names exactly. **Leave it `null` on a new project**: the pre-model step then writes one from the datacube and tells you where (see below) |
 | `date_format` | `null` | explicit strptime format. `null` = infer |
 | `mapping_file` | `null` | **optional.** `vendor_variable, our_variable[, region][, contribution]` — which vendor variable is which of ours. Every `our_variable` must be in `feature_priors` (which may carry more). Groups the benchmark sheet; **with contributions** it builds the priors (case a) and pre-fills the sheet's benchmark cells. Sample: `samples/mapping_sample.csv` |
 | `share_file` | `null` | **optional.** `section, pillar, pillar_share_pct, variable, spend, variable_share_pct[, sign_constraint]` — shares of sales by section (`media`, `expert`, `comp_media`, `trade`, `baseline`). Every `variable` must be in `feature_priors`. Builds the priors when there are no contributions (cases b, c) and always supplies pillars + the baseline flag. Sample: `samples/share_sample.csv` |
 | `dv_aggregation` | `mean` | `mean`/`sum`/`median` — the per-region KPI level a generated coefficient is expressed against. **Must equal `run.dv_scale`** — keep `mean` and set `run.dv_scale: mean` when fitting with a generated file |
+| `national_basis` | `average` | how per-region coefficients become ONE national prior. `average` = their mean (the centre of the regions — right for `hierarchical`/`independent` pooling). `weighted` = `Σ contribution / Σ(support × dv_agg)`, the coefficient that reproduces the national **total** — right for `pooling: global`. See below |
 | `pre_model_dir` | `null` | where `feature_priors_national.csv`, `feature_priors_regional.csv` and the calculation workbook go. `null` = `pre_model_outputs/` |
 
 ---
@@ -131,6 +132,39 @@ This is the lever for "my baseline is eating the decomposition".
 | `zero_threshold_rel` | `0.0` | snap `abs(v) < this × max abs(v)` to 0. **Use `1.0e-6`** for pre-transformed data whose adstock tail leaves dust |
 | `min_feature_scale` | `1.0e-12` | reject a column whose own scale is dust |
 | `near_constant_sd` | `0.1` | warn when an always-on **uncentred** feature has `sd / level` below this (relative, so it reads the same scaled or not) |
+
+### `national_basis` — the average, or the total?
+
+Two honest ways to turn one coefficient per region into one national prior, and
+they can differ by 4×:
+
+```
+average   mean of  C_g / (support_g × dv_agg_g)     the centre of the regions
+weighted  Σ C_g / Σ (support_g × dv_agg_g)          reproduces the national TOTAL
+```
+
+They agree only when the per-region coefficients are equal. **When a vendor's
+contribution is concentrated** — 99% of it in one region — while the variable
+has support in four, the average divides that region's coefficient by four and
+the national total comes out ~4× short. Under `pooling: global` (one coefficient
+for every region) that shortfall is structural: no correction closes it, because
+the next refit re-imposes it.
+
+| Your pooling | Use | Why |
+|---|---|---|
+| `global` | **`weighted`** | one β serves every region, so the prior must be the total-preserving one |
+| `hierarchical` / `independent` | `average` (default) | each region has its own coefficient; the national row is their centre, and the regional file carries the rest |
+
+Both numbers are always written to `prior_calculation.xlsx`
+(`national_coef_average`, `national_coef_weighted`, `weighted_over_average`),
+and the step **warns** when they differ by more than 25% — that ratio is the
+gap you would otherwise spend three refits chasing.
+
+> Under `pooling: global` the regional *split* of a variable's contribution is
+> fixed by `support × dv_scale` and cannot be tuned at all. If the vendor's
+> regional pattern differs from that, no prior of any size will match it — the
+> variable needs `independent` pooling and per-region priors
+> (`feature_priors_regional.csv`).
 
 ### `scaling_window` — train or the whole panel?
 
@@ -234,9 +268,15 @@ inventing data.
 
 ## The PRE-MODEL step — generating a prior file
 
-Two files, both optional. Every variable they name must be in
-`data.feature_priors` — the prior file may carry **more** variables than they
-do, never fewer (with no prior file configured yet, the datacube is the list):
+**You do not need a prior file to get one.** The variable list comes from the
+datacube — every column that is not `date`, `region` or `dv`. With
+`data.feature_priors` unset, `run_from_yaml` generates the file, tells you the
+path and stops; review it, point `data.feature_priors` at it, run again.
+
+Two further files, both optional, add the means and the signs. Every variable
+they name must be in `data.feature_priors` — the prior file may carry **more**
+variables than they do, never fewer (with no prior file configured yet, the
+datacube is the list):
 
 ```yaml
 data:
@@ -258,7 +298,14 @@ run:
 | **a** | a mapping **with contributions** (share file optional) | inverts the vendor decomposition; a variable the vendor did not report falls back to its share |
 | **b** | a mapping **without** contributions + a share file | builds from the shares |
 | **c** | a share file only | builds from the shares |
-| **d** | neither (or a mapping with no contributions and no shares) | **nothing** — the run uses `data.feature_priors` as usual |
+| **d** | neither (or a mapping with no contributions and no shares) | the **skeleton** — one row per datacube variable, means and signs blank. With `data.feature_priors` already set there is nothing to add, so nothing is written |
+
+**Only four columns are ever filled**: `variable`, `global_prior_mean`,
+`sign_constraint` (the last two only where an input file covered the variable)
+and the two basis columns, `relative` / `median`. Everything else is blank, and
+blank is the documented default — including `global_prior_sd`, which is the one
+number you should write yourself. `FEATURE_PRIOR_GUIDE.md` §5 has the column
+table and what each input file must contain.
 
 It runs automatically at the front of `run_from_yaml`, or standalone:
 
@@ -275,14 +322,15 @@ and writes to `pre_model_outputs/` (or `data.pre_model_dir`):
 | `prior_calculation.xlsx` | the working (every intermediate number and the formula), the resulting means, and a sheet explaining the method |
 
 Which file to point `data.feature_priors` at is your **pooling** decision. The
-builder writes `scale_mode: none` and `contribution_reference: zero` on every
-row (the units the means were derived in), `sign_constraint` from the sign
-rules (negative contribution → negative; positive → `free` for a dummy, else
-positive; the share file's own column otherwise).
+builder fills `sign_constraint` from the sign rules (negative contribution →
+negative; positive → `free` for a dummy, else positive; the share file's own
+column otherwise) and leaves every other column blank — blank being `none`
+centring, `none` scaling and an `auto` reference, which are the units the means
+were derived in.
 
 **It never overwrites `data.feature_priors`.** A generated prior is a proposal,
-not a decision. It also leaves `center_mode` blank — set `mean` on TDP, price
-and category yourself.
+not a decision. Write `global_prior_sd` yourself, and set `center_mode: mean`
+on TDP, price and category.
 
 The two file layouts, the five share-file sections and their formulas, and how
 zero support, negative contributions, split variables and national numbers are

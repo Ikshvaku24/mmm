@@ -368,10 +368,19 @@ def resolve_prior_params(prior_mean: float, prior_sd: float, sign: str,
         if sd_basis == "relative":
             sigma = s * abs(m)
             if sigma <= 0:
-                raise ValueError(
-                    f"{tag}prior_sd_basis='relative' needs a non-zero "
-                    f"prior_mean to be a fraction OF (got {m}). Use "
-                    "prior_sd_basis='absolute' for a free feature centred on 0.")
+                # "20% OF zero" is zero, which would be a pinned coefficient.
+                # A free feature centred on 0 is exactly what a generated prior
+                # file writes for a variable neither input file covered, so
+                # read the sd as absolute (identical to `log` for a free
+                # feature) and say so rather than refusing to load the file.
+                sigma = s
+                warnings.warn(
+                    f"{tag}prior_sd_basis='relative' has nothing to be a "
+                    f"fraction OF (prior_mean={m}), so global_prior_sd={s:g} "
+                    "was read as an ABSOLUTE sd in coefficient units. This is "
+                    "the placeholder prior for a variable with no mean yet - "
+                    "set a mean, or set prior_sd_basis='absolute' to say you "
+                    "meant it.")
         else:
             sigma = s
         return m, float(sigma)
@@ -751,6 +760,21 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
     for _, r in df.iterrows():
         (region_rows if _cell(r, "region") is not None else base_rows).append(r)
 
+    # A blank mean is legal - the built-in default applies - but on a generated
+    # file it means "neither input file covered this variable", which is the
+    # one thing you are meant to fill in before you trust its contribution.
+    # Say so ONCE, with the list, rather than per feature or not at all.
+    blank_mean = [str(r["variable"]).strip() for r in base_rows
+                  if _cell(r, "global_prior_mean") is None]
+    if blank_mean:
+        warnings.warn(
+            f"{len(blank_mean)} variables have no global_prior_mean "
+            f"({blank_mean[:8]}{'...' if len(blank_mean) > 8 else ''}) and will "
+            "use the built-in default (0.05 for a signed feature, 0.0 for a "
+            "free one). A generated prior file leaves the mean blank when "
+            "neither the mapping nor the share file covered the variable - "
+            "fill it in, or accept that its contribution is a placeholder.")
+
     specs, by_name = [], {}
     for r in base_rows:
         name = str(r["variable"]).strip()
@@ -762,7 +786,10 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
         spec = FeatureSpec(
             name=name,
             hierarchical=True if hier is None else bool(int(hier)),
-            sign=str(r.get("sign_constraint", "free")).strip().lower(),
+            # a BLANK cell is as legal as an absent column: the generated
+            # prior file leaves sign_constraint empty for any variable the
+            # mapping and share files did not cover, and a blank means "free"
+            sign=str(_cell(r, "sign_constraint") or "free").strip().lower(),
             prior_mean=_cell(r, "global_prior_mean"),
             prior_sd=_cell(r, "global_prior_sd"),
             regional_sd=_cell(r, "regional_sd_prior"),
