@@ -25,6 +25,8 @@ console just stops being the place you are expected to read them.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.09.24"   # must equal mmm.__version__
+
 import contextlib
 import os
 import re
@@ -566,8 +568,11 @@ def print_warning_summary(df: pd.DataFrame, outdir: str,
     counts["_ord"] = counts["severity"].map(SEVERITY_ORDER).fillna(9)
     counts = counts.sort_values(["_ord", "n"], ascending=[True, False])
     shown = counts if verbose else counts[counts["severity"] == "high"]
+    # os.path.join, not "\00_INDEX" in an f-string: "\00" is an OCTAL escape
+    # and printed a NUL byte where the path separator should be
+    index = os.path.join(outdir, "00_INDEX.md")
     print(f"[warnings] {len(df)} in {len(counts)} categories "
-          f"({len(counts) - len(shown)} not shown) -> {outdir}\00_INDEX.md")
+          f"({len(counts) - len(shown)} not shown) -> {index}")
     for _, r in shown.iterrows():
         rule = _rule_by_slug(r["category"])
         n_feat = df[(df["category"] == r["category"])

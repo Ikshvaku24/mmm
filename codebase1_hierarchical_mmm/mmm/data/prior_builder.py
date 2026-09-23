@@ -15,8 +15,8 @@ Four cases, in order of precedence:
   b. mapping without contributions,    -> build from the shares
      plus a share file
   c. a share file only                 -> build from the shares
-  d. neither                           -> no prior file is generated; the run
-                                          uses data.feature_priors as usual
+  d. neither                           -> the SKELETON: one row per datacube
+                                          variable, means and signs blank
 
 If a mapping carries contributions AND a share file is given, the contributions
 win for the MEANS wherever they exist - they are evidence, the shares are an
@@ -105,6 +105,8 @@ falls out of the model.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.09.24"   # must equal mmm.__version__
+
 import os
 import warnings
 
@@ -112,9 +114,9 @@ import numpy as np
 import pandas as pd
 
 from mmm.data.mapping import (ALL_REGIONS, DATACUBE, PRIOR_FILE, _read_any,
-                              _sniff, check_names, group_contributions,
-                              group_members, has_contribution, is_dummy,
-                              load_mapping_table)
+                              _sniff, align_regions, check_names,
+                              group_contributions, group_members,
+                              has_contribution, is_dummy, load_mapping_table)
 
 VALID_DV_AGG = ("mean", "sum", "median")
 SECTIONS = ("media", "expert", "comp_media", "trade", "baseline")
@@ -925,16 +927,19 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
     configured it is the list instead, and the mapping/share files must sit
     inside it.
 
-    With neither a mapping nor a share file (case d) it still writes the
-    SKELETON - one row per datacube column, means and signs blank - unless a
-    prior file is already configured, in which case there is nothing to add
-    and it returns {"case": "d"}.
+    With neither a mapping nor a share file - or a mapping with no usable
+    contributions (case d) - it still writes the SKELETON: one row per
+    variable, means and signs blank. It always writes to `pre_model_dir`, never
+    over `data.feature_priors`.
+
+    Call `build_priors(config_path)` rather than this from a notebook: it also
+    captures the warnings into `<pre_model_dir>/00_warnings/` instead of the
+    cell output.
     """
     data = settings.data
     map_path, share_path = data.get("mapping_file"), data.get("share_file")
-    configured_path = data.get("feature_priors")
-    if not map_path and not share_path and configured_path:
-        return {"case": "d"}
+    # ALWAYS write a file. With nothing to build from it is the skeleton, and
+    # it goes to pre_model_dir - data.feature_priors is never overwritten.
     if df is None:
         from mmm.core.settings import load_panel
         df = load_panel(settings)
@@ -950,6 +955,11 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
 
     mapping = load_mapping_table(map_path, allowed, against) if map_path else \
         load_mapping_table(None)
+    # a region spelled differently from the datacube ("('Base', 'Droguerias')"
+    # vs "Base_Droguerias") would match nothing and silently drop every
+    # contribution - align it, or stop and say which ones
+    mapping = align_regions(mapping, df[run.region_col].astype(str).unique(),
+                            map_path or "mapping")
     shares = (load_share_file(share_path, allowed, against) if share_path
               else pd.DataFrame())
     case = decide_case(mapping, shares)
@@ -1026,13 +1036,27 @@ def run_pre_model(settings, df=None, outdir: str | None = None) -> dict:
     print(f"[prior] national priors for {n_ok}/{len(national)} variables -> "
           f"{nat_path}")
     print(f"[prior] regional: the same plus {n_reg} region rows -> {reg_path}")
-    if skipped:
-        ex = ", ".join(f"{f}@{r}" for f, r, _ in skipped[:5])
+    against = [x for x in skipped if x[2] != 0]
+    zeros = [x for x in skipped if x[2] == 0]
+    if against:
+        ex = ", ".join(f"{f}@{r}" for f, r, _ in against[:5])
         warnings.warn(
-            f"{len(skipped)} region cells run AGAINST their variable's sign "
-            f"({ex}{'...' if len(skipped) > 5 else ''}) and have no row in the "
+            f"{len(against)} region cells run AGAINST their variable's sign "
+            f"({ex}{'...' if len(against) > 5 else ''}) and have no row in the "
             "regional file - a signed variable's region row is a magnitude. "
             "Those regions fall back to the national prior.")
+    if zeros:
+        ex = ", ".join(f"{f}@{r}" for f, r, _ in zeros[:5])
+        warnings.warn(
+            f"{len(zeros)} region cells run AGAINST their variable's sign - "
+            f"they are exactly ZERO in the vendor decomposition while the "
+            f"variable has support there ({ex}{'...' if len(zeros) > 5 else ''})."
+            " A signed coefficient cannot be 0, so they have no row and fall "
+            "back to the national prior - which gives them an effect the "
+            "vendor says is zero. If the variable truly does nothing in those "
+            "regions, zero it in the datacube there. Under pooling: global use "
+            "data.national_basis: weighted, or these zeros drag the average "
+            "down.")
     print(f"[prior] the working -> {calc}")
     print("[prior] REVIEW before pointing data.feature_priors at either file - "
           "national for pooling=hierarchical, regional for independent. Only "
@@ -1078,14 +1102,39 @@ def check_units(run, dv_how: str = "mean") -> list:
     return problems
 
 
+def build_priors(config_path: str = "config.yaml", outdir: str | None = None,
+                 verbose: bool = False) -> dict:
+    """THE way to generate priors, from a notebook or the command line.
+
+        from mmm.data.prior_builder import build_priors
+        build_priors("config.yaml")
+
+    Loads the settings, builds the prior file(s), and sends EVERY warning -
+    the ones raised while loading an existing prior file included - to
+    `<pre_model_dir>/00_warnings/` (one document per category, as a run
+    does), printing a single summary instead of a wall of text. Starts by
+    printing the codebase version and refuses to hide a partly re-uploaded
+    copy.
+    """
+    import mmm
+    from mmm.checks.warnings_report import (collect_warnings,
+                                            print_warning_summary,
+                                            write_warning_docs)
+    from mmm.core.settings import load_settings
+
+    mmm.announce()
+    with collect_warnings() as caught:
+        settings = load_settings(config_path)
+        res = run_pre_model(settings, outdir=outdir)
+    out = outdir or settings.data.get("pre_model_dir") or "pre_model_outputs"
+    wdir = os.path.join(out, "00_warnings")
+    df = write_warning_docs(list(caught), wdir, run_name="pre-model")
+    print_warning_summary(df, wdir, verbose=verbose)
+    res["warnings_dir"] = wdir
+    return res
+
+
 if __name__ == "__main__":
     import sys
 
-    from mmm.core.settings import load_settings
-
-    cfg = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
-    res = run_pre_model(load_settings(cfg))
-    if res.get("case") == "d" and not res.get("feature_priors_national"):
-        print("[prior] data.feature_priors is already set and there is no "
-              "mapping or share file to build from - nothing to do. To get a "
-              "fresh skeleton from the datacube, clear data.feature_priors.")
+    build_priors(sys.argv[1] if len(sys.argv) > 1 else "config.yaml")

@@ -38,8 +38,11 @@ always the grouping used to CHECK it.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.09.24"   # must equal mmm.__version__
+
 import difflib
 import os
+import re
 
 import numpy as np
 import pandas as pd
@@ -176,6 +179,90 @@ def load_mapping_table(path: str, known_columns=None,
           f"vendor variables <-> {out['our_variable'].nunique()} of ours"
           + (f", contributions on {n_c} rows" if n_c else ", no contributions"))
     return out.reset_index(drop=True)
+
+
+def _region_key(r) -> str:
+    """Letters and digits only, lower-cased: "('Base', 'Super Cadena')",
+    "Base_Super Cadena" and "base - supercadena" all become basesupercadena."""
+    return "".join(ch for ch in str(r).lower() if ch.isalnum())
+
+
+def _region_tokens(r) -> tuple:
+    """The words, sorted - so "Droguerias_Base" matches "('Base', 'Droguerias')"."""
+    return tuple(sorted(re.findall(r"[a-z0-9]+", str(r).lower())))
+
+
+def align_regions(table: pd.DataFrame, known_regions, source: str = "mapping"
+                  ) -> pd.DataFrame:
+    """Rewrite the file's region names to the DATACUBE's spelling, or stop.
+
+    A mapping built in pandas often carries a region as a printed tuple -
+    "('Base', 'Droguerias')" - while the datacube says "Base_Droguerias". An
+    exact join then matches nothing, every contribution lands in a region the
+    model does not have, and the only symptom is "no contribution found". So
+    each region is matched exactly, then on its letters and digits, then on
+    its sorted words; whatever is left over STOPS the run with both lists,
+    rather than being silently dropped.
+
+    Also refuses a vendor variable given BOTH regionally and nationally - the
+    national row would be allocated on top of the regional ones and count the
+    same volume twice (a vendor table's `_All` column pasted in as a region).
+    """
+    if table is None or not len(table):
+        return table
+    known = [str(k) for k in known_regions]
+    by_key, by_tok = {}, {}
+    for k in known:
+        by_key.setdefault(_region_key(k), []).append(k)
+        by_tok.setdefault(_region_tokens(k), []).append(k)
+
+    wanted = [r for r in table["region"].unique() if r != ALL_REGIONS]
+    rename, unmatched = {}, []
+    for r in wanted:
+        if r in known:
+            continue
+        hit = by_key.get(_region_key(r), [])
+        if len(hit) != 1:
+            hit = by_tok.get(_region_tokens(r), [])
+        if len(hit) == 1:
+            rename[r] = hit[0]
+        else:
+            unmatched.append(r)
+    if unmatched:
+        keys = {_region_key(k): k for k in known}
+        lines = []
+        for r in unmatched[:15]:
+            near = difflib.get_close_matches(_region_key(r), list(keys), n=1,
+                                             cutoff=0.6)
+            lines.append(f"  {r!r}" + (f"   (closest: {keys[near[0]]!r})"
+                                       if near else ""))
+        raise SystemExit(
+            f"{source}: {len(unmatched)} region name(s) are not regions of the "
+            "datacube, even ignoring case, spaces and punctuation:\n"
+            + "\n".join(lines)
+            + f"\nThe datacube's regions are: {known}\n"
+            "Fix the spelling, or leave `region` BLANK for a national number. "
+            "A region the model does not have would otherwise drop its "
+            "contribution without a word.")
+    out = table.copy()
+    if rename:
+        out["region"] = out["region"].replace(rename)
+        ex = ", ".join(f"{a!r} -> {b!r}" for a, b in list(rename.items())[:3])
+        print(f"[mapping] matched {len(rename)} region spelling(s) to the "
+              f"datacube: {ex}{' ...' if len(rename) > 3 else ''}")
+
+    has = out.dropna(subset=["contribution"])
+    both = (has.assign(_nat=has["region"] == ALL_REGIONS)
+            .groupby("vendor_variable")["_nat"].nunique())
+    both = list(both[both > 1].index)
+    if both:
+        raise SystemExit(
+            f"{source}: {len(both)} vendor variable(s) have contributions "
+            f"BOTH per region and national ({both[:5]}). The national row "
+            "would be allocated on top of the regional ones and count the "
+            "same volume twice. Keep one: the regional rows, or a single "
+            "national row with `region` blank.")
+    return out
 
 
 def has_contribution(table: pd.DataFrame) -> bool:

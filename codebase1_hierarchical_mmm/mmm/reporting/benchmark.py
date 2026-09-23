@@ -285,14 +285,22 @@ def load_mapping(path: str, known_columns=None) -> dict:
     return groups(load_mapping_table(path, known_columns))
 
 
-def benchmark_values(mapping_path: str) -> tuple[dict, dict]:
+def benchmark_values(mapping_path: str, known_regions=None
+                     ) -> tuple[dict, dict]:
     """(regional {(group, region): value}, national {group: value}) from the
-    mapping file's contributions - {} and {} when it carries none."""
+    mapping file's contributions - {} and {} when it carries none.
+
+    `known_regions` (the model's region names) aligns the file's spelling to
+    the model's, exactly as the prior builder does - so "('Base',
+    'Droguerias')" still pre-fills the Base_Droguerias block."""
     if not mapping_path or not os.path.exists(mapping_path):
         return {}, {}
-    from mmm.data.mapping import (ALL_REGIONS, group_contributions,
-                                  has_contribution, load_mapping_table)
+    from mmm.data.mapping import (ALL_REGIONS, align_regions,
+                                  group_contributions, has_contribution,
+                                  load_mapping_table)
     tbl = load_mapping_table(mapping_path)
+    if known_regions is not None:
+        tbl = align_regions(tbl, known_regions, mapping_path)
     if not has_contribution(tbl):
         return {}, {}
     gc = group_contributions(tbl)
@@ -697,7 +705,8 @@ def write_benchmark_comparison(decomp, pdata, outdir: str,
     table = build_table(decomp, pdata, math_df=math_df,
                         contraction_df=contraction_df, prior_df=prior_df,
                         mapping=mapping)
-    reg, nat = benchmark_values(mapping_path)
+    reg, nat = benchmark_values(mapping_path,
+                                list(dict.fromkeys(table["region"])))
     path = write_benchmark_sheet(table, outdir, reg, nat)
     n_groups = table["group"].nunique()
     n_filled = len({g for g, _ in reg} | set(nat))

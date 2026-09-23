@@ -38,6 +38,14 @@ signs if you also hand it a mapping or share file. Jump to §5.
 > *Until 2026-09-22 a blank meant `mean_positive` for signed features and
 > `mean`/`sd` for free ones.* The built-in fallback `global_prior_mean` (0.05)
 > was sized for scaled inputs — on raw columns always write your own.
+>
+> **Blank or `none` — the same thing?** Yes: on this codebase a blank
+> `center_mode` / `scale_mode` resolves to `none`, identical to writing
+> `none`. The one exception is a **copy older than 2026-09-22** (check the
+> `[mmm] codebase` line at the top of the run), where a blank meant
+> `mean_positive` / `mean`+`sd`. Writing `none` explicitly is correct on every
+> version, so do that when you are not sure what is on the cluster.
+> `01_data/model_input_matrix.csv` shows what was actually applied.
 
 > **A blank cell is legal everywhere, and means "take the default".** A file
 > with nothing but a `variable` column loads and runs. A blank
@@ -173,11 +181,23 @@ data:
   feature_priors: null                # nothing yet - that is the point
 ```
 
-```bash
-python -m mmm.data.prior_builder config.yaml
+```python
+from mmm.data.prior_builder import build_priors      # in a notebook
+build_priors("config.yaml")
 ```
 
-With neither input file that writes the **skeleton**: one row per variable,
+```bash
+python -m mmm.data.prior_builder config.yaml       # or from a shell
+```
+
+**Use `build_priors`, not `run_pre_model`, from a notebook.** It prints the
+codebase version first, and sends every warning — including the ones raised
+while loading an existing prior file, such as one "deliberate ±2% band" per
+pinned variable — to `<pre_model_dir>/00_warnings/` with one summary line,
+exactly as a model run does.
+
+**It always writes a file.** With neither input file — or a mapping whose
+contributions are all blank — that is the **skeleton**: one row per variable,
 `prior_sd_basis: relative`, `prior_mean_basis: median`, everything else blank.
 With a mapping or share file it writes **two prior files** plus
 `prior_calculation.xlsx` showing every intermediate number:
@@ -237,13 +257,21 @@ rather than silently skipping a row.
 |---|---|---|
 | `vendor_variable` | **yes** | the vendor's name. Never checked against anything — it is theirs |
 | `our_variable` | **yes** | must be a **datacube column** (or, when `data.feature_priors` is set, one of its variables) |
-| `region` | no | blank, or the column absent, means **national**. A name that is not a region in the data is not caught here — it simply never matches |
+| `region` | no | blank, or the column absent, means **national**. Matched to the datacube's region names **ignoring case, spaces and punctuation, and word order** — so `('Base', 'Droguerias')` (a pandas tuple printed as text) matches `Base_Droguerias` or `Droguerias - Base`. A region that still matches nothing **stops the run** and lists both sides |
 | `contribution` | no | the vendor's number. Without it the file only **groups** variables (case b/d) |
 
 - The contribution belongs to the **vendor variable**. Replicated across
   several of our rows, it is counted **once** — repeat the same number or
   leave the copies blank. **Two different numbers for the same
   `vendor_variable` + `region` is an error.**
+- **Regional OR national, never both** for one vendor variable. A national row
+  on top of regional ones would be allocated across the regions and count the
+  same volume twice — the typical cause is a vendor table's `_All` column
+  pasted in as a region. It stops the run.
+- **Explicit zeros are fine and meaningful** — a sub-brand's variable in a
+  channel it does not sell in. Where the variable has no support there the row
+  is ignored; where it *does* have support the zero is a real coefficient of 0,
+  which drags a plain average down, so use `data.national_basis: weighted`.
 - A variable may appear in only one group; groups are the connected components
   of the vendor ↔ ours links, so linking A–B and B–C makes one group of three.
 - Header names are sniffed, not fixed: `vendor`, `their_variable`,

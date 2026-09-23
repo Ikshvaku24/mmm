@@ -298,6 +298,7 @@ variable, means and signs blank) and the run stops so you can fill it in.
 
 | File | Contents |
 |---|---|
+| `00_warnings/` | the step's warnings, one document per category — the same layout as a run's `00_warnings`. Loading a prior file full of ±2% pins raises one warning per variable; they land here, not in the notebook |
 | `feature_priors_national.csv` | a generated prior file — **a proposal, not a decision**. One row per model variable, the **national** mean (see below); blank where neither file covered it. `pooling: hierarchical` |
 | `feature_priors_regional.csv` | the same rows **plus one override row per region** (`variable, region, global_prior_mean` only) with that region's own coefficient. `pooling: independent` |
 | `prior_calculation.xlsx` | sheet 1 the working, sheet 2 the resulting means, sheet 3 the method in prose |

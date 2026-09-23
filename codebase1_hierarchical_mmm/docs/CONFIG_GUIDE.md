@@ -309,9 +309,20 @@ table and what each input file must contain.
 
 It runs automatically at the front of `run_from_yaml`, or standalone:
 
+```python
+from mmm.data.prior_builder import build_priors
+build_priors("config.yaml")          # warnings -> <pre_model_dir>/00_warnings/
+```
+
 ```bash
 python -m mmm.data.prior_builder config.yaml
 ```
+
+Standalone, it **always writes a file** (the skeleton when there is nothing to
+build from) and sends its warnings to `<pre_model_dir>/00_warnings/` rather
+than the notebook. The mapping file's region names are matched to the
+datacube's ignoring case, punctuation and word order; one that matches nothing
+stops the run.
 
 and writes to `pre_model_outputs/` (or `data.pre_model_dir`):
 

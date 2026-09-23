@@ -37,6 +37,8 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
+__codebase__ = "2026.09.24"   # must equal mmm.__version__
+
 import dataclasses
 import difflib
 import os
@@ -540,11 +542,18 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
     """
     # `run_pipeline` pulls in PyMC. It is imported AFTER the no-features branch
     # below, so generating a prior file works on a laptop that has no sampler.
-    from mmm.checks.warnings_report import collect_warnings
+    import mmm
+    from mmm.checks.warnings_report import (collect_warnings,
+                                            print_warning_summary,
+                                            write_warning_docs)
     try:
         from mmm.data.prior_builder import run_pre_model
     except ImportError:            # optional - the run works without it
         run_pre_model = None
+
+    # the first line of every run says which code it is, and shouts if the
+    # copy on the cluster is a mix of old and new files
+    mmm.announce()
 
     # Loading the settings resolves every feature spec, which is where the
     # per-feature prior warnings come from. Capture them here so they reach
@@ -567,8 +576,12 @@ def run_from_yaml(path: str, df=None, save_trace: bool = True,
                 f"{path}: no features. Set data.feature_priors to the prior CSV.")
         with collect_warnings() as _gen:
             made = run_pre_model(settings, df=panel)
-        for w in _gen:
-            print(f"[prior] {w}")
+        # to the folder, like every other warning - not the cell output
+        out = settings.data.get("pre_model_dir") or "pre_model_outputs"
+        wdir = os.path.join(out, "00_warnings")
+        print_warning_summary(
+            write_warning_docs(caught + list(_gen), wdir, run_name="pre-model"),
+            wdir)
         generated = made.get("feature_priors_national")
         raise ValueError(
             f"{path}: data.feature_priors is not set, so there is nothing to "

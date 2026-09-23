@@ -69,6 +69,8 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
+__codebase__ = "2026.09.24"   # must equal mmm.__version__
+
 import math
 import warnings
 from dataclasses import dataclass, field
