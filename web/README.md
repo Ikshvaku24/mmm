@@ -160,7 +160,8 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 1. **① BMC and run.** Pick a BMC folder, or type a new name (its folder is
    created with the first run), and name the run. The block says where the run
    will be saved. Below it: **Runs in <BMC>**, newest first, showing status,
-   when, by whom, **reused from** and **changed**. Select a run to open its
+   when, by whom, **reused from** and **changed**. The list is re-read at most
+   every 30 s; **↻ Refresh list** re-reads it now. Select a run to open its
    panel (below). **Reuse inputs** loads its datacube, settings and prior file
    (and mapping/share files) into the blocks below, and proposes a new run
    name (`baseline` → `baseline_2`, `run_7` → `run_8`).
@@ -177,7 +178,8 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 3. **③ Model settings.** codebase 1's `config.yaml`, with one widget per key
    and dropdowns for the allowed values. Switch on **Edit settings** to show
    them.
-   - A changed value is marked ● (changed from the team's base config).
+   - A changed value is marked ● (changed from the team's base config), and a
+     table under the block lists every change: *setting · base config · now*.
    - You can load or download a `config.yaml`, and reset to the base.
    - Validation runs on every change.
    - The paths and the run name are set by the job, so they are read-only.
@@ -197,19 +199,32 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
       (a blank template, one row per datacube variable). In cases a-c, once a
       prior table is loaded, **List only the variables of my current prior
       file** limits the output to those variables.
-   2. **Download it and fill it in.** One row per file, each saying what it
-      is for:
+   2. **Fill it in.** One row per file, each saying what it is for:
       - `feature_priors_national.csv`: pooling **hierarchical**;
       - `feature_priors_regional.csv`: pooling **independent**, with one
-        override row per region;
+        override row per region (only when the mapping has contributions);
       - `prior_calculation.xlsx`: the arithmetic;
       - the warnings, also shown as a table.
 
       A note lists what was filled and what was left blank on purpose
-      (`global_prior_sd`, `pooling`, `center_mode`, ...), and what a blank
-      means. Fill it in Excel, or **Open in the editor**.
+      (`global_prior_sd`, `pooling`, `center_mode`, ...). A generated prior
+      file is a **draft** (`gen_drafts` in the session); nothing becomes the
+      run's prior file until **Use**. Each prior file has:
+      - **Download**: the draft as it is now, edits included;
+      - **Preview / Edit**: the editor on the draft. Save keeps the dialog
+        open and marks the draft *edited here, not used yet*; then **Use this
+        file** or **Download CSV**;
+      - **Use**: the draft becomes the run's prior file, and every blank cell
+        of the feature rows gets the defaults (`app_functions.fill_blank_priors`):
+        pooling `global`, sign_constraint `free`, global_prior_sd `1`,
+        regional_sd_prior `0`. There are two exceptions that codebase 1's
+        loader forces: a variable with per-region rows gets pooling
+        `independent` (global cannot carry per-region priors), and a
+        hierarchical row gets regional sd `0.5` (hierarchical needs more than
+        0). Step 3 then says what was filled.
    3. **Your prior file**: the file picker (csv or xlsx), with **Preview /
-      Edit** next to it. The editor has:
+      Edit** next to it. An uploaded file is used as it is: codebase 1's own
+      defaults apply to its blanks. The editor has:
       - dropdowns for sign, pooling, centre and scale modes and the two bases,
         and a region dropdown listing your datacube's regions;
       - **Paste cells from Excel**: a text box for one cell or a block, with
@@ -218,7 +233,8 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
         pasted. Without it, the block goes right and down from a top-left cell
         you pick. Values are checked (numbers, `0,5` read as 0.5, dropdown
         values in any case), and nothing changes if any cell is wrong;
-      - **Fill a column**.
+      - **Fill a column**;
+      - **Fill blanks with the defaults**: the same fill as Use, on request.
 
       Ctrl+V straight onto the grid works only where the browser lets the page
       read the clipboard (see "Why Ctrl+V on the grid can do nothing"). The
@@ -226,7 +242,8 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 6. **⑥ Run.** A checklist: BMC and run name, datacube, settings, prior file,
    mapping/share if any, and the job's `bmc_name` / `run_name` parameters.
    After a reuse it also lists what changed since that run, e.g. *settings
-   (2), prior file* (the settings setting by setting). **Run Model** saves the
+   (2), prior file*, with a table of the changed settings (*setting · in <run>
+   · now*). **Run Model** saves the
    inputs in the run's folder, writes `run_request.json`, then starts the job.
    If **nothing** changed since the run the inputs came from, it asks *Run it
    again anyway?* first. The run's panel stays on the page until
@@ -239,7 +256,8 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
      `run_request.json`; `trace.nc` only if you tick it), the **Job log**
      (`job_log.txt`, everything the run printed), **Results** (warnings,
      convergence, fit, contributions, coefficients, run info) and **Reuse
-     inputs**.
+     inputs**. **↻ Re-read files** reads the run's files from ADLS again (rarely
+     needed: a missing file is looked up again by itself after 20 s).
 
    If the job does not start, the inputs stay saved in that run folder
    (listed as *not started*), the error is shown and a new run name is

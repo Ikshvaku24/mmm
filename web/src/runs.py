@@ -378,8 +378,10 @@ def _render_run_zip(ref, where):
                                file_name=f"{name}.zip", mime="application/zip",
                                key=f"dl_{where}_{key}_{tag}", on_click="ignore")
     with cols[2]:
-        if st.button("Refresh", key=f"refresh_{where}_{key}",
-                     help="Read this run's files from ADLS again."):
+        if st.button("↻ Re-read files", key=f"refresh_{where}_{key}",
+                     help="Read this run's files (results, job log, zip) from ADLS again - "
+                          "only needed if they changed after you opened the run. A file "
+                          "that was missing is looked up again by itself after 20 s."):
             _forget_files(ref)
             st.rerun(scope="fragment")
 
@@ -473,7 +475,9 @@ def render_runs_section(on_reuse=None):
             st.caption("From the Jobs API: running or finished, from this session or "
                        "any other. Select one to see its status, log, results and zip.")
         with refresh:
-            if st.button("Refresh", key="runs_refresh"):
+            if st.button("↻ Refresh list", key="runs_refresh",
+                         help="Ask the Jobs API for the job's runs again (otherwise at "
+                              "most every 20 s)."):
                 st.session_state.pop("recent_runs", None)
                 st.rerun(scope="fragment")
         job_id = os.environ.get("MDR_JOB_ID", "")

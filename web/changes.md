@@ -19,6 +19,20 @@ needs no redeploy.
 
 ---
 
+## Update 3 - the generated prior file is a draft; readable setting changes
+
+| You asked for | Now |
+|---|---|
+| "Open in the editor" made the generated file the prior file straight away - wrong, it is not filled in yet | A generated prior file is a **draft**. Each one offers: **Download** (fill it in Excel, choose it in step 3); **Preview / Edit** (fill it in the app - edit, paste from Excel, fill a column - then **Use this file** or **Download CSV**; saving keeps the dialog open and marks the draft *edited here, not used yet*); **Use** (as it is). Nothing becomes the run's prior file until you press Use. Step 3 still takes your own file |
+| Blanks: pooling global, sign constraint free, prior sd 1, regional sd 0, the rest as is | **Use** fills every blank cell of the feature rows with these, and step 3 says what it filled, e.g. *pooling → global (32), global_prior_sd → 1 (32)*. Two exceptions, because codebase 1 would otherwise reject the file: a variable with per-region rows gets pooling **independent** (global cannot carry per-region priors), and a row set to **hierarchical** gets regional sd **0.5** (hierarchical needs more than 0). Region rows are left as they are. The editor's new tab **Fill blanks with the defaults** does the same for any prior file, uploaded ones included - but only when you press it: an uploaded file is never changed by itself |
+| Changed settings were a comma-separated line | A table: *setting · base config · now* under Model settings, and *setting · in <reused run> · now* in the Run block |
+| What is the Refresh button that appears after Run Model? | **↻ Refresh list**, in ① next to *Runs in <BMC>*, reads the BMC's runs and their status again. The list is otherwise re-read at most every 30 s, while the panel of a running run updates itself every 5 s. **↻ Re-read files**, in a finished run's panel, reads that run's files from ADLS again - rarely needed. Both buttons now say what they do |
+
+**To get these changes:** copy `web/` to the app's source folder again and
+press **Deploy**. codebase 1 and the job are unchanged since Update 2.
+
+---
+
 ## Update 2 - one folder per run, reuse, the run's zip, paste
 
 | You asked for | Now |
@@ -184,23 +198,27 @@ client instead of logging in again for every file.
      | c | a share file only | the share file |
      | d | neither | nowhere: a **blank** file, one row per datacube variable, for you to fill in |
 
-  2. **Download and fill in.** You get two prior files, `prior_calculation.xlsx`
-     (the arithmetic) and the generator's warnings:
+  2. **Fill it in.** You get the prior file(s), `prior_calculation.xlsx` (the
+     arithmetic) and the generator's warnings:
      - `feature_priors_national.csv` is for **pooling: hierarchical** (the
        regions share one prior);
      - `feature_priors_regional.csv` is for **pooling: independent** (each
-       region gets its own prior).
+       region gets its own prior). It is only written when the mapping file
+       has contributions.
 
-     Columns such as `global_prior_sd` are blank on purpose: blank means
-     codebase 1's default, and the block lists what to consider for each one.
-     Fill the file in Excel, or press **Open in the editor** to fill it in the
-     app.
-  3. **Choose** the filled file; **Preview / Edit** sits next to it. It is
-     checked, and the run can start only once codebase 1 says it is valid.
+     A generated prior file is a draft: columns such as `global_prior_sd` are
+     blank on purpose, and the block lists what to consider for each one. For
+     each file: **Download** it (fill it in Excel, choose it in step 3),
+     **Preview / Edit** it in the app (then **Use this file** or download
+     it), or **Use** it as it is. Use fills the blanks with the defaults
+     (pooling global, sign free, sd 1, regional sd 0; see Update 3).
+  3. **Choose** your filled file, or keep the one you used; **Preview / Edit**
+     sits next to it. It is checked, and the run can start only once codebase 1
+     says it is valid.
 
-  **Preview / Edit** has dropdown columns, **Paste cells from Excel** and
-  **Fill a column**. For why Ctrl+V straight onto the grid can do nothing, see
-  Update 2.
+  **Preview / Edit** has dropdown columns, **Paste cells from Excel**, **Fill a
+  column** and **Fill blanks with the defaults**. For why Ctrl+V straight onto
+  the grid can do nothing, see Update 2.
 - **Datacube check.**
   - It uses the column names from Model settings and never renames anything.
     The old check lower-cased the first 3 columns.
@@ -473,9 +491,10 @@ Then open the app's URL.
 4. **④ Mapping / share file** *(optional)* - choose each; it is checked.
 5. **⑤ Prior file**:
    1. **Generate** - the block says beforehand which case (a-d) applies;
-   2. download `feature_priors_national.csv` (pooling hierarchical) or
-      `feature_priors_regional.csv` (pooling independent) and fill in the
-      blanks; or press **Open in the editor**;
+   2. for `feature_priors_national.csv` (pooling hierarchical) or
+      `feature_priors_regional.csv` (pooling independent): **Download** it and
+      fill in the blanks in Excel; or **Preview / Edit** it here, then **Use
+      this file**; or **Use** it as it is (blanks get the defaults);
    3. choose the filled file (or keep the reused one); **Preview / Edit** next
       to it shows and edits it. To paste from Excel, use **Paste cells from
       Excel** in the editor.

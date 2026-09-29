@@ -1,6 +1,7 @@
 import copy
 import hashlib
 import os
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -8,9 +9,11 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 from src import codebase, projects
-from src.app_functions import (prepare_prior_table, read_file_bytes_as_table,
-                               read_uploaded_file_as_table, show_prior_file_popup,
-                               show_prior_validation, validate_prior)
+from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
+                               prepare_prior_table, read_file_bytes_as_table,
+                               read_uploaded_file_as_table, render_prior_editor,
+                               show_prior_file_popup, show_prior_validation,
+                               to_serial_index_table, validate_prior)
 from src.clusters import get_cluster_status, start_cluster
 from src.config_editor import (init_config_state, job_owned_keys, live_config, load_config,
                                render_settings_section)
@@ -324,8 +327,10 @@ def _render_bmc_runs(bmc):
     with head:
         st.markdown(f"**Runs in {bmc}**")
     with refresh:
-        if st.button("Refresh", key="bmc_runs_refresh",
-                     help="List the BMC's runs again (their status too)."):
+        if st.button("↻ Refresh list", key="bmc_runs_refresh",
+                     help="Read this BMC's runs and their status again. The list is "
+                          "otherwise re-read at most every 30 s; the panel of a running "
+                          "run updates itself every 5 s."):
             _bmc_runs(bmc, force=True)
             st.rerun(scope="fragment")
     for error in errors[:3]:
@@ -370,7 +375,8 @@ def _remember_source(ref, label):
 
 
 def _changes_since_source():
-    """(source label, [what changed], [settings changes]) - None without a source."""
+    """(source label, [what changed], [setting changes as rows]) - None
+    without a source run."""
     ss = st.session_state
     src = ss.get("source_run")
     if not src:
@@ -379,11 +385,18 @@ def _changes_since_source():
     items = [projects.KIND_LABELS[k] for k in ("data_file", "prior_file", "mapping_file",
                                                 "share_file")
              if now[k] != (src.get("fingerprints") or {}).get(k, "")]
-    settings = projects.config_diff(src.get("config"), ss.get("cfg_values") or {},
-                                    skip=job_owned_keys())
+    settings = projects.config_changes(src.get("config"), ss.get("cfg_values") or {},
+                                       skip=job_owned_keys())
     if settings:
         items.insert(0, f"settings ({len(settings)})")
     return src["label"], items, settings
+
+
+def changes_table(rows, before="before", after="now"):
+    """Setting changes as a small table - one row each, easy to scan."""
+    st.dataframe(pd.DataFrame([{"setting": r["setting"], before: r["before"],
+                                after: r["after"]} for r in rows]),
+                 use_container_width=True, hide_index=True)
 
 
 def reuse_run(ref):
@@ -716,12 +729,14 @@ FILLED_TEXT = (
     "`sign_constraint` where the mapping or share file covered the variable; "
     "`prior_sd_basis` = relative and `prior_mean_basis` = median; `pillar` and "
     "`baseline` from the share file.  \n"
-    "**What it leaves blank** - blank means codebase 1's default, and a blank cell is "
-    "legal: `pooling` (hierarchical), `global_prior_sd` (1.0, which under relative is "
-    "±100% - write the width you can defend: 0.02 pins the variable, 0.3–0.5 lets the "
-    "data speak), `regional_sd_prior`, `center_mode` (consider `mean` for TDP, price "
-    "and category), `scale_mode`, `contribution_reference`. A variable neither file "
-    "covered also has a blank mean and sign.")
+    "**What it leaves blank - yours to decide:** `pooling`, `global_prior_sd` (read as "
+    "relative: 0.02 pins the variable, 0.3–0.5 lets the data speak), `regional_sd_prior`, "
+    "`center_mode` (consider `mean` for TDP, price and category), `scale_mode`, "
+    "`contribution_reference` - and the mean and sign of a variable neither file "
+    "covered.  \n"
+    "**Use** fills what is still blank with the defaults above. A file you fill in Excel "
+    "and choose in step 3 keeps codebase 1's own defaults for any blank (pooling "
+    "hierarchical, sd 1.0 - 0.5 for a free sign - regional sd 0.5).")
 
 
 def _generation_signature(cfg):
@@ -735,9 +750,9 @@ def _generation_signature(cfg):
     return (keys, files)
 
 
-def _set_prior(prepared, name, origin, from_generator=False):
+def _set_prior(prepared, name, origin, from_generator=False, note=None):
     """A prior table (uploaded, generated or from a reused run) becomes the
-    prior file the run will use."""
+    prior file the run will use. `note` is shown under it (what Use filled)."""
     ss = st.session_state
     ss["prior_source_name"] = name
     ss["prior_working_table"] = prepared
@@ -748,20 +763,74 @@ def _set_prior(prepared, name, origin, from_generator=False):
     ss["prior_popup_editor_version"] = ss.get("prior_popup_editor_version", 0) + 1
     ss["prior_from_generator"] = from_generator
     ss["prior_origin"] = origin
+    ss["prior_fill_note"] = note
     if origin != "upload":                  # empty the upload box: this file replaces it
         ss["prior_uploader_version"] = ss.get("prior_uploader_version", 0) + 1
         ss.pop("prior_upload_sig", None)
 
 
-def _use_generated(file_name, file_bytes):
-    """'Open in the editor': the generated file becomes the prior file - the
-    same as downloading it and uploading it in step 3."""
-    table, error = read_file_bytes_as_table(file_bytes, file_name)
-    if error:
-        st.error(error)
-        return
-    _set_prior(prepare_prior_table(table), file_name, origin="generated", from_generator=True)
+# --- a generated file is a DRAFT: preview / edit it here, download it, or Use it
+def _draft_prefix(name):
+    return "gen_" + re.sub(r"[^A-Za-z0-9]+", "_", str(name).rsplit(".", 1)[0]).strip("_")
+
+
+def _draft(name, data):
+    """The generated prior file as an editable draft (kept until the next
+    generation), or None when it cannot be read."""
+    drafts = st.session_state.setdefault("gen_drafts", {})
+    if name not in drafts:
+        table, error = read_file_bytes_as_table(data, name)
+        if error:
+            return None
+        drafts[name] = {"table": prepare_prior_table(table), "edited": False}
+    return drafts[name]["table"]
+
+
+def _save_draft(name, table):
+    ss = st.session_state
+    draft = ss["gen_drafts"][name]
+    draft["table"] = to_serial_index_table(table)
+    draft["edited"] = True
+    prefix = _draft_prefix(name)
+    ss[f"{prefix}_popup_editor_version"] = ss.get(f"{prefix}_popup_editor_version", 0) + 1
+
+
+def _use_generated(file_name, table):
+    """'Use': the draft becomes the run's prior file, its blanks filled with
+    the defaults (pooling global, sign free, sd 1, regional sd 0)."""
+    filled, changes = fill_blank_priors(table)
+    note = (f"Blanks filled with the defaults: {describe_fill(changes)}."
+            if changes else "Nothing was blank - used as it is.")
+    _set_prior(prepare_prior_table(filled), file_name, origin="generated",
+               from_generator=True, note=note)
+    st.toast(f"{file_name} is now the run's prior file.", icon="✅")
     st.rerun()
+
+
+def _close_draft_popup():
+    for name in st.session_state.get("gen_drafts") or {}:   # reopen in view mode
+        key = f"{_draft_prefix(name)}_popup_toggle_version"
+        st.session_state[key] = st.session_state.get(key, 0) + 1
+
+
+@st.dialog("Generated prior file", width="large", dismissible=True,
+           on_dismiss=_close_draft_popup)
+def show_generated_prior_popup(name):
+    draft = (st.session_state.get("gen_drafts") or {}).get(name)
+    if draft is None:
+        st.warning("This generated file is no longer available - generate it again.")
+        return
+    st.markdown(f"**{name}** - a draft from codebase 1's generator"
+                + (", edited here" if draft["edited"] else "")
+                + ". It is not the run's prior file until you press **Use this file**.")
+    st.caption("Fill in what only you can decide - the sd, the sign, the pooling ... - "
+               "then **Use this file**, or download it. Use fills whatever is still "
+               "blank: " + DEFAULTS_TEXT)
+    render_prior_editor(draft["table"], _draft_prefix(name), lambda t: _save_draft(name, t),
+                        use=lambda t: _use_generated(name, t), download_name=name,
+                        saved_message="Saved to the draft - press Use this file to make it "
+                                      "the run's prior file.",
+                        after_save="dialog")
 
 
 def _side_table(kind):
@@ -805,6 +874,7 @@ def _render_generate_step(cfg, df):
                 restrict_to=st.session_state.get("prior_working_table") if restrict else None)
         st.session_state["gen_result"] = outcome
         st.session_state["gen_signature"] = _generation_signature(cfg)
+        st.session_state.pop("gen_drafts", None)     # the drafts of the previous generation
     if df is None:
         st.caption("Upload a datacube that passes the checks first.")
 
@@ -813,7 +883,7 @@ def _render_fill_step(cfg):
     outcome = st.session_state.get("gen_result")
     if outcome is None:
         return
-    st.markdown("#### 2 · Download it and fill it in")
+    st.markdown("#### 2 · Fill it in")
     if not outcome.ok:
         for error in outcome.errors:
             st.error(error)
@@ -822,22 +892,48 @@ def _render_fill_step(cfg):
     if st.session_state.get("gen_signature") != _generation_signature(cfg):
         st.warning("The datacube, a mapping/share file or a setting it depends on has "
                    "changed since this was generated - generate it again.")
-    st.caption("Download the file for your pooling choice, fill in the blanks in Excel "
-               "(keep the column names), and upload it in step 3. Or open it in the "
-               "app's editor instead of Excel - it then becomes your prior file straight away.")
+    st.caption("A generated prior file is a DRAFT: the sd, the sign, the pooling and the "
+               "rest are yours to decide. For the file of your pooling choice: **Download** "
+               "it, fill it in Excel and choose it in step 3 - or **Preview / Edit** it here "
+               "and then use or download it - or **Use** it as it is. **Use** makes it the "
+               "run's prior file and fills whatever is still blank: " + DEFAULTS_TEXT)
+    drafts = st.session_state.get("gen_drafts") or {}
     for name, data in result["files"].items():
         what, use = FILE_TEXT.get(name, ("", ""))
-        text_col, dl_col, edit_col = st.columns([4, 1.3, 1.5], vertical_alignment="center")
+        text_col, dl_col, edit_col, use_col = st.columns([4, 1.2, 1.4, 1],
+                                                         vertical_alignment="center")
+        if not name.startswith("feature_priors_"):
+            with text_col:
+                st.markdown(f"**{name}**  \n{what} {use}")
+            with dl_col:
+                st.download_button("Download", data=data, file_name=name,
+                                   key=f"gen_download_{name}", on_click="ignore",
+                                   use_container_width=True)
+            continue
+        draft = _draft(name, data)
+        edited = bool((st.session_state.get("gen_drafts") or drafts).get(name, {}).get("edited"))
         with text_col:
-            st.markdown(f"**{name}**  \n{what} {use}")
+            st.markdown(f"**{name}**" + (" · *edited here, not used yet*" if edited else "")
+                        + f"  \n{what} {use}")
         with dl_col:
-            st.download_button("Download", data=data, file_name=name,
-                               key=f"gen_download_{name}", on_click="ignore",
-                               use_container_width=True)
+            st.download_button("Download",
+                               data=codebase.prior_csv_bytes(draft) if edited else data,
+                               file_name=name, key=f"gen_download_{name}", on_click="ignore",
+                               use_container_width=True,
+                               help="The draft as it is now" + (" - with your edits."
+                                                                if edited else "."))
         with edit_col:
-            if name.startswith("feature_priors_") and st.button(
-                    "Open in the editor", key=f"gen_edit_{name}", use_container_width=True):
-                _use_generated(name, data)
+            if st.button("Preview / Edit", key=f"gen_preview_{name}", use_container_width=True,
+                         disabled=draft is None,
+                         help="See the draft, fill it in here (paste from Excel too), then "
+                              "use it or download it. It is not used until you say so."):
+                show_generated_prior_popup(name)
+        with use_col:
+            if st.button("Use", key=f"gen_use_{name}", type="primary",
+                         use_container_width=True, disabled=draft is None,
+                         help="Make it the run's prior file. Blank cells get the defaults: "
+                              "pooling global, sign free, sd 1, regional sd 0."):
+                _use_generated(name, draft)
     st.markdown(FILLED_TEXT)
     rows = result.get("warnings") or []
     if rows:
@@ -912,6 +1008,8 @@ def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prio
              else f" (from {origin})" if origin and origin != "upload" else "")
     st.success(f"Prior file in use: {ss.get('prior_effective_name', 'feature_priors.csv')}"
                + where + (" - edited here" if ss.get("prior_is_edited") else ""))
+    if ss.get("prior_fill_note"):
+        st.caption(ss["prior_fill_note"])
     show_prior_validation(validate_prior(table), compact=True)
 
 
@@ -1050,7 +1148,8 @@ def _start_run():
                 changed=changes[1] if changes else None, job_id=job_id,
                 app_codebase=codebase.status().get("version", ""))
             if changes and changes[2]:
-                request["changed_settings"] = changes[2]
+                request["changed_settings"] = [f"{c['setting']}: {c['before']} → {c['after']}"
+                                               for c in changes[2]]
             projects.write_request(bmc, run, request)
     except Exception as e:
         st.error(f"The inputs could not be saved to ADLS: {e}")
@@ -1122,8 +1221,7 @@ def render_run_section():
             if items:
                 st.info(f"Changed since **{label}**: {', '.join(items)}.")
                 if settings:
-                    with st.expander(f"The {len(settings)} changed setting(s)"):
-                        st.code("\n".join(settings), language="text")
+                    changes_table(settings, before=f"in {label}", after="now")
             else:
                 st.caption(f"Nothing has changed since **{label}** yet.")
         submit_disabled = not all(ok for ok, _ in ready.values())

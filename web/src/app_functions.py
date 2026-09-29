@@ -431,6 +431,68 @@ def save_prior_table(effective_table):
     st.session_state["prior_popup_editor_version"] = st.session_state.get("prior_popup_editor_version", 0) + 1
 
 
+# --------------------------------------------------------------------------- #
+# blanks -> the modeller's defaults (what "Use" does to a generated file)
+# --------------------------------------------------------------------------- #
+PRIOR_DEFAULTS = {"pooling": "global", "sign_constraint": "free",
+                  "global_prior_sd": 1.0, "regional_sd_prior": 0.0}
+DEFAULTS_TEXT = ("pooling **global** (**independent** for a variable that has per-region "
+                 "rows - global cannot carry them), sign_constraint **free**, "
+                 "global_prior_sd **1**, regional_sd_prior **0** (**0.5** where pooling is "
+                 "hierarchical, which needs more than 0). Region rows and the other columns "
+                 "stay as they are.")
+
+
+def fill_blank_priors(table):
+    """Fill the blank cells of the FEATURE rows with the modeller's defaults,
+    so a generated file is complete before it is used (PRIOR_DEFAULTS, with
+    two exceptions codebase 1's loader forces):
+      * pooling: global - but independent for a variable with per-region rows,
+        because pooling global cannot carry per-region priors;
+      * regional_sd_prior: 0 - but 0.5 (codebase 1's default) where pooling is
+        hierarchical, which requires a value above 0.
+    Region rows (their pooling / sign / sd are not read) and every other column
+    are left as they are. Returns (table, [(column, value, cells filled)])."""
+    t = table.copy()
+    for col in PRIOR_DEFAULTS:
+        if col not in t.columns:
+            t[col] = None
+    region = t["region"] if "region" in t.columns else pd.Series(None, index=t.index)
+    feature = region.map(_blank)
+    var = t["variable"].map(lambda v: "" if _blank(v) else str(v).strip())
+    with_regions = set(var[~feature])
+    changes = []
+
+    def fill(col, mask, value):
+        mask = mask & t[col].map(_blank)
+        if not mask.any():
+            return
+        if isinstance(value, str):
+            t[col] = t[col].astype(object)
+        else:
+            t[col] = pd.to_numeric(t[col], errors="coerce").astype(float)
+        t.loc[mask, col] = value
+        changes.append((col, value, int(mask.sum())))
+
+    fill("pooling", feature & ~var.isin(with_regions), "global")
+    fill("pooling", feature & var.isin(with_regions), "independent")
+    fill("sign_constraint", feature, "free")
+    fill("global_prior_sd", feature, 1.0)
+    hierarchical = t["pooling"].map(lambda v: str(v).strip().lower() == "hierarchical")
+    fill("regional_sd_prior", feature & ~hierarchical, 0.0)
+    fill("regional_sd_prior", feature & hierarchical, 0.5)
+    return t, changes
+
+
+def describe_fill(changes):
+    """[(column, value, n)] -> 'pooling → global (32), ...'."""
+    return ", ".join(f"{col} → {value:g} ({n})" if isinstance(value, float)
+                     else f"{col} → {value} ({n})" for col, value, n in changes)
+
+
+# --------------------------------------------------------------------------- #
+# the prior editor - for the run's prior file ("prior") or a generated draft
+# --------------------------------------------------------------------------- #
 def _row_label(table, position):
     row = table.iloc[position]
     var = row.get("variable")
@@ -439,10 +501,12 @@ def _row_label(table, position):
             + ("" if _blank(reg) else f" · {reg}"))
 
 
-def _render_block_paste(edited_table, remove_column_name, spec, regions, columns, version):
+def _render_block_paste(edited_table, remove_column_name, spec, regions, columns, version,
+                        prefix="prior", save=None):
     """Paste cells copied from Excel through a text box - no clipboard permission needed."""
+    save = save or save_prior_table
     text = st.text_area(
-        "Cells copied from Excel", key=f"prior_block_text_{version}", height=140,
+        "Cells copied from Excel", key=f"{prefix}_block_text_{version}", height=140,
         placeholder="In Excel, copy one cell or a block - with or without the header "
                     "row. Click here and press Ctrl+V.")
     rows = parse_pasted_block(text)
@@ -463,14 +527,14 @@ def _render_block_paste(edited_table, remove_column_name, spec, regions, columns
         with left:
             start_row = st.selectbox("Top-left cell - row", list(range(len(edited_table))),
                                      format_func=lambda i: _row_label(edited_table, i),
-                                     key=f"prior_block_row_{version}")
+                                     key=f"{prefix}_block_row_{version}")
         with right:
             if header:
                 st.caption("Header row found: columns matched by name, rows from the "
                            "row on the left down.")
             else:
                 start_col = st.selectbox(
-                    "Top-left cell - column", columns, key=f"prior_block_col_{version}",
+                    "Top-left cell - column", columns, key=f"{prefix}_block_col_{version}",
                     index=columns.index("global_prior_sd") if "global_prior_sd" in columns else 0)
     new, summary, problems = paste_block(edited_table, text, spec, regions, start_row,
                                          start_col, skip_columns=(remove_column_name,))
@@ -481,49 +545,138 @@ def _render_block_paste(edited_table, remove_column_name, spec, regions, columns
     if summary:
         st.info(f"Ready: {summary['cells']} cell(s) in {summary['rows']} row(s) - "
                 f"{', '.join(summary['columns'])}.")
-    if st.button("Apply paste", key=f"prior_block_apply_{version}", type="primary",
+    if st.button("Apply paste", key=f"{prefix}_block_apply_{version}", type="primary",
                  disabled=bool(problems)):
-        save_prior_table(apply_row_removals(new, remove_column_name))
+        save(apply_row_removals(new, remove_column_name))
         st.toast(f"Pasted {summary['cells']} cell(s).", icon="✅")
         st.rerun(scope="fragment")
 
 
-def _render_column_tools(edited_table, remove_column_name, spec):
-    """Paste cells from Excel, or fill a column; the result is saved and the
-    dialog stays open."""
+def _render_column_tools(edited_table, remove_column_name, spec, prefix="prior", save=None):
+    """Paste cells from Excel, fill a column, or fill every blank with the
+    defaults; the result is saved and the dialog stays open."""
+    save = save or save_prior_table
     regions = st.session_state.get("datacube_regions") or []
     columns = [c for c in edited_table.columns if c not in (remove_column_name,)]
-    version = st.session_state.get("prior_popup_editor_version", 0)
-    with st.expander("Paste cells from Excel · Fill a column"):
-        paste_tab, fill_tab = st.tabs(["Paste cells from Excel", "Fill a column"])
+    version = st.session_state.get(f"{prefix}_popup_editor_version", 0)
+    with st.expander("Paste cells from Excel · Fill a column · Fill blanks with the defaults"):
+        paste_tab, fill_tab, defaults_tab = st.tabs(
+            ["Paste cells from Excel", "Fill a column", "Fill blanks with the defaults"])
         with paste_tab:
             _render_block_paste(edited_table, remove_column_name, spec, regions, columns,
-                                version)
+                                version, prefix, save)
         with fill_tab:
-            col = st.selectbox("Column", columns, key=f"prior_fill_col_{version}",
+            col = st.selectbox("Column", columns, key=f"{prefix}_fill_col_{version}",
                                index=columns.index("global_prior_sd") if "global_prior_sd" in columns else 0)
             kind = (spec or {}).get("kinds", {}).get(col, "text")
             if kind == "choice":
-                value = st.selectbox("Value", spec["options"][col], key=f"prior_fill_val_{version}_{col}")
+                value = st.selectbox("Value", spec["options"][col], key=f"{prefix}_fill_val_{version}_{col}")
             elif kind == "region" and regions:
-                value = st.selectbox("Value", regions, key=f"prior_fill_val_{version}_{col}")
+                value = st.selectbox("Value", regions, key=f"{prefix}_fill_val_{version}_{col}")
             elif kind == "number":
-                value = st.number_input("Value", value=0.2, format="%g", key=f"prior_fill_val_{version}_{col}")
+                value = st.number_input("Value", value=0.2, format="%g", key=f"{prefix}_fill_val_{version}_{col}")
             elif kind == "flag":
-                value = st.selectbox("Value", [0, 1], key=f"prior_fill_val_{version}_{col}")
+                value = st.selectbox("Value", [0, 1], key=f"{prefix}_fill_val_{version}_{col}")
             else:
-                value = st.text_input("Value", key=f"prior_fill_val_{version}_{col}")
+                value = st.text_input("Value", key=f"{prefix}_fill_val_{version}_{col}")
             scope = st.radio("Rows", ["all rows", "feature rows (region blank)",
                                       "rows whose variable contains ..."],
-                             horizontal=True, key=f"prior_fill_scope_{version}")
-            pattern = st.text_input("Variable contains", key=f"prior_fill_pat_{version}") \
+                             horizontal=True, key=f"{prefix}_fill_scope_{version}")
+            pattern = st.text_input("Variable contains", key=f"{prefix}_fill_pat_{version}") \
                 if scope.startswith("rows whose") else ""
-            blanks = st.checkbox("Only where the cell is blank", key=f"prior_fill_blank_{version}")
-            if st.button("Apply fill", key=f"prior_fill_apply_{version}", type="primary"):
+            blanks = st.checkbox("Only where the cell is blank", key=f"{prefix}_fill_blank_{version}")
+            if st.button("Apply fill", key=f"{prefix}_fill_apply_{version}", type="primary"):
                 new, n = fill_column(edited_table, col, value, scope, pattern, blanks)
-                save_prior_table(apply_row_removals(new, remove_column_name))
+                save(apply_row_removals(new, remove_column_name))
                 st.toast(f"Filled {n} cell(s) of {col}.", icon="✅")
                 st.rerun(scope="fragment")
+        with defaults_tab:
+            st.caption("Every blank cell of the feature rows gets: " + DEFAULTS_TEXT)
+            if st.button("Fill every blank with the defaults", key=f"{prefix}_defaults_{version}",
+                         type="primary"):
+                new, changes = fill_blank_priors(apply_row_removals(edited_table, remove_column_name))
+                save(new)
+                st.toast(("Filled: " + describe_fill(changes)) if changes else "Nothing was blank.",
+                         icon="✅")
+                st.rerun(scope="fragment")
+
+
+def render_prior_editor(table, prefix, save, use=None, download_name="feature_priors.csv",
+                        saved_message="Changes saved.", after_save="app"):
+    """The body of a prior-file dialog: view (table, validation, download) or
+    edit (the grid, paste from Excel, fill a column, fill blanks with the
+    defaults, Save). With `use`, a "Use this file" button hands the table to
+    it. `prefix` keeps each target's widgets apart ("prior" = the run's prior
+    file); `after_save` = "app" closes the dialog on Save, "dialog" keeps it
+    open."""
+    ss = st.session_state
+    spec = get_prior_spec()
+    regions = ss.get("datacube_regions") or []
+    toggle_version = ss.get(f"{prefix}_popup_toggle_version", 0)
+    edit_mode = st.toggle("Edit", key=f"{prefix}_popup_edit_mode_{toggle_version}")
+    use_help = "Make it the run's prior file. Blank cells get the defaults: pooling " \
+               "global, sign free, sd 1, regional sd 0."
+    if edit_mode:
+        edit_table, remove_column_name = build_edit_table_with_remove_column(table)
+        editor_version = ss.get(f"{prefix}_popup_editor_version", 0)
+        edited_table = st.data_editor(
+            edit_table,
+            use_container_width=True,
+            height=420,
+            num_rows="dynamic",
+            key=f"{prefix}_popup_editor_{editor_version}",
+            column_config=prior_column_config(spec, regions, remove_column_name),
+        )
+        st.caption(PASTE_HINT)
+        _render_column_tools(edited_table, remove_column_name, spec, prefix, save)
+
+        effective_edited_table = apply_row_removals(edited_table, remove_column_name)
+        table_changed = has_table_changed(table, effective_edited_table)
+        if not effective_edited_table.empty:
+            show_prior_validation(validate_prior(effective_edited_table), compact=True)
+        save_col, use_col = st.columns(2) if use else (st.container(), None)
+        with save_col:
+            if table_changed:
+                if st.button("Save Changes", type="primary", key=f"{prefix}_save",
+                             use_container_width=True):
+                    if effective_edited_table.empty:
+                        st.warning("At least one row must remain after removal.")
+                        return
+                    save(effective_edited_table)
+                    ss[f"{prefix}_popup_toggle_version"] = toggle_version + 1
+                    st.toast(saved_message, icon="✅")
+                    if after_save == "dialog":
+                        st.rerun(scope="fragment")
+                    st.rerun()
+            else:
+                st.caption("Make a change or tick Remove to enable Save.")
+        if use:
+            with use_col:
+                if st.button("Use this file", key=f"{prefix}_use_edit", use_container_width=True,
+                             disabled=effective_edited_table.empty,
+                             help=use_help + " Your unsaved edits are included."):
+                    use(effective_edited_table)
+    else:
+        st.dataframe(table, use_container_width=True, height=420)
+        outcome = validate_prior(table)
+        show_prior_validation(outcome)
+        csv_bytes = codebase.prior_csv_bytes(table)
+        dl_col, use_col = st.columns(2) if use else (st.container(), None)
+        with dl_col:
+            st.download_button(
+                "Download CSV",
+                data=csv_bytes,
+                file_name=_csv_name(download_name),
+                mime="text/csv",
+                key="download_prior_csv_from_popup" if prefix == "prior" else f"{prefix}_download",
+                use_container_width=True,
+                on_click="ignore",
+            )
+        if use:
+            with use_col:
+                if st.button("Use this file", key=f"{prefix}_use", type="primary",
+                             use_container_width=True, help=use_help):
+                    use(table)
 
 
 def close_prior_file_popup():
@@ -536,63 +689,10 @@ def show_prior_file_popup():
         st.warning("No prior file data available for preview.")
         return
 
-    st.caption("Preview, edit or download the prior file. It is saved to the run's "
-               "folder when you press Run Model.")
-    spec = get_prior_spec()
-    regions = st.session_state.get("datacube_regions") or []
-
-    toggle_version = st.session_state.get("prior_popup_toggle_version", 0)
-    edit_mode = st.toggle("Edit", key=f"prior_popup_edit_mode_{toggle_version}")
-    if edit_mode:
-        edit_table, remove_column_name = build_edit_table_with_remove_column(st.session_state["prior_working_table"])
-        editor_version = st.session_state.get("prior_popup_editor_version", 0)
-        edited_table = st.data_editor(
-            edit_table,
-            use_container_width=True,
-            height=420,
-            num_rows="dynamic",
-            key=f"prior_popup_editor_{editor_version}",
-            column_config=prior_column_config(spec, regions, remove_column_name),
-        )
-        st.caption(PASTE_HINT)
-        _render_column_tools(edited_table, remove_column_name, spec)
-
-        effective_edited_table = apply_row_removals(edited_table, remove_column_name)
-        table_changed = has_table_changed(st.session_state["prior_working_table"], effective_edited_table)
-        if not effective_edited_table.empty:
-            show_prior_validation(validate_prior(effective_edited_table), compact=True)
-
-        if table_changed:
-            save_clicked = st.button("Save Changes", type="primary", use_container_width=True)
-
-            if save_clicked:
-                if effective_edited_table.empty:
-                    st.warning("At least one row must remain after removal.")
-                    return
-
-                save_prior_table(effective_edited_table)
-                st.session_state["prior_popup_toggle_version"] = toggle_version + 1
-                st.toast("Changes saved - the edited prior file is the one the run will use.",
-                         icon="✅")
-
-                st.rerun()
-            else:
-                st.caption("Make a change or tick Remove to enable Save action.")
-    else:
-        active_table = st.session_state["prior_working_table"]
-        st.dataframe(active_table, use_container_width=True, height=420)
-        outcome = validate_prior(active_table)
-        show_prior_validation(outcome)
-
-        file_name = _csv_name(st.session_state.get("prior_effective_name", st.session_state.get("prior_source_name", "prior.csv")))
-        csv_bytes = codebase.prior_csv_bytes(active_table)
-
-        st.download_button(
-            "Download CSV",
-            data=csv_bytes,
-            file_name=file_name,
-            mime="text/csv",
-            key="download_prior_csv_from_popup",
-            use_container_width=True,
-            on_click="ignore",
-        )
+    st.caption("Preview, edit or download the prior file the run will use. It is saved to "
+               "the run's folder when you press Run Model.")
+    render_prior_editor(
+        st.session_state["prior_working_table"], "prior", save_prior_table,
+        download_name=st.session_state.get("prior_effective_name",
+                                           st.session_state.get("prior_source_name", "prior.csv")),
+        saved_message="Changes saved - the edited prior file is the one the run will use.")

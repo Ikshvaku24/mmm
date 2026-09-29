@@ -111,7 +111,7 @@ run:
   # 'train' | 'full' - which periods the centring/scaling statistics come from, for features AND
   # the KPI. 'full' matches the window generated priors were computed over, but the holdout
   # metrics are then not strictly out of sample. CV always uses each fold's train window
-  scaling_window: train
+  scaling_window: full
   # 'auto'|'weekly'|'monthly' - sets every period count downstream
   cadence: auto
   # last N dates held out per region for OOS metrics, as an ABSOLUTE count. null = use

@@ -414,9 +414,9 @@ def _fmt(v) -> str:
     return str(v).lower() if isinstance(v, bool) else str(v)
 
 
-def config_diff(before: dict, after: dict, skip=()) -> list:
-    """'section.key: old -> new' for each setting that differs (the keys in
-    `skip` - the job-owned ones - are ignored)."""
+def config_changes(before: dict, after: dict, skip=()) -> list:
+    """[{'setting', 'before', 'after'}] for each setting that differs (the keys
+    in `skip` - the job-owned ones - are ignored), values as readable text."""
     out = []
     before, after = before or {}, after or {}
     for sec in dict.fromkeys(list(before) + list(after)):
@@ -425,5 +425,13 @@ def config_diff(before: dict, after: dict, skip=()) -> list:
             if f"{sec}.{key}" in skip:
                 continue
             if not _same(a.get(key), b.get(key)):
-                out.append(f"{sec}.{key}: {_fmt(a.get(key))} → {_fmt(b.get(key))}")
+                out.append({"setting": f"{sec}.{key}", "before": _fmt(a.get(key)),
+                            "after": _fmt(b.get(key))})
     return out
+
+
+def config_diff(before: dict, after: dict, skip=()) -> list:
+    """'section.key: old -> new' for each setting that differs - the text form
+    of config_changes, as run_request.json records it."""
+    return [f"{c['setting']}: {c['before']} → {c['after']}"
+            for c in config_changes(before, after, skip)]

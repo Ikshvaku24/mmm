@@ -13,6 +13,7 @@ name) are shown but cannot be edited.
 """
 import copy
 
+import pandas as pd
 import streamlit as st
 import yaml
 
@@ -239,13 +240,16 @@ def _render_section(section, rows, values, base, job_owned, version):
 
 
 def _changed_keys(values, base, job_owned):
+    """One row per setting that differs from the base config."""
     out = []
     for section, block in values.items():
         for key, v in block.items():
             if f"{section}.{key}" in job_owned:
                 continue
-            if not _same(v, (base.get(section) or {}).get(key)):
-                out.append(f"{section}.{key} = {_fmt(v)}")
+            b = (base.get(section) or {}).get(key)
+            if not _same(v, b):
+                out.append({"setting": f"{section}.{key}", "base config": _fmt(b),
+                            "now": _fmt(v)})
     return out
 
 
@@ -345,9 +349,12 @@ def _settings_fragment():
         changed = _changed_keys(values, base, job_owned)
         if check.ok:
             st.success("Settings are valid"
-                       + (f" - {len(changed)} changed from the base config: "
-                          + ", ".join(changed[:6]) + (" ..." if len(changed) > 6 else "")
-                          if changed else " - the base config, unchanged."))
+                       + (f" - {len(changed)} differ from the base config:" if changed
+                          else " - the base config, unchanged."))
+        elif changed:
+            st.caption(f"{len(changed)} setting(s) differ from the base config:")
+        if changed:
+            st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
         for err in check.errors:
             st.error(err)
         for _severity, warning in check.warnings:
