@@ -8,11 +8,16 @@ codebase1_hierarchical_mmm/
 ├── run_real_data.py          ENTRY POINT - reads config.yaml, fits, reports
 ├── synthetic_example.py      ENTRY POINT - parameter recovery (needs PyMC)
 ├── preview_dv_scaling.py     ENTRY POINT - what does dv_scale do to my KPI?
+├── demo.ipynb                ENTRY POINT - the Databricks job the web app runs
+│                             (widgets -> mmm/app_job.py); blank widgets = a
+│                             hand run of this folder's config.yaml
 ├── config.yaml               every setting at its default, with help text
 ├── feature_priors_*.csv      the prior table (one row per feature)
 │
 ├── mmm/                      the package
 │   ├── run_pipeline.py       run() - ties the stages together
+│   ├── app_job.py            what demo.ipynb does: the uploaded config with only
+│   │                         the job-owned keys replaced, run, publish Outputs/
 │   ├── core/
 │   │   ├── config.py         every config dataclass + the prior-unit maths
 │   │   ├── settings.py       the config.yaml front end (run_from_yaml)
@@ -81,6 +86,17 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 | add an output file | `mmm/reporting/reconciliation.py` + an `OutputConfig` flag |
 | add a diagnostic | `mmm/checks/` |
 | change a diagnostic threshold | `config.yaml` under `assumptions:` — **not** code |
+| change what the web app's job does (paths, publishing) | `mmm/app_job.py` (+ `demo.ipynb`, which only reads widgets) |
+| add a setting to the web app's editor | nothing extra: the dataclass field + its `HELP` line; enums in `settings.CHOICES` |
+
+## The web app is the frontend, this folder the backend
+
+`../web/` (the BRIDGE Streamlit app, a Databricks App) never copies this code.
+It loads it LIVE from the workspace - the folder of the notebook the model job
+runs, i.e. this one - and re-checks it every few minutes, so re-uploading this
+folder updates the app, the job and anyone running it by hand at once. The app
+needs `mmm.__version__` >= the version in `web/src/codebase.py :: MIN_CODEBASE`.
+Everything it calls: `web/src/codebase.py`; setup: `web/README.md`.
 
 ## Output tree
 

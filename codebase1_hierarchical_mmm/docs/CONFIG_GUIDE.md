@@ -18,6 +18,17 @@ Then run:
 python run_real_data.py config.yaml
 ```
 
+**From the BRIDGE web app** (`../web/`), the same file is edited in the
+*Model settings* block. Every widget comes from this codebase's own schema
+(`mmm.core.settings.config_schema()`): a dropdown wherever
+`mmm.core.settings.CHOICES` lists the allowed values, this guide's one-line
+help as the tooltip. So a key you add to a config dataclass (plus its `HELP`
+line) appears in the app by itself. The app starts from this folder's
+`config.yaml`, writes EVERY key into the file it sends (`settings_text`), and
+the job (`demo.ipynb` -> `mmm/app_job.py`) replaces only the input paths, the
+output folder and the run name - `app_job.JOB_OWNED_KEYS`. It never edits this
+folder's `config.yaml`.
+
 **Two rules that save time:**
 
 1. **Omitted keys take the default.** A working file can be six lines. Only

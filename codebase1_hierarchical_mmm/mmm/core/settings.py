@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.24"   # must equal mmm.__version__
+__codebase__ = "2026.09.29"   # must equal mmm.__version__
 
 import dataclasses
 import difflib
@@ -47,7 +47,11 @@ from dataclasses import fields
 import yaml
 
 from mmm.core.config import (AssumptionConfig, CVConfig, ModelConfig, OutputConfig,
-                    RunConfig, SamplerConfig, load_feature_config)
+                    RunConfig, SamplerConfig, load_feature_config,
+                    VALID_CADENCE, VALID_CENTER, VALID_CHAIN_METHOD,
+                    VALID_DV_AGG, VALID_LIKELIHOOD, VALID_NATIONAL_BASIS,
+                    VALID_ON_FAILURE, VALID_PERIOD_SPLIT, VALID_SAMPLER,
+                    VALID_SCALE, VALID_SCOPE, VALID_WINDOW)
 
 # --------------------------------------------------------------------------- #
 # section table: yaml key -> dataclass, and the fields that are NOT settings
@@ -67,6 +71,40 @@ EXCLUDED = {"model": ("features",)}
 DATA_KEYS = ("input_path", "sheet", "feature_priors", "date_format",
              "mapping_file", "share_file", "dv_aggregation", "national_basis",
              "pre_model_dir")
+
+# Every enumerated setting and its allowed values, keyed "section.key". Built
+# from the same tuples the dataclasses check, so a UI dropdown built from this
+# can never offer a value the loader would reject (test_v19 checks both ways).
+CHOICES: dict[str, tuple] = {
+    "data.dv_aggregation": VALID_DV_AGG,
+    "data.national_basis": VALID_NATIONAL_BASIS,
+    "model.likelihood": VALID_LIKELIHOOD,
+    "run.dv_center": VALID_CENTER,
+    "run.dv_scale": VALID_SCALE,
+    "run.dv_scale_scope": VALID_SCOPE,
+    "run.scaling_window": VALID_WINDOW,
+    "run.cadence": VALID_CADENCE,
+    "run.on_convergence_failure": VALID_ON_FAILURE,
+    "sampler.sampler": VALID_SAMPLER,
+    "sampler.chain_method": VALID_CHAIN_METHOD,
+    "output.period_split": VALID_PERIOD_SPLIT,
+    "output.cadence": VALID_CADENCE,
+    "cv.cadence": VALID_CADENCE,
+}
+
+# the data section has no dataclass, so its value kinds are written out here
+# ("path" = a file or folder location)
+DATA_KINDS = {
+    "input_path": "path",
+    "sheet": "str_or_null",
+    "feature_priors": "path",
+    "date_format": "str_or_null",
+    "mapping_file": "path",
+    "share_file": "path",
+    "dv_aggregation": "choice",
+    "national_basis": "choice",
+    "pre_model_dir": "path",
+}
 
 # keys that used to exist, and what replaced them - so an old config gets told
 # what to do instead of a bare "unknown key"
@@ -332,18 +370,54 @@ def load_settings(path: str, features=None) -> Settings:
     in hand (e.g. built in a notebook). Otherwise the CSV named in the YAML is
     loaded; a Settings can also be built with no features at all, which is what
     `write_default_yaml` round-trip checks do.
+
+    The rules live in `settings_from_dict`; this reads the file and resolves
+    relative paths against the file's own folder.
     """
     with open(path, encoding="utf-8") as fh:
         raw = yaml.safe_load(fh) or {}
     if not isinstance(raw, dict):
         raise ValueError(f"{path}: the top level of the file must be a mapping "
                          f"of sections, got {type(raw).__name__}")
+    return settings_from_dict(raw, base_dir=os.path.dirname(os.path.abspath(path)),
+                              features=features, source_path=os.path.abspath(path))
 
+
+def _check_choices(block: dict, section: str) -> None:
+    """A value outside its CHOICES is an error. The dataclasses check their own
+    sections; this covers the data section, which has no dataclass - so a typo
+    there fails at load time instead of halfway through the pre-model step."""
+    for key, value in block.items():
+        allowed = CHOICES.get(f"{section}.{key}")
+        if allowed is None or value is None:
+            continue
+        if str(value).strip().lower() not in allowed:
+            raise ValueError(f"[{section}] {key} must be one of {allowed}, "
+                             f"got {value!r}")
+
+
+def settings_from_dict(raw: dict, base_dir: str | None = None, features=None,
+                       source_path: str = "") -> Settings:
+    """Build Settings from an already-parsed mapping - the YAML minus the file.
+
+    The same rules `load_settings` applies (it calls this): unknown keys raise
+    with the closest spelling, every value goes through the dataclass
+    `__post_init__`, omitted keys take the DATACLASS default. Relative paths in
+    `data` resolve against `base_dir` (the current folder when None).
+
+    This is what lets a UI validate an edited config without writing a file;
+    pass `features=[]` to skip loading the prior CSV.
+    """
+    raw = raw or {}
+    if not isinstance(raw, dict):
+        raise ValueError("the top level of the settings must be a mapping of "
+                         f"sections, got {type(raw).__name__}")
     _check_keys(raw, set(SECTIONS) | {"data"}, "top level")
-    base_dir = os.path.dirname(os.path.abspath(path))
+    base_dir = os.getcwd() if base_dir is None else base_dir
 
     data = dict(raw.get("data") or {})
     _check_keys(data, set(DATA_KEYS), "data")
+    _check_choices(data, "data")
     for k in ("input_path", "feature_priors", "mapping_file", "share_file",
               "pre_model_dir"):
         if data.get(k):
@@ -361,7 +435,64 @@ def load_settings(path: str, features=None) -> Settings:
             block["features"] = list(features or [])
         built[key] = cls(**block)
 
-    return Settings(data=data, source_path=os.path.abspath(path), **built)
+    return Settings(data=data, source_path=source_path, **built)
+
+
+# --------------------------------------------------------------------------- #
+# the schema: what a UI needs to draw one widget per key
+# --------------------------------------------------------------------------- #
+_ANNOTATION_KIND = {
+    "bool": "bool", "int": "int", "float": "float", "str": "str",
+    "dict": "mapping",
+    "int|None": "int_or_null", "float|None": "float_or_null",
+    "str|None": "str_or_null",
+}
+
+
+def _field_default(f):
+    if f.default is not dataclasses.MISSING:
+        return f.default
+    if f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
+        return f.default_factory()                     # type: ignore[misc]
+    return None
+
+
+def section_defaults(section: str) -> dict:
+    """{key: default} for one section, in template order."""
+    if section == "data":
+        return dict(DEFAULT_DATA)
+    return {f.name: _field_default(f)
+            for f in _settable(SECTIONS[section], section)}
+
+
+def config_schema() -> list[dict]:
+    """One row per settable key, in the order the YAML template writes them:
+
+        section, key, kind, default, choices, help
+
+    `kind` is choice | bool | int | float | str | mapping | int_or_null |
+    float_or_null | str_or_null | path. A choice's allowed values come from
+    CHOICES; everything else from the dataclass annotation, so a key added to
+    a config dataclass shows up here - and in any UI built from it - with no
+    other change.
+    """
+    rows = []
+    for section in ("data",) + tuple(SECTIONS):
+        help_for = HELP.get(section, {})
+        if section == "data":
+            items = [(k, DATA_KINDS[k], DEFAULT_DATA[k]) for k in DATA_KEYS]
+        else:
+            items = [(f.name, _ANNOTATION_KIND.get(str(f.type).replace(" ", ""),
+                                                   "str"), _field_default(f))
+                     for f in _settable(SECTIONS[section], section)]
+        for key, kind, default in items:
+            choices = CHOICES.get(f"{section}.{key}")
+            rows.append({"section": section, "key": key,
+                         "kind": "choice" if choices else kind,
+                         "default": default,
+                         "choices": tuple(choices) if choices else None,
+                         "help": help_for.get(key, "")})
+    return rows
 
 
 # --------------------------------------------------------------------------- #
@@ -445,31 +576,80 @@ HEADER = """\
 """
 
 
-def default_settings_text() -> str:
-    """The annotated YAML template: every field, its default and one line of help."""
-    out = [HEADER]
-    blocks = [("data", DEFAULT_DATA, None)]
-    for key, cls in SECTIONS.items():
-        defaults = {}
-        for f in _settable(cls, key):
-            if f.default is not dataclasses.MISSING:
-                defaults[f.name] = f.default
-            elif f.default_factory is not dataclasses.MISSING:  # type: ignore[misc]
-                defaults[f.name] = f.default_factory()          # type: ignore[misc]
-        blocks.append((key, defaults, cls))
+VALUES_HEADER = """\
+# ===========================================================================
+#  Codebase 1 - hierarchical MMM: run settings
+# ===========================================================================
+#  EVERY key is written, so this file never depends on the defaults. A value
+#  that differs from the codebase default says so at the end of its help
+#  line: "(default: x)".
+#
+#  Run it:
+#      from mmm.core.settings import run_from_yaml
+#      result = run_from_yaml("config.yaml")
+#
+#  A typo is an ERROR, not a silent default: an unknown key stops the run and
+#  names the closest valid spelling.
+#
+#  The FEATURES and their priors are not here - they live in the CSV named by
+#  data.feature_priors, because a per-feature prior table belongs in a table.
+#  See docs/TUNING_GUIDE.md for which knob to reach for in which situation.
+# ===========================================================================
+"""
 
-    for key, defaults, _cls in blocks:
+
+def _same_value(a, b) -> bool:
+    if isinstance(a, bool) or isinstance(b, bool):
+        return a is b
+    try:
+        return bool(a == b)
+    except Exception:  # noqa: BLE001 - unlike types are simply different
+        return False
+
+
+def settings_text(values: dict | None = None, header: str | None = None) -> str:
+    """The annotated YAML: every field, one line of help above it.
+
+    With no `values` this is the all-defaults template (`default_settings_text`).
+    With `values` ({section: {key: value}}) every key is STILL written - an
+    omitted key would fall back to the dataclass default, which is not what a
+    shipped config.yaml says - and each value that differs from the default
+    ends its help line with "(default: x)", so the file documents its own
+    deviations. Unknown sections or keys raise, exactly as the loader does.
+    """
+    if header is None:
+        header = HEADER if values is None else VALUES_HEADER
+    values = values or {}
+    if not isinstance(values, dict):
+        raise ValueError("values must be a mapping of sections, got "
+                         f"{type(values).__name__}")
+    _check_keys(values, set(SECTIONS) | {"data"}, "top level")
+
+    out = [header]
+    for key in ("data",) + tuple(SECTIONS):
+        defaults = section_defaults(key)
+        given = dict(values.get(key) or {})
+        _check_keys(given, set(defaults), key)
         out.append("")
         out.append("# " + "-" * 74)
         out.extend(_wrap_comment(SECTION_BLURB[key], 0))
         out.append("# " + "-" * 74)
         out.append(f"{key}:")
         help_for = HELP.get(key, {})
-        for name, value in defaults.items():
-            out.extend(_wrap_comment(help_for.get(name, "(undocumented)"), 2))
+        for name, default in defaults.items():
+            value = given.get(name, default)
+            text = help_for.get(name, "(undocumented)")
+            if name in given and not _same_value(value, default):
+                text += f" (default: {_yaml_scalar(default)})"
+            out.extend(_wrap_comment(text, 2))
             out.append(f"  {name}: {_yaml_scalar(value)}")
         out.append("")
     return "\n".join(out).rstrip() + "\n"
+
+
+def default_settings_text() -> str:
+    """The annotated YAML template: every field, its default and one line of help."""
+    return settings_text()
 
 
 def write_default_yaml(path: str) -> str:

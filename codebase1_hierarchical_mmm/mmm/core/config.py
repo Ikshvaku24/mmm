@@ -69,7 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.24"   # must equal mmm.__version__
+__codebase__ = "2026.09.29"   # must equal mmm.__version__
 
 import math
 import warnings
@@ -103,6 +103,22 @@ BUCKET_ORDER = ["hpos", "hneg", "hfree",
 # Period cadence: one knob for every "how many periods?" number in the pipeline
 # ---------------------------------------------------------------------------
 VALID_CADENCE = ("auto", "weekly", "monthly")
+
+# Every other enumerated setting, named once. The checks in the dataclasses
+# below and the config front end (`settings.CHOICES`, which drives the web
+# app's dropdowns) read the SAME tuple, so a dropdown can never offer a value
+# the dataclass would reject.
+VALID_LIKELIHOOD = ("normal", "student_t")
+VALID_SAMPLER = ("numpyro", "pymc", "advi")
+VALID_CHAIN_METHOD = ("sequential", "parallel", "vectorized")
+VALID_SCOPE = ("region", "global")
+VALID_WINDOW = ("train", "full")
+VALID_ON_FAILURE = ("warn", "fail")
+VALID_PERIOD_SPLIT = ("none", "week", "year", "mat")
+# the pre-model step's two (data.dv_aggregation, data.national_basis);
+# mmm.data.prior_builder imports them from here
+VALID_DV_AGG = ("mean", "sum", "median")
+VALID_NATIONAL_BASIS = ("average", "weighted")
 
 # every parameter the region-intercept block creates, in one place, so the
 # reporting switch and the model builder cannot drift apart
@@ -874,7 +890,7 @@ class ModelConfig:
         names = [s.name for s in self.features]
         if len(names) != len(set(names)):
             raise ValueError("duplicate feature names in config")
-        if self.likelihood not in {"normal", "student_t"}:
+        if self.likelihood not in VALID_LIKELIHOOD:
             raise ValueError("likelihood must be 'normal' or 'student_t'")
         if self.fourier_order < 0:
             raise ValueError("fourier_order must be >= 0")
@@ -905,9 +921,9 @@ class SamplerConfig:
                                           # slow default sampler
 
     def __post_init__(self):
-        if self.sampler not in {"numpyro", "pymc", "advi"}:
+        if self.sampler not in VALID_SAMPLER:
             raise ValueError("sampler must be 'numpyro', 'pymc', or 'advi'")
-        if self.chain_method not in {"sequential", "parallel", "vectorized"}:
+        if self.chain_method not in VALID_CHAIN_METHOD:
             raise ValueError(
                 "chain_method must be 'sequential', 'parallel', or 'vectorized'")
         if self.draws <= 0 or self.chains <= 0 or self.tune < 0:
@@ -1000,10 +1016,10 @@ class RunConfig:
             raise ValueError(f"dv_center must be one of {VALID_CENTER}")
         if self.dv_scale not in VALID_SCALE:
             raise ValueError(f"dv_scale must be one of {VALID_SCALE}. " + SCALE_HELP)
-        if self.dv_scale_scope not in {"region", "global"}:
+        if self.dv_scale_scope not in VALID_SCOPE:
             raise ValueError("dv_scale_scope must be 'region' or 'global'")
         self.scaling_window = str(self.scaling_window or "train").strip().lower()
-        if self.scaling_window not in {"train", "full"}:
+        if self.scaling_window not in VALID_WINDOW:
             raise ValueError("scaling_window must be 'train' or 'full', got "
                              f"{self.scaling_window!r}")
         self.cadence = str(self.cadence or "auto").strip().lower()
@@ -1023,7 +1039,7 @@ class RunConfig:
                     f"holdout_fraction={self.holdout_fraction} are both set. "
                     "The absolute count wins; the fraction is ignored. Set "
                     "holdout_periods=None to use the fraction.")
-        if self.on_convergence_failure not in {"warn", "fail"}:
+        if self.on_convergence_failure not in VALID_ON_FAILURE:
             raise ValueError("on_convergence_failure must be 'warn' or 'fail'")
         if self.zero_threshold_rel < 0:
             raise ValueError("zero_threshold_rel must be >= 0")
@@ -1156,7 +1172,7 @@ class OutputConfig:
               "benchmark_comparison", "contribution_plots")
 
     def __post_init__(self):
-        if self.period_split not in {"none", "week", "year", "mat"}:
+        if self.period_split not in VALID_PERIOD_SPLIT:
             raise ValueError(
                 "period_split must be 'none', 'week', 'year' or 'mat'")
         self.cadence = str(self.cadence or "auto").strip().lower()

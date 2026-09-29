@@ -105,7 +105,7 @@ falls out of the model.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.24"   # must equal mmm.__version__
+__codebase__ = "2026.09.29"   # must equal mmm.__version__
 
 import os
 import warnings
@@ -113,12 +113,12 @@ import warnings
 import numpy as np
 import pandas as pd
 
+from mmm.core.config import VALID_DV_AGG, VALID_NATIONAL_BASIS  # noqa: F401
 from mmm.data.mapping import (ALL_REGIONS, DATACUBE, PRIOR_FILE, _read_any,
                               _sniff, align_regions, check_names,
                               group_contributions, group_members,
                               has_contribution, is_dummy, load_mapping_table)
 
-VALID_DV_AGG = ("mean", "sum", "median")
 SECTIONS = ("media", "expert", "comp_media", "trade", "baseline")
 # sections whose variables are split by SPEND inside a pillar
 SPEND_SECTIONS = ("media", "expert")
@@ -355,9 +355,8 @@ def region_sales(df: pd.DataFrame, dv_col: str, region_col: str) -> pd.Series:
 
 
 # --------------------------------------------------------------------------- #
-# the shared averaging step
+# the shared averaging step (VALID_NATIONAL_BASIS lives in mmm.core.config)
 # --------------------------------------------------------------------------- #
-VALID_NATIONAL_BASIS = ("average", "weighted")
 
 
 def _average_over_supported(work: pd.DataFrame, key: str,

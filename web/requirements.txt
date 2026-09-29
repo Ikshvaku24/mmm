@@ -1,0 +1,11 @@
+streamlit~=1.54.0
+pandas~=2.2.3
+azure-identity
+azure-storage-file-datalake
+azure-keyvault-secrets
+openpyxl
+databricks-sql-connector~=4.1.4
+seaborn~=0.13.2
+matplotlib~=3.7.2
+# codebase 1 (loaded live from the workspace) reads config.yaml with it
+pyyaml>=6.0

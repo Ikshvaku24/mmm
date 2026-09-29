@@ -3,3 +3,11 @@ __pycache__/
 tests
 CLAUDE.md
 codebase1_hierarchical_mmm/outputs
+
+# web app: the screenshots and OCR originals it was rebuilt from (reference only)
+web/_reference/
+# web app: run-time download scratch
+web/local/
+web/src/local/
+# Databricks CLI / VS Code extension state
+web/.databricks/

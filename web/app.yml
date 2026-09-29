@@ -1,0 +1,25 @@
+command: [
+  "streamlit",
+  "run",
+  "app.py"
+]
+
+env:
+  - name: CLIENT_ID
+    valueFrom: CLIENT_ID
+  - name: TENANT_ID
+    valueFrom: TENANT_ID
+  - name: CLIENT_SECRET
+    valueFrom: CLIENT_SECRET
+  - name: ACCOUNT_NAME
+    valueFrom: ACCOUNT_NAME
+  - name: FILE_SYSTEM
+    valueFrom: FILE_SYSTEM
+  - name: DATABRICKS_TOKEN
+    valueFrom: DATABRICKS_TOKEN
+  - name: MDR_JOB_ID
+    valueFrom: MDR_JOB_ID
+  - name: MAPPING_JOB_ID
+    valueFrom: MAPPING_JOB_ID
+  - name: FEASIBILITY_JOB_ID
+    valueFrom: FEASIBILITY_JOB_ID
