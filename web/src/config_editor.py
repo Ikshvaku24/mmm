@@ -151,6 +151,17 @@ def _set_config(values):
     _bump()
 
 
+def load_config(values):
+    """Replace every setting - e.g. with a reused run's config.yaml. The
+    widgets redraw with the new values; the base config stays the team's."""
+    _set_config(values)
+
+
+def job_owned_keys():
+    """'section.key' of the settings the job sets itself (paths, run name)."""
+    return set((get_schema() or {}).get("job_owned") or [])
+
+
 def _widget(row, value, base_value, key):
     """One widget for one config key; returns the (typed) value."""
     kind, name = row["kind"], row["key"]
@@ -238,10 +249,29 @@ def _changed_keys(values, base, job_owned):
     return out
 
 
+# settings other blocks read: changing one refreshes the whole page once
+# (the datacube check reads the column names, the prior generator the rest)
+WATCHED = (("run", "date_col"), ("run", "region_col"), ("run", "dv_col"),
+           ("data", "sheet"), ("data", "date_format"), ("run", "holdout_periods"),
+           ("run", "holdout_fraction"), ("run", "cadence"), ("run", "scaling_window"),
+           ("data", "dv_aggregation"), ("data", "national_basis"))
+
+
+def _watched(values):
+    return tuple((values.get(s) or {}).get(k) for s, k in WATCHED)
+
+
 def render_settings_section():
     """The Model settings block. Returns (config dict or None, is_valid)."""
+    _settings_fragment()
+    return st.session_state.get("cfg_values"), bool(st.session_state.get("cfg_valid"))
+
+
+@st.fragment
+def _settings_fragment():
+    """A fragment: editing a setting refreshes this block only, not the page."""
     with st.container(border=True):
-        st.markdown("### Model settings")
+        st.markdown("### ③ Model settings")
         st.caption("codebase 1's config.yaml. Dropdowns list the values codebase 1 "
                    "accepts; hover a setting for its help. This exact file is sent "
                    "with the run.")
@@ -249,12 +279,12 @@ def render_settings_section():
             st.error("Model settings are unavailable until codebase 1 loads (see the "
                      "message at the top).")
             st.session_state["cfg_valid"] = False
-            return None, False
+            return
         schema = get_schema()
         if schema is None:
             st.error("Could not read codebase 1's settings schema.")
             st.session_state["cfg_valid"] = False
-            return None, False
+            return
         for err in st.session_state.get("cfg_base_error") or []:
             st.warning("The backend's config.yaml could not be read, so these start "
                        f"from the codebase defaults: {err}")
@@ -263,11 +293,15 @@ def render_settings_section():
         base = st.session_state["cfg_base"]
         version = st.session_state.get("cfg_version", 0)
         job_owned = set(schema["job_owned"])
+        watched_before = _watched(values)
+        valid_before = st.session_state.get("cfg_valid")
         rows_by = {}
         for row in schema["rows"]:
             rows_by.setdefault(row["section"], []).append(row)
 
-        with st.expander("Edit settings", expanded=False):
+        # The widgets are only drawn while the editor is open - about a hundred
+        # of them, which every page refresh would otherwise redraw.
+        if st.toggle("Edit settings", key="cfg_editor_open"):
             order = [s for s in TAB_ORDER if s in rows_by] + [
                 s for s in rows_by if s not in TAB_ORDER]
             tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order])
@@ -279,42 +313,32 @@ def render_settings_section():
                     _render_section(section, rows_by[section], values, base,
                                     job_owned, version)
 
-            st.markdown("---")
-            up_col, dl_col, reset_col = st.columns([2, 1, 1], vertical_alignment="bottom")
-            with up_col:
-                uploaded = st.file_uploader("Load a config.yaml", type=["yaml", "yml"],
-                                            key=f"cfg_upload_{version}")
-                if uploaded is not None:
-                    parsed = codebase.parse_config_yaml(
-                        uploaded.getvalue().decode("utf-8-sig", errors="replace"))
-                    if parsed.ok:
-                        _set_config(parsed.value)
-                        st.rerun()
-                    for err in parsed.errors:
-                        st.error(err)
-            text = codebase.config_yaml(values)
-            with dl_col:
-                st.download_button("Download config.yaml",
-                                   data=(text.value or "").encode("utf-8"),
-                                   file_name="config.yaml", mime="text/yaml",
-                                   disabled=not text.ok, key="cfg_download")
-            with reset_col:
-                if st.button("Reset to base", key="cfg_reset", type="secondary"):
-                    _set_config(base)
+        up_col, dl_col, reset_col = st.columns([2, 1, 1], vertical_alignment="bottom")
+        with up_col:
+            uploaded = st.file_uploader("Load a config.yaml", type=["yaml", "yml"],
+                                        key=f"cfg_upload_{version}",
+                                        help="Replaces every setting with the file's. "
+                                             "Keys the file leaves out take codebase 1's "
+                                             "defaults.")
+            if uploaded is not None:
+                parsed = codebase.parse_config_yaml(
+                    uploaded.getvalue().decode("utf-8-sig", errors="replace"))
+                if parsed.ok:
+                    _set_config(parsed.value)
                     st.rerun()
-
-            with st.expander("Paste a config.yaml (advanced)"):
-                pasted = st.text_area("Paste the YAML and press Apply",
-                                      key=f"cfg_paste_{version}", height=160)
-                if st.button("Apply", key=f"cfg_paste_apply_{version}"):
-                    parsed = codebase.parse_config_yaml(pasted)
-                    if parsed.ok:
-                        _set_config(parsed.value)
-                        st.rerun()
-                    for err in parsed.errors:
-                        st.error(err)
-            with st.expander("Preview the file the job will run"):
-                st.code(text.value or "\n".join(text.errors), language="yaml")
+                for err in parsed.errors:
+                    st.error(err)
+        text = codebase.config_yaml(values)
+        with dl_col:
+            st.download_button("Download config.yaml",
+                               data=(text.value or "").encode("utf-8"),
+                               file_name="config.yaml", mime="text/yaml",
+                               disabled=not text.ok, key="cfg_download",
+                               on_click="ignore")
+        with reset_col:
+            if st.button("Reset to base", key="cfg_reset", type="secondary"):
+                _set_config(base)
+                st.rerun()
 
         check = codebase.validate_config(values)
         st.session_state["cfg_valid"] = check.ok
@@ -343,4 +367,9 @@ def render_settings_section():
                     fixed["data"]["dv_aggregation"] = "mean"
                     _set_config(fixed)
                     st.rerun()
-    return values, check.ok
+
+        # the datacube check, the prior generator and the Run checklist read
+        # these - refresh the page once so they see the change
+        if _watched(values) != watched_before or (
+                valid_before is not None and valid_before != check.ok):
+            st.rerun()

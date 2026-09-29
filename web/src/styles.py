@@ -90,6 +90,24 @@ def inject_global_styles():
                 transform: translateY(-1px);
                 box-shadow: 0 10px 20px rgba(14, 62, 90, 0.2);
             }
+
+            /* No grey flash while the page refreshes. Streamlit dims "stale"
+               elements (element containers, expander and tab headers) to 33%
+               while a rerun is in flight; keep everything at full opacity. */
+            [data-stale="true"],
+            [data-testid="stExpander"] summary,
+            [data-baseweb="tab-list"],
+            [data-baseweb="tab"] {
+                opacity: 1 !important;
+                transition: none !important;
+            }
+
+            /* No "Running... Stop" badge on every click - the slow steps
+               (reading the datacube, generating priors, uploading, running)
+               show their own spinner instead. */
+            [data-testid="stStatusWidget"] {
+                visibility: hidden;
+            }
         </style>
         """
         ,

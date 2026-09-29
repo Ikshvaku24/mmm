@@ -1,8 +1,10 @@
+import functools
+import json
 import os
+import posixpath
 from azure.identity import ClientSecretCredential
-from azure.storage.filedatalake import DataLakeServiceClient, DataLakeFileClient
+from azure.storage.filedatalake import DataLakeServiceClient
 from datetime import datetime, timezone
-import streamlit as st
 import zipfile
 
 # Root folder inside the ADLS file system. The Databricks job reads the same
@@ -31,6 +33,39 @@ def _local_path(*parts):
     return os.path.join(LOCAL_STORAGE_DIR, *[p for part in parts for p in str(part).split("/") if p])
 
 
+@functools.lru_cache(maxsize=4)
+def _file_system_client(account_name, file_system, tenant_id, client_id, client_secret):
+    # one client (and one token) for the whole app, instead of a new login per
+    # file - listing a BMC's runs reads a few small files per run
+    credential = ClientSecretCredential(
+        tenant_id=tenant_id,
+        client_id=client_id,
+        client_secret=client_secret,
+    )
+    service_client = DataLakeServiceClient(
+        account_url=f"https://{account_name}.dfs.core.windows.net",
+        credential=credential,
+    )
+    return service_client.get_file_system_client(file_system)
+
+
+def _file_system():
+    return _file_system_client(
+        os.environ.get("ACCOUNT_NAME", "").strip(),
+        os.environ.get("FILE_SYSTEM", "").strip(),
+        os.environ.get("TENANT_ID", ""),
+        os.environ.get("CLIENT_ID", ""),
+        os.environ.get("CLIENT_SECRET", ""),
+    )
+
+
+def is_not_found(exc):
+    """True for 'this path does not exist' - from ADLS or the local folder."""
+    return (type(exc).__name__ in {"ResourceNotFoundError", "FileNotFoundError"}
+            or getattr(exc, "status_code", None) == 404
+            or "PathNotFound" in str(exc) or "BlobNotFound" in str(exc))
+
+
 def upload_to_adls(file_data, file_name, location_path):
     """Upload a file to ADLS Gen2 at {location_path}/{file_name}."""
     if LOCAL_STORAGE_DIR:
@@ -42,23 +77,8 @@ def upload_to_adls(file_data, file_name, location_path):
 
     account_name = os.environ.get("ACCOUNT_NAME", "").strip()
     file_system = os.environ.get("FILE_SYSTEM", "").strip()
-    client_id = os.environ.get("CLIENT_ID", "")
-    tenant_id = os.environ.get("TENANT_ID", "")
-    client_secret = os.environ.get("CLIENT_SECRET", "")
 
-    credential = ClientSecretCredential(
-        tenant_id=tenant_id,
-        client_id=client_id,
-        client_secret=client_secret,
-    )
-
-    service_client = DataLakeServiceClient(
-        account_url=f"https://{account_name}.dfs.core.windows.net",
-        credential=credential,
-    )
-
-    file_system_client = service_client.get_file_system_client(file_system)
-    directory_client = file_system_client.get_directory_client(location_path)
+    directory_client = _file_system().get_directory_client(location_path)
     file_client = directory_client.get_file_client(file_name)
     file_client.upload_data(file_data, overwrite=True)
 
@@ -70,24 +90,72 @@ def download_from_adls(file_path):
         with open(_local_path(file_path), "rb") as f:
             return f.read()
 
-    account_name = os.environ.get("ACCOUNT_NAME", "").strip()
-    file_system = os.environ.get("FILE_SYSTEM", "").strip()
-    client_id = os.environ.get("CLIENT_ID", "")
-    tenant_id = os.environ.get("TENANT_ID", "")
-    client_secret = os.environ.get("CLIENT_SECRET", "")
-    credential = ClientSecretCredential(
-        tenant_id=tenant_id, client_id=client_id, client_secret=client_secret
-    )
-
-    file_client = DataLakeFileClient(
-        account_url=f"https://{account_name}.dfs.core.windows.net",
-        file_system_name=file_system,
-        file_path=file_path,
-        credential=credential,
-    )
+    file_client = _file_system().get_file_client(file_path)
     download = file_client.download_file()
     file_bytes = download.readall()
     return file_bytes
+
+
+def read_json(file_path):
+    """A small JSON file as a dict - None when it does not exist."""
+    try:
+        data = json.loads(download_from_adls(file_path).decode("utf-8"))
+    except Exception as e:
+        if is_not_found(e):
+            return None
+        raise
+    return data if isinstance(data, dict) else None
+
+
+def write_json(obj, file_name, location_path):
+    return upload_to_adls(json.dumps(obj, indent=2, default=str).encode("utf-8"),
+                          file_name, location_path)
+
+
+def list_dir(folder_path):
+    """The folder's direct children as (name, is_folder), sorted; [] when the
+    folder does not exist."""
+    if LOCAL_STORAGE_DIR:
+        path = _local_path(folder_path)
+        if not os.path.isdir(path):
+            return []
+        return sorted((e.name, e.is_dir()) for e in os.scandir(path))
+    try:
+        paths = list(_file_system().get_paths(path=folder_path, recursive=False))
+    except Exception as e:
+        if is_not_found(e):
+            return []
+        raise
+    return sorted((posixpath.basename(p.name.rstrip("/")), bool(p.is_directory))
+                  for p in paths)
+
+
+def list_tree(folder_path):
+    """Every file below the folder, as paths relative to it (sorted); [] when
+    the folder does not exist."""
+    if LOCAL_STORAGE_DIR:
+        src = _local_path(folder_path)
+        out = []
+        for root, _dirs, files in os.walk(src):
+            for f in files:
+                out.append(os.path.relpath(os.path.join(root, f), src).replace(os.sep, "/"))
+        return sorted(out)
+    try:
+        paths = list(_file_system().get_paths(path=folder_path, recursive=True))
+    except Exception as e:
+        if is_not_found(e):
+            return []
+        raise
+    prefix = folder_path.rstrip("/") + "/"
+    return sorted(p.name[len(prefix):] if p.name.startswith(prefix) else p.name
+                  for p in paths if not p.is_directory)
+
+
+def path_exists(path):
+    """Does this file or folder exist?"""
+    if LOCAL_STORAGE_DIR:
+        return os.path.exists(_local_path(path))
+    return bool(_file_system().get_directory_client(path).exists())
 
 
 def download_folder(folder_path, local_folder, exclude=()):
@@ -116,21 +184,7 @@ def download_folder(folder_path, local_folder, exclude=()):
             raise FileNotFoundError(f"No files found under {folder_path}")
         return count
 
-    account_name = os.environ.get("ACCOUNT_NAME", "").strip()
-    file_system = os.environ.get("FILE_SYSTEM", "").strip()
-
-    credential = ClientSecretCredential(
-        tenant_id=os.environ.get("TENANT_ID", ""),
-        client_id=os.environ.get("CLIENT_ID", ""),
-        client_secret=os.environ.get("CLIENT_SECRET", ""),
-    )
-
-    service_client = DataLakeServiceClient(
-        account_url=f"https://{account_name}.dfs.core.windows.net",
-        credential=credential,
-    )
-
-    fs_client = service_client.get_file_system_client(file_system)
+    fs_client = _file_system()
 
     paths = fs_client.get_paths(path=folder_path)
 

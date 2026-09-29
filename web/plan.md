@@ -15,6 +15,28 @@
 >   Workspace/Jobs API (`tests/test_v20_web_app.py`), plus an end-to-end UI run
 >   (`tests/test_v21_web_ui_smoke.py`).
 >
+> **Second revision, after the first deployment (2026-09-29, "issues-1").** These parts of the
+> plan below are replaced:
+> - The status popup and the "previous-run outputs" viewer are replaced by a run panel that stays
+>   on the page (status, Cancel, results, job log, zip) and a **Runs** list (`src/runs.py`).
+> - "Use national / Use regional" is replaced by three steps: Generate (the case is shown
+>   first), Download and fill in, Upload.
+> - The datacube check shows errors only. The dust and constant-column warnings are left to the
+>   run's `00_warnings`.
+> - The config editor's paste box and YAML preview are removed.
+> - Every block is a Streamlit fragment, so the page no longer greys out.
+>
+> What changed and why: `web/changes.md`, "Update 1 - after the first deployment".
+>
+> **Third revision (2026-09-29, "issues-2").** Storage is now one folder per run,
+> `Secondary Modelling/<BMC>/<run name>/` (Config/ Data/ Prior/ [Mapping/ Share/] Outputs/ and
+> `run_request.json`). This replaces the "Upload to ADLS" buttons of the plan below: at the
+> user's choice, Run Model saves all the files. Any run's inputs can be reused; Run Model asks
+> first when nothing changed; the run's zip holds its inputs and outputs. The job gets
+> `bmc_name` / `run_name` (codebase 1 2026.09.29.2). The prior editor gets "Paste cells from
+> Excel", because the grid's own Ctrl+V needs the browser's clipboard-read permission. See
+> `web/changes.md`, "Update 2".
+>
 > What was built, and the Databricks setup steps: `web/README.md`.
 
 ## Context

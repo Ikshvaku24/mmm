@@ -1,27 +1,38 @@
+import copy
 import hashlib
-import json
 import os
-import shutil
 import time
 import uuid
+from datetime import datetime, timedelta, timezone
+
 import pandas as pd
 import streamlit as st
-from src import codebase
-from src.app_functions import (adls_folder, prepare_prior_table,
-                               read_file_bytes_as_table, show_prior_validation,
-                               upload_active_prior, validate_prior)
+from src import codebase, projects
+from src.app_functions import (prepare_prior_table, read_file_bytes_as_table,
+                               read_uploaded_file_as_table, show_prior_file_popup,
+                               show_prior_validation, validate_prior)
 from src.clusters import get_cluster_status, start_cluster
-from src.config_editor import init_config_state, live_config, render_settings_section
-from src.files import adls_dir, download_folder, unique_name, upload_to_adls, zip_folder
+from src.config_editor import (init_config_state, job_owned_keys, live_config, load_config,
+                               render_settings_section)
 from src.generate_prior import generate_prior
-from src.jobs import cancel_run, get_run_output, get_run_status, run_model_job
-from src.validation import validate_input_data
+from src.jobs import job_parameter_names, run_model_job
+from src.runs import (fetch_run, job_params, job_state_label, local_time, render_run_panel,
+                      render_runs_section, render_warnings_table)
+from src.validation import show_input_check, validate_input_data
 
 uuid = str(uuid.uuid4())
 
-# Jobs API life-cycle states that mean "finished, one way or another"
-TERMINAL_STATES = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
-DONE_RESULTS = {"SUCCESS", "FAILED", "CANCELED", "TIMEDOUT", "UPSTREAM_FAILED"}
+# How the page stays smooth: every block below is an st.fragment, so a click
+# or an upload inside it refreshes that block only. A block refreshes the
+# WHOLE page (st.rerun()) only when it changed something another block reads
+# - the BMC or run name, a new datacube, a new prior file, a reused run - never
+# on ordinary clicks.
+#
+# Where files go: nothing is uploaded block by block any more. Run Model saves
+# the datacube, the settings, the prior file (and mapping/share files) into
+# the run's own folder, Secondary Modelling/<BMC>/<run name>/, then starts the
+# job (see projects.py). Every file on the page came either from an upload box
+# ("upload") or from a reused run (its label) - the "origin".
 
 
 def get_run_id_from_response(response):
@@ -30,333 +41,55 @@ def get_run_id_from_response(response):
     return response.get("run_id") or response.get("runId") or response.get("runID")
 
 
-def _run_output(run_id):
-    """The notebook's exit JSON or its error, fetched once per run."""
-    key = f"run_output_{run_id}"
-    if key not in st.session_state:
-        try:
-            st.session_state[key] = get_run_output(run_id)
-        except Exception as e:
-            st.session_state[key] = {"error": f"Could not read the run output: {e}"}
-    return st.session_state[key] or {}
+def _sha(data):
+    return hashlib.sha1(data).hexdigest()
 
 
-def _render_run_result(run_id, workflow_state, result_state):
-    """Success: which codebase ran. Failure: the notebook's own error."""
-    if result_state == "SUCCESS":
-        output = _run_output(run_id)
-        try:
-            info = json.loads((output.get("notebook_output") or {}).get("result") or "{}")
-        except (TypeError, ValueError):
-            info = {}
-        if info.get("codebase"):
-            app_version = codebase.status().get("version")
-            st.caption(f"Ran codebase 1 {info['codebase']} in {info.get('seconds', '?')} s; "
-                       f"outputs in {info.get('output_dir', '')}")
-            if app_version and app_version != info["codebase"]:
-                st.warning(f"The job ran codebase 1 {info['codebase']} but this app "
-                           f"loaded {app_version} - someone re-uploaded it in between. "
-                           "Press 'Reload codebase 1' and check the settings.")
-    elif workflow_state in TERMINAL_STATES or result_state in DONE_RESULTS:
-        output = _run_output(run_id)
-        error = output.get("error") or (output.get("metadata") or {}).get(
-            "state", {}).get("state_message")
-        if error:
-            st.error(f"The run stopped: {error}")
-        trace = output.get("error_trace")
-        if trace:
-            with st.expander("Error details"):
-                st.code("\n".join(str(trace).splitlines()[-40:]), language="text")
+def _user_email():
+    try:
+        return (getattr(st.context, "headers", None) or {}).get("X-Forwarded-Email", "") or ""
+    except Exception:
+        return ""
 
 
-def _render_output_download(run_id, include_trace):
-    tag = "trace" if include_trace else "notrace"
-    folder_path = f"{adls_dir(_output_folder())}/{run_id}"
-    summary_bytes_key = f"summary_download_bytes_{run_id}_{tag}"
-    summary_error_key = f"summary_download_error_{run_id}_{tag}"
-    summary_attempted_key = f"summary_download_attempted_{run_id}_{tag}"
-    if not st.session_state.get(summary_attempted_key, False):
-        st.session_state[summary_attempted_key] = True
-        try:
-            local_folder = os.path.join(".", "local", f"{run_id}_{tag}")
-            zip_path = os.path.join(".", "local", f"{run_id}_{tag}.zip")
-            shutil.rmtree(local_folder, ignore_errors=True)
-            download_folder(folder_path, local_folder,
-                            exclude=() if include_trace else ("trace.nc",))
-            zip_folder(local_folder, zip_path)
-            with open(zip_path, "rb") as f:
-                st.session_state[summary_bytes_key] = f.read()
-            shutil.rmtree(local_folder, ignore_errors=True)
-            os.remove(zip_path)
-            st.session_state.pop(summary_error_key, None)
-        except Exception as e:
-            st.session_state[summary_error_key] = str(e)
-    if st.session_state.get(summary_error_key):
-        st.error(f"Output download failed from ADLS: {st.session_state[summary_error_key]}")
-    elif st.session_state.get(summary_bytes_key):
-        st.download_button(
-            label="Download Folder",
-            data=st.session_state[summary_bytes_key],
-            file_name=f"{run_id}_outputs.zip",
-            mime="application/zip",
-            key=f"download_outputs_{run_id}_{tag}",
-        )
+def _now_local():
+    offset = getattr(st.context, "timezone_offset", None)
+    tz = timezone(-timedelta(minutes=offset)) if isinstance(offset, int) else timezone.utc
+    return datetime.now(tz)
 
 
-@st.fragment(run_every="5s")
-def render_run_status_section(run_id):
-    run_status_response = None
-    workflow_state = "N/A"
-    result_state = "N/A"
-    if run_id:
-        try:
-            run_status_response = get_run_status(run_id)
-            state = (
-                run_status_response.get("state", {})
-                if isinstance(run_status_response, dict)
-                else {}
-            )
-            workflow_state = state.get("life_cycle_state", "N/A")
-            result_state = state.get("result_state", "N/A")
-        except Exception as e:
-            st.warning(f"Unable to fetch run status: {e}")
-    st.session_state[f"_ws_{run_id}"] = workflow_state
-    st.session_state[f"_rs_{run_id}"] = result_state
-    st.markdown(
-        """
-        <style>
-            .run-status {
-                display: flex;
-                align-items: center;
-                gap: 0.75rem;
-                padding: 0.75rem 0.9rem;
-                border-radius: 0.75rem;
-                background: rgba(15, 23, 42, 0.04);
-                margin: 0.75rem 0 1rem 0;
-            }
-            .run-status-icon {
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                width: 1.3rem;
-                height: 1.3rem;
-                flex: 0 0 auto;
-            }
-            .run-status-spinner {
-                width: 1.05rem;
-                height: 1.05rem;
-                border: 0.18rem solid rgba(34, 197, 94, 0.20);
-                border-top-color: #16a34a;
-                border-radius: 50%;
-                animation: run-status-spin 0.9s linear infinite;
-            }
-            .run-status-success,
-            .run-status-terminated {
-                font-size: 1.15rem;
-                font-weight: 700;
-                line-height: 1;
-            }
-            .run-status-success {
-                color: #16a34a;
-            }
-            .run-status-terminated {
-                color: #dc2626;
-            }
-            .run-status-text {
-                font-size: 0.98rem;
-                color: #0f172a;
-            }
-            .run-status-dots span {
-                display: inline-block;
-                color: #475569;
-                animation: run-status-dots 1.4s infinite ease-in-out;
-            }
-            .run-status-dots span:nth-child(2) {
-                animation-delay: 0.2s;
-            }
-            .run-status-dots span:nth-child(3) {
-                animation-delay: 0.4s;
-            }
-            div[data-testid="stDownloadButton"] > button {
-                background-color: #16a34a !important;
-                color: #ffffff !important;
-                border: 1px solid #15803d !important;
-            }
-            div[data-testid="stDownloadButton"] > button:hover {
-                background-color: #15803d !important;
-                border-color: #166534 !important;
-                color: #ffffff !important;
-            }
-            @keyframes run-status-spin {
-                from { transform: rotate(0deg); }
-                to { transform: rotate(360deg); }
-            }
-            @keyframes run-status-dots {
-                0%, 80%, 100% { opacity: 0.2; transform: translateY(0); }
-                40% { opacity: 1; transform: translateY(-2px); }
-            }
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-    status_markup = None
-    if workflow_state in {"PENDING", "QUEUED", "BLOCKED", "WAITING_FOR_RETRY"}:
-        status_markup = """
-            <div class="run-status">
-                <span class="run-status-icon run-status-dots"><span>.</span><span>.</span><span>.</span></span>
-                <span class="run-status-text">Pending</span>
-            </div>
-            """
-    elif workflow_state in {"RUNNING", "TERMINATING"}:
-        status_markup = f"""
-            <div class="run-status">
-                <span class="run-status-icon"><span class="run-status-spinner"></span></span>
-                <span class="run-status-text">{workflow_state.title()}</span>
-            </div>
-            """
-    elif result_state == "SUCCESS":
-        status_markup = """
-            <div class="run-status">
-                <span class="run-status-icon run-status-success">&#10003;</span>
-                <span class="run-status-text">Success</span>
-            </div>
-            """
-    elif workflow_state in TERMINAL_STATES:
-        label = str(result_state).title() if result_state not in ("N/A", None) else "Terminated"
-        status_markup = f"""
-            <div class="run-status">
-                <span class="run-status-icon run-status-terminated">&#10005;</span>
-                <span class="run-status-text">{label}</span>
-            </div>
-            """
-    elif workflow_state != "N/A":
-        status_markup = f"""
-            <div class="run-status">
-                <span class="run-status-text">Workflow state: {workflow_state}</span>
-            </div>
-            """
-    if status_markup:
-        st.markdown(status_markup, unsafe_allow_html=True)
-    if workflow_state != "N/A" or result_state != "N/A":
-        st.caption(f"Workflow state: {workflow_state} | Result state: {result_state}")
-    if run_id:
-        _render_run_result(run_id, workflow_state, result_state)
-        done = workflow_state in TERMINAL_STATES or result_state in DONE_RESULTS
-        button_col_cancel, button_col_download = st.columns(2)
-        cancel_clicked_once = st.session_state.get("cancel_run_clicked_once", False)
-        with button_col_cancel:
-            if st.button(
-                "Cancel Run",
-                type="secondary",
-                key="cancel_run_button",
-                disabled=cancel_clicked_once or done,
-            ):
-                st.session_state["cancel_run_clicked_once"] = True
-                try:
-                    cancel_response = cancel_run(run_id)
-                    if cancel_response.ok:
-                        st.success(f"Cancel request submitted for run_id: {run_id}")
-                        try:
-                            st.session_state["cancel_run_response"] = (
-                                cancel_response.json()
-                            )
-                        except Exception:
-                            st.session_state["cancel_run_response"] = {
-                                "status_code": cancel_response.status_code
-                            }
-                    else:
-                        st.error(
-                            f"Failed to cancel run_id {run_id}. Status code: {cancel_response.status_code}"
-                        )
-                except Exception as e:
-                    st.error(f"Cancel request failed: {e}")
-
-        with button_col_download:
-            if done:
-                # a failed run publishes what it wrote too - its 00_warnings
-                # usually says why it failed
-                include_trace = st.checkbox(
-                    "Include trace.nc", key=f"include_trace_{run_id}",
-                    help="The raw posterior (all draws) - large. Off by default.")
-                _render_output_download(run_id, include_trace)
-        if st.session_state.get("cancel_run_clicked_once"):
-            st.caption("Cancel already requested for this run.")
-    if st.session_state.get("cancel_run_response"):
-        st.caption("Cancel response")
-        st.json(st.session_state["cancel_run_response"])
+def _csv_file_name(name):
+    stem = str(name or "feature_priors").rsplit(".", 1)[0]
+    return f"{stem}.csv"
 
 
-@st.fragment(run_every="1s")
-def render_elapsed_timer(run_id):
-    start = st.session_state.get("run_start_time")
-    if start is None:
-        return
-    workflow_state = st.session_state.get(f"_ws_{run_id}", "N/A")
-    result_state = st.session_state.get(f"_rs_{run_id}", "N/A")
-    cancelled = st.session_state.get("cancel_run_clicked_once", False)
-    is_done = result_state in DONE_RESULTS or workflow_state in TERMINAL_STATES or cancelled
-    if is_done:
-        end = st.session_state.get(f"_run_end_{run_id}")
-        if end is None:
-            end = time.time()
-            st.session_state[f"_run_end_{run_id}"] = end
-        elapsed = int(end - start)
-        label = "Elapsed"
-    else:
-        elapsed = int(time.time() - start)
-        label = "Running"
-    mins, secs = divmod(elapsed, 60)
-    st.markdown(
-        f"""
-        <div style="font-size:0.85rem; color:#475569; margin: 0.25rem 0 0.5rem 0;">
-            &#9201; {label}: <strong>{mins:02d}:{secs:02d}</strong>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
+def _sentence(text):
+    """First letter up, the rest untouched (str.capitalize would lower-case a
+    BMC name inside the message)."""
+    text = str(text or "")
+    return text[:1].upper() + text[1:]
 
 
-@st.dialog("Model Run Response")
-def show_run_model_response_popup():
-    response = st.session_state.get("run_model_response")
-    run_id = st.session_state.get("current_run_id") or get_run_id_from_response(
-        response
-    )
-    if response is None:
-        st.info("No response available.")
-    elif run_id:
-        st.success(f"Model started. Run ID: {run_id}")
-    else:
-        st.error("Model run response did not include a run ID.")
-        st.json(response)
-    if run_id:
-        st.caption("Status refreshes automatically every 5 seconds.")
-        render_elapsed_timer(run_id)
-        render_run_status_section(run_id)
-    if st.button("Close", type="primary"):
-        st.session_state["show_run_model_response"] = False
-        st.session_state.pop("cancel_run_response", None)
-        st.session_state.pop("cancel_run_clicked_once", None)
-        st.session_state.pop("current_run_id", None)
-        st.session_state.pop("run_start_time", None)
-        st.session_state.pop(f"_ws_{run_id}", None)
-        st.session_state.pop(f"_rs_{run_id}", None)
-        st.session_state.pop(f"_run_end_{run_id}", None)
-        st.session_state.pop(f"run_output_{run_id}", None)
-        for tag in ("trace", "notrace"):
-            st.session_state.pop(f"summary_download_bytes_{run_id}_{tag}", None)
-            st.session_state.pop(f"summary_download_error_{run_id}_{tag}", None)
-            st.session_state.pop(f"summary_download_attempted_{run_id}_{tag}", None)
-        st.rerun()
+# --------------------------------------------------------------------------- #
+# header: cluster and backend status
+# --------------------------------------------------------------------------- #
+def _cluster_state():
+    """The cluster's state, reused for a few seconds so a page refresh does not
+    wait on the Clusters API (the badge still polls every 5 s on its own)."""
+    cached = st.session_state.get("_cluster_state")
+    if cached and time.time() - cached[0] < 4:
+        return cached[1]
+    try:
+        state = str(get_cluster_status() or "UNKNOWN").upper()
+    except Exception:
+        state = "UNKNOWN"
+    st.session_state["_cluster_state"] = (time.time(), state)
+    return state
 
 
 @st.fragment(run_every="5s")
 def render_cluster_status_controls():
-    try:
-        cluster_state = str(get_cluster_status() or "UNKNOWN").upper()
-    except Exception:
-        cluster_state = "UNKNOWN"
+    cluster_state = _cluster_state()
     cluster_state_color = {
         "TERMINATED": "#dc2626",
         "PENDING": "#eab308",
@@ -456,14 +189,6 @@ def render_cluster_status_controls():
         )
 
 
-# --------------------------------------------------------------------------- #
-# the backend (codebase 1, loaded live from the workspace)
-# --------------------------------------------------------------------------- #
-def _output_folder():
-    from src.config_editor import get_schema
-    return (get_schema() or {}).get("output_folder", "Outputs")
-
-
 def render_backend_status():
     status = codebase.status()
     if status.get("ok"):
@@ -486,97 +211,331 @@ def render_backend_status():
 
 
 # --------------------------------------------------------------------------- #
-# 1. input data
+# 1. BMC and run - where the run is saved, and the BMC's earlier runs
 # --------------------------------------------------------------------------- #
-def _sha(data):
-    return hashlib.sha1(data).hexdigest()
+def _bmc_options():
+    """The BMC folders (re-listed every minute)."""
+    ss = st.session_state
+    cached = ss.get("bmc_list")
+    if cached and time.time() - cached[0] < 60:
+        return cached[1], None
+    try:
+        names = projects.list_bmcs()
+    except Exception as e:
+        return (cached[1] if cached else []), f"Could not list the BMC folders: {e}"
+    ss["bmc_list"] = (time.time(), names)
+    return names, None
+
+
+def _bmc_runs(bmc, force=False):
+    """(runs, read errors) of a BMC, newest first (kept for 30 s)."""
+    ss = st.session_state
+    cached = ss.get("bmc_runs")
+    if not force and cached and cached[0] == bmc and time.time() - cached[1] < 30:
+        return cached[2], cached[3]
+    try:
+        rows, errors = projects.list_runs(bmc, cache=ss.setdefault("run_json_cache", {}),
+                                          job_state=job_state_label)
+    except Exception as e:
+        return [], [f"Could not list the runs of {bmc}: {e}"]
+    ss["bmc_runs"] = (bmc, time.time(), rows, errors)
+    return rows, errors
+
+
+def _forget_bmc_runs():
+    st.session_state.pop("bmc_runs", None)
+    st.session_state.pop("bmc_list", None)
+
+
+def _run_target():
+    """(bmc, run name, problem or None) for the run about to be started."""
+    ss = st.session_state
+    bmc = str(ss.get("bmc_name") or "").strip()
+    run = str(ss.get("new_run_name") or "")
+    if not bmc:
+        return bmc, run, "choose or type a BMC name in ①"
+    problem = projects.bmc_problem(bmc) or projects.name_problem(run, "run name")
+    if problem:
+        return bmc, run, problem
+    if run in {r["run"] for r in _bmc_runs(bmc)[0]}:
+        return bmc, run, f"'{run}' already exists in {bmc} - choose another run name"
+    return bmc, run, None
+
+
+@st.fragment
+def _project_fragment():
+    ss = st.session_state
+    # values chosen by "Reuse inputs" or by a run that just started - set
+    # before the widgets exist (a widget's value cannot change afterwards)
+    for key in ("bmc_name", "new_run_name"):
+        pending = ss.pop(f"_pending_{key}", None)
+        if pending is not None:
+            ss[key] = pending
+            ss["_project_sig"] = None
+    if "new_run_name" not in ss:
+        ss["new_run_name"] = projects.default_run_name(_now_local())
+
+    with st.container(border=True):
+        bmc, run, problem = _run_target()
+        st.markdown("### ① BMC and run" + ("" if problem else " ✅"))
+        st.caption("Every run is saved in its own folder, Secondary Modelling/<BMC>/<run "
+                   "name>/, with the inputs it used and its outputs. Pick a BMC to see its "
+                   "runs - and reuse one's inputs to change them and run again.")
+        options, list_problem = _bmc_options()
+        current = ss.get("bmc_name")
+        if current and current not in options:
+            options = [current] + options
+        left, right = st.columns(2)
+        with left:
+            st.selectbox("BMC name", options, index=None, key="bmc_name",
+                         accept_new_options=True,
+                         placeholder="Choose a BMC, or type a new name",
+                         help="A folder under Secondary Modelling. Type a new name to start "
+                              "a new BMC - its folder is created with the first run.")
+        with right:
+            st.text_input("New run name", key="new_run_name",
+                          help="The run's folder inside the BMC. Letters, digits, spaces, "
+                               "_ - and . - and not the name of an earlier run.")
+        if list_problem:
+            st.warning(list_problem)
+        bmc, run, problem = _run_target()
+        if problem and bmc:
+            st.error(_sentence(problem))
+        elif not problem:
+            st.caption(f"This run will be saved in **Secondary Modelling/{bmc}/{run}/**.")
+
+        # the Run block reads the BMC and the run name: refresh the page once
+        signature = (bmc, run)
+        before = ss.get("_project_sig")
+        ss["_project_sig"] = signature
+        if before is not None and before != signature:
+            st.rerun()
+
+        for note in ss.pop("reuse_notes", None) or []:
+            st.info(note)
+        if not bmc or projects.bmc_problem(bmc):
+            return
+        _render_bmc_runs(bmc)
+
+
+def _render_bmc_runs(bmc):
+    rows, errors = _bmc_runs(bmc)
+    head, refresh = st.columns([5, 1], vertical_alignment="center")
+    with head:
+        st.markdown(f"**Runs in {bmc}**")
+    with refresh:
+        if st.button("Refresh", key="bmc_runs_refresh",
+                     help="List the BMC's runs again (their status too)."):
+            _bmc_runs(bmc, force=True)
+            st.rerun(scope="fragment")
+    for error in errors[:3]:
+        st.warning(error)
+    if not rows:
+        st.caption(f"No runs in {bmc} yet - this run will be its first.")
+        return
+    table = pd.DataFrame([{
+        "run": r["run"],
+        "status": r["status"],
+        "submitted": local_time(r["submitted_ms"]),
+        "by": r["submitted_by"],
+        "reused from": r["source"],
+        "changed": ", ".join(r["changed"]),
+    } for r in rows])
+    event = st.dataframe(table, use_container_width=True, hide_index=True,
+                         on_select="rerun", selection_mode="single-row",
+                         key=f"bmc_runs_table_{_sha(bmc.encode())[:8]}")
+    picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if not picked:
+        st.caption("Select a run to see its results, job log and zip - or to reuse its inputs.")
+        return
+    chosen = rows[picked[0]]
+    render_run_panel(projects.make_ref(chosen["job_run_id"], bmc, chosen["run"]), "bmc",
+                     on_reuse=reuse_run)
+
+
+def _fingerprints():
+    """What the run would use - to tell whether anything changed since the
+    run the inputs came from."""
+    ss = st.session_state
+    return {"data_file": projects.sha(ss.get("datacube_bytes")),
+            "prior_file": projects.prior_signature(ss.get("prior_working_table")),
+            "mapping_file": projects.sha(ss.get("mapping_bytes")) if ss.get("mapping_bytes") else "",
+            "share_file": projects.sha(ss.get("share_bytes")) if ss.get("share_bytes") else ""}
+
+
+def _remember_source(ref, label):
+    st.session_state["source_run"] = {
+        "ref": dict(ref), "label": label, "fingerprints": _fingerprints(),
+        "config": copy.deepcopy(st.session_state.get("cfg_values") or {})}
+
+
+def _changes_since_source():
+    """(source label, [what changed], [settings changes]) - None without a source."""
+    ss = st.session_state
+    src = ss.get("source_run")
+    if not src:
+        return None
+    now = _fingerprints()
+    items = [projects.KIND_LABELS[k] for k in ("data_file", "prior_file", "mapping_file",
+                                                "share_file")
+             if now[k] != (src.get("fingerprints") or {}).get(k, "")]
+    settings = projects.config_diff(src.get("config"), ss.get("cfg_values") or {},
+                                    skip=job_owned_keys())
+    if settings:
+        items.insert(0, f"settings ({len(settings)})")
+    return src["label"], items, settings
+
+
+def reuse_run(ref):
+    """Load a run's datacube, settings, prior file (and mapping/share files)
+    into the page - to edit and run again as a NEW run."""
+    ss = st.session_state
+    label = projects.ref_label(ref)
+    with st.spinner(f"Loading the inputs of {label} ..."):
+        try:
+            if projects.has_folder(ref):
+                paths = projects.run_inputs(ref, request=projects.read_request(ref["bmc"], ref["run"]))
+            else:
+                paths = projects.run_inputs(ref, job_params=job_params(fetch_run(ref.get("job_run_id"))))
+            got, errors = projects.fetch_files(paths)
+        except Exception as e:
+            st.error(f"Could not read the inputs of {label}: {e}")
+            return
+    missing = [projects.KIND_LABELS[k] for k in ("data_file", "prior_file") if k not in got]
+    if missing:
+        st.error(f"{label} has no {' or '.join(missing)} to reuse"
+                 + (f" ({'; '.join(errors.values())})" if errors else "") + ".")
+        return
+    notes = []
+    # the settings first: the datacube is read with their column names
+    if "config_file" in got:
+        parsed = codebase.parse_config_yaml(
+            got["config_file"][1].decode("utf-8-sig", errors="replace"))
+        if parsed.ok:
+            load_config(parsed.value)
+        else:
+            notes.append(f"The settings of {label} could not be read ("
+                         + "; ".join(parsed.errors) + ") - the current settings are kept.")
+    else:
+        notes.append(f"{label} has no settings file - the current settings are kept.")
+    cfg = ss.get("cfg_values") or {}
+    name, data = got["data_file"]
+    _load_datacube(data, name, cfg, origin=label)
+    name, data = got["prior_file"]
+    table, error = read_file_bytes_as_table(data, name)
+    if error:
+        notes.append(f"The prior file of {label} could not be read: {error}")
+    else:
+        _set_prior(prepare_prior_table(table), name, origin=label)
+    for kind in ("mapping", "share"):
+        item = got.get(f"{kind}_file")
+        if item:
+            _set_side(kind, item[1], item[0], origin=label)
+            _check_side(kind, ss.get("datacube_df"), cfg)   # now, not on a later refresh
+        else:
+            _clear_side(kind)
+    _remember_source(ref, label)
+    if projects.has_folder(ref):
+        taken = {r["run"] for r in _bmc_runs(ref["bmc"])[0]}
+        ss["_pending_bmc_name"] = ref["bmc"]
+        ss["_pending_new_run_name"] = projects.next_free_name(ref["run"], taken)
+    ss.pop("gen_result", None)              # a generated file belongs to other inputs
+    notes.insert(0, f"Loaded the inputs of **{label}** - datacube, settings, prior file"
+                 + ("".join(f", {k} file" for k in ("mapping", "share") if f"{k}_file" in got))
+                 + ". Change what you need below, then Run Model saves them as a new run.")
+    ss["reuse_notes"] = notes
+    st.rerun()
+
+
+# --------------------------------------------------------------------------- #
+# 2. input data
+# --------------------------------------------------------------------------- #
+def _datacube_key(file_bytes, cfg):
+    data_cfg, run_cfg = cfg.get("data") or {}, cfg.get("run") or {}
+    return (_sha(file_bytes), data_cfg.get("sheet"), data_cfg.get("date_format"),
+            run_cfg.get("date_col"), run_cfg.get("region_col"), run_cfg.get("dv_col"))
+
+
+def _load_datacube(file_bytes, name, cfg, origin="upload"):
+    """Read and check a datacube (from an upload or a reused run)."""
+    ss = st.session_state
+    with st.spinner("Reading and checking the datacube ..."):
+        read = codebase.read_datacube(file_bytes, name, cfg)
+        ss["datacube_hash"] = _sha(file_bytes)
+        ss["datacube_bytes"] = file_bytes
+        ss["datacube_name"] = name
+        ss["datacube_origin"] = origin
+        if read.ok:
+            check = validate_input_data(read.value, cfg, show=False)
+            ss["datacube_df"] = read.value
+            ss["datacube_regions"] = codebase.datacube_regions(read.value, cfg)
+            ss["datacube_check"] = check
+            ss["datacube_ok"] = check.ok
+            ss.pop("datacube_read_errors", None)
+        else:
+            ss["datacube_df"] = None
+            ss["datacube_regions"] = []
+            ss["datacube_check"] = None
+            ss["datacube_ok"] = False
+            ss["datacube_read_errors"] = read.errors
+    ss["datacube_key"] = _datacube_key(file_bytes, cfg)
+    if origin != "upload":                  # empty the upload box: this file replaces it
+        ss["datacube_uploader_version"] = ss.get("datacube_uploader_version", 0) + 1
+        ss.pop("datacube_upload_sig", None)
 
 
 def _reset_datacube():
-    st.session_state["input_uploaded_to_adls"] = False
-    for key in ("uploaded_input_name", "uploaded_input_source", "datacube_df",
-                "datacube_key", "datacube_hash", "datacube_bytes", "datacube_name",
-                "datacube_regions", "datacube_summary", "datacube_ok",
-                "datacube_read_errors"):
+    for key in ("datacube_df", "datacube_key", "datacube_hash", "datacube_bytes",
+                "datacube_name", "datacube_regions", "datacube_check", "datacube_ok",
+                "datacube_read_errors", "datacube_origin", "datacube_upload_sig"):
         st.session_state.pop(key, None)
 
 
-def _render_data_block():
-    st.markdown("#### Input data")
-    input_uploaded_to_adls = st.session_state.get("input_uploaded_to_adls", False)
-    input_data_file = st.file_uploader(
-        "Choose input data file",
-        type=["xlsx", "csv"],
-        key="input_data_file",
-        help="The datacube: one row per region x date, with the date, region, KPI "
-             "and feature columns named in Model settings (run.date_col / "
-             "region_col / dv_col).",
-    )
-    cfg = live_config() or {}
+@st.fragment
+def _data_fragment():
+    ss = st.session_state
+    with st.container(border=True):
+        st.markdown("### ② Input data" + (" ✅" if ss.get("datacube_ok") else ""))
+        uploaded = st.file_uploader(
+            "Choose input data file",
+            type=["xlsx", "csv"],
+            key=f"input_data_file_{ss.get('datacube_uploader_version', 0)}",
+            help="The datacube: one row per region x date, with the date, region, KPI "
+                 "and feature columns named in Model settings (run.date_col / "
+                 "region_col / dv_col).",
+        )
+        cfg = live_config() or {}
+        if uploaded is not None:
+            data = uploaded.getvalue()
+            signature = (uploaded.name, _sha(data))
+            if ss.get("datacube_upload_sig") != signature:
+                _load_datacube(data, uploaded.name, cfg, origin="upload")
+                ss["datacube_upload_sig"] = signature
+                st.rerun()                # templates, generation and priors use it
+        elif ss.get("datacube_origin") == "upload":
+            _reset_datacube()
+            st.rerun()                    # the other blocks forget the datacube too
+        if ss.get("datacube_bytes") is None:
+            st.caption("Upload the datacube - or reuse a run's inputs in ①.")
+            return
+        if ss.get("datacube_key") != _datacube_key(ss["datacube_bytes"], cfg):
+            # a column name or the sheet changed in Model settings: read it again
+            _load_datacube(ss["datacube_bytes"], ss["datacube_name"], cfg,
+                           origin=ss.get("datacube_origin") or "upload")
+            st.rerun()
 
-    if input_data_file:
-        if st.session_state.get("uploaded_input_source") != input_data_file.name:
-            st.session_state["input_uploaded_to_adls"] = False
-            input_uploaded_to_adls = False
-        file_bytes = input_data_file.getvalue()
-        data_cfg, run_cfg = cfg.get("data") or {}, cfg.get("run") or {}
-        key = (_sha(file_bytes), data_cfg.get("sheet"), data_cfg.get("date_format"),
-               run_cfg.get("date_col"), run_cfg.get("region_col"), run_cfg.get("dv_col"))
-        if st.session_state.get("datacube_key") != key:
-            read = codebase.read_datacube(file_bytes, input_data_file.name, cfg)
-            st.session_state["datacube_key"] = key
-            st.session_state["datacube_hash"] = key[0]
-            st.session_state["datacube_bytes"] = file_bytes
-            st.session_state["datacube_name"] = input_data_file.name
-            if read.ok:
-                st.session_state["datacube_df"] = read.value
-                st.session_state["datacube_regions"] = codebase.datacube_regions(read.value, cfg)
-                st.session_state.pop("datacube_read_errors", None)
-            else:
-                st.session_state["datacube_df"] = None
-                st.session_state["datacube_regions"] = []
-                st.session_state["datacube_read_errors"] = read.errors
-        df = st.session_state.get("datacube_df")
-        for error in st.session_state.get("datacube_read_errors") or []:
+        origin = ss.get("datacube_origin")
+        if origin and origin != "upload":
+            st.caption(f"Using **{ss.get('datacube_name')}** from {origin}. Upload a file "
+                       "above to replace it.")
+        for error in ss.get("datacube_read_errors") or []:
             st.error(f"Could not read the datacube: {error}")
-        if df is not None:
-            outcome = validate_input_data(df, cfg)
-            st.session_state["datacube_ok"] = outcome.ok
-            summary = outcome.value or {}
-            st.session_state["datacube_summary"] = summary
-            if summary.get("regions"):
-                st.caption(
-                    f"{len(summary['regions'])} regions · {summary.get('n_periods')} periods "
-                    f"({summary.get('date_min')} … {summary.get('date_max')}) · "
-                    f"{len(summary.get('features', []))} features"
-                    + (f" · {summary['plan']}" if summary.get("plan") else ""))
-        else:
-            st.session_state["datacube_ok"] = False
-
-        if st.button("Upload", type="secondary", key="upload_input_to_adls",
-                     disabled=not st.session_state.get("datacube_ok", False)):
-            try:
-                name = unique_name(input_data_file.name)
-                upload_to_adls(file_bytes, name, adls_folder("data_file"))
-                st.session_state["input_uploaded_to_adls"] = True
-                st.session_state["uploaded_input_name"] = name
-                st.session_state["uploaded_input_source"] = input_data_file.name
-                input_uploaded_to_adls = True
-                st.success(f"Uploaded **{input_data_file.name}** to ADLS as {name}.")
-            except Exception as e:
-                st.session_state["input_uploaded_to_adls"] = False
-                input_uploaded_to_adls = False
-                st.error(f"Upload failed: {e}")
-        if input_uploaded_to_adls:
-            st.caption(f"Input data file uploaded to ADLS as "
-                       f"{st.session_state.get('uploaded_input_name')}.")
-    else:
-        _reset_datacube()
-    return input_data_file
+        if ss.get("datacube_check") is not None:
+            show_input_check(ss["datacube_check"])
 
 
 # --------------------------------------------------------------------------- #
-# 3. mapping and share files
+# 4. mapping and share files
 # --------------------------------------------------------------------------- #
 SIDE_FILES = {
     "mapping": ("Mapping file",
@@ -590,91 +549,131 @@ SIDE_FILES = {
 }
 
 
-def _reset_side(kind):
+def _set_side(kind, file_bytes, name, origin):
+    ss = st.session_state
+    ss[f"{kind}_bytes"] = file_bytes
+    ss[f"{kind}_name"] = name
+    ss[f"{kind}_origin"] = origin
+    ss[f"{kind}_ok"] = False
+    ss.pop(f"{kind}_check", None)
+    ss.pop(f"{kind}_prior_check", None)
+    if origin != "upload":
+        ss[f"{kind}_uploader_version"] = ss.get(f"{kind}_uploader_version", 0) + 1
+        ss.pop(f"{kind}_upload_sig", None)
+
+
+def _check_side(kind, df, cfg):
+    """codebase 1's verdict on the current mapping/share file, cached per file
+    and datacube. True when it had to be (re)checked."""
+    ss = st.session_state
+    check_key = (_sha(ss[f"{kind}_bytes"]), ss.get("datacube_hash"))
+    cached = ss.get(f"{kind}_check")
+    if cached and cached[0] == check_key:
+        return False
+    validate = codebase.validate_mapping if kind == "mapping" else codebase.validate_share
+    with st.spinner(f"Checking the {SIDE_FILES[kind][0].lower()} ..."):
+        ss[f"{kind}_check"] = (check_key, validate(ss[f"{kind}_bytes"], ss[f"{kind}_name"],
+                                                   df, cfg))
+    ss[f"{kind}_ok"] = ss[f"{kind}_check"][1].ok
+    return True
+
+
+def _clear_side(kind):
+    had = bool(st.session_state.get(f"{kind}_bytes"))
     for key in (f"{kind}_bytes", f"{kind}_name", f"{kind}_ok", f"{kind}_check",
-                f"{kind}_uploaded_to_adls", f"uploaded_{kind}_name",
-                f"uploaded_{kind}_source"):
+                f"{kind}_prior_check", f"{kind}_origin", f"{kind}_upload_sig"):
         st.session_state.pop(key, None)
+    return had
+
+
+def _cached(key, stamp, build):
+    """build() once per stamp (backend version, datacube) - not on every refresh."""
+    cached = st.session_state.get(key)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    value = build()
+    st.session_state[key] = (stamp, value)
+    return value
 
 
 def _render_side_file(kind, df, cfg):
+    ss = st.session_state
     title, help_text = SIDE_FILES[kind]
-    st.markdown(f"**{title}**")
+    version = codebase.status().get("version")
+    st.markdown(f"**{title}**" + (" ✅" if ss.get(f"{kind}_ok") else ""))
     st.caption(help_text)
     sample_col, template_col = st.columns(2)
     with sample_col:
-        sample = codebase.sample_file(kind)
+        sample = _cached(f"sample_{kind}", version, lambda: codebase.sample_file(kind))
         st.download_button("Download sample", data=sample.value or b"",
                            file_name=f"{kind}_sample.csv", mime="text/csv",
                            disabled=not sample.ok, key=f"{kind}_sample_download",
+                           on_click="ignore",
                            help="codebase 1's example file - the format, with example names.")
     with template_col:
-        template = codebase.template_file(kind, df, cfg) if df is not None else None
+        template = None
+        if df is not None:
+            template = _cached(f"template_{kind}",
+                               (version, ss.get("datacube_hash")),
+                               lambda: codebase.template_file(kind, df, cfg))
         st.download_button("Download template", data=(template.value if template and template.ok else b""),
                            file_name=f"{kind}_template.csv", mime="text/csv",
                            disabled=template is None or not template.ok,
-                           key=f"{kind}_template_download",
+                           key=f"{kind}_template_download", on_click="ignore",
                            help="The sample's columns with one row per datacube variable. "
                                 + ("Leave vendor_variable blank on rows you do not map."
                                    if kind == "mapping" else
                                    "Delete the rows you have no share for."))
     uploaded = st.file_uploader(f"Choose {title.lower()}", type=["csv", "xlsx"],
-                                key=f"{kind}_file")
-    if not uploaded:
-        _reset_side(kind)
+                                key=f"{kind}_file_{ss.get(f'{kind}_uploader_version', 0)}")
+    if uploaded is not None:
+        data = uploaded.getvalue()
+        signature = (uploaded.name, _sha(data))
+        if ss.get(f"{kind}_upload_sig") != signature:
+            _set_side(kind, data, uploaded.name, "upload")
+            ss[f"{kind}_upload_sig"] = signature
+    elif ss.get(f"{kind}_origin") == "upload":
+        if _clear_side(kind):
+            st.rerun()                    # the case preview and the checklist change
+    if not ss.get(f"{kind}_bytes"):
         return
-    file_bytes = uploaded.getvalue()
-    if st.session_state.get(f"uploaded_{kind}_source") != uploaded.name:
-        st.session_state[f"{kind}_uploaded_to_adls"] = False
-    check_key = (_sha(file_bytes), st.session_state.get("datacube_hash"))
-    cached = st.session_state.get(f"{kind}_check")
-    if not cached or cached[0] != check_key:
-        validate = codebase.validate_mapping if kind == "mapping" else codebase.validate_share
-        cached = (check_key, validate(file_bytes, uploaded.name, df, cfg))
-        st.session_state[f"{kind}_check"] = cached
-    outcome = cached[1]
-    st.session_state[f"{kind}_bytes"] = file_bytes
-    st.session_state[f"{kind}_name"] = uploaded.name
-    st.session_state[f"{kind}_ok"] = outcome.ok
+    if _check_side(kind, df, cfg):
+        st.rerun()                        # the case preview and the checklist change
+    outcome = ss[f"{kind}_check"][1]
+    origin = ss.get(f"{kind}_origin")
+    if origin and origin != "upload":
+        note, remove = st.columns([4, 1], vertical_alignment="center")
+        with note:
+            st.caption(f"Using **{ss.get(f'{kind}_name')}** from {origin}.")
+        with remove:
+            if st.button("Remove", key=f"remove_{kind}", help=f"Run without a {title.lower()}."):
+                _clear_side(kind)
+                st.rerun()
     if outcome.ok:
         v = outcome.value
         if kind == "mapping":
             st.success(f"{v['links']} links, {v['vendor_variables']} vendor variables - "
-                       + ("with contributions (the prior generator inverts them: case a)."
-                          if v["has_contribution"] else "no contributions (grouping only)."))
+                       + ("with contributions." if v["has_contribution"]
+                          else "no contributions (grouping only)."))
         else:
             st.success(f"{v['rows']} rows in sections {', '.join(v['sections'])}.")
         with st.expander("Preview"):
             st.dataframe(v["table"], use_container_width=True, height=240)
     for error in outcome.errors:
         st.error(error)
-    for _severity, warning in outcome.warnings:
-        st.warning(warning)
     if df is None:
         st.caption("Upload the datacube to check the names in this file against it.")
-    if st.button("Upload", type="secondary", key=f"upload_{kind}_to_adls",
-                 disabled=not outcome.ok):
-        try:
-            name = unique_name(uploaded.name)
-            upload_to_adls(file_bytes, name, adls_folder(f"{kind}_file"))
-            st.session_state[f"{kind}_uploaded_to_adls"] = True
-            st.session_state[f"uploaded_{kind}_name"] = name
-            st.session_state[f"uploaded_{kind}_source"] = uploaded.name
-            st.success(f"Uploaded **{uploaded.name}** to ADLS as {name}.")
-        except Exception as e:
-            st.session_state[f"{kind}_uploaded_to_adls"] = False
-            st.error(f"Upload failed: {e}")
-    if st.session_state.get(f"{kind}_uploaded_to_adls"):
-        st.caption(f"{title} uploaded to ADLS as {st.session_state.get(f'uploaded_{kind}_name')}.")
 
 
-def _render_pre_model_block():
+@st.fragment
+def _pre_model_fragment():
     cfg = live_config() or {}
     df = st.session_state.get("datacube_df")
     with st.container(border=True):
-        st.markdown("### Mapping and share files (optional)")
-        st.caption("Inputs to codebase 1's prior generator. With neither, the generated "
-                   "prior file is the skeleton: one row per datacube variable, means blank.")
+        st.markdown("### ④ Mapping and share files (optional)")
+        st.caption("Inputs to codebase 1's prior generator (the Prior file block below "
+                   "says which case they lead to). Without either, it writes a blank "
+                   "template for you to fill in.")
         left, right = st.columns(2, gap="large")
         with left:
             _render_side_file("mapping", df, cfg)
@@ -683,8 +682,48 @@ def _render_pre_model_block():
 
 
 # --------------------------------------------------------------------------- #
-# 4. the prior file: generate it (codebase 1) or upload your own
+# 5. the prior file - codebase 1 generates it, you fill it in, you upload it
 # --------------------------------------------------------------------------- #
+# FEATURE_PRIOR_GUIDE.md section 5, in the app's words
+CASE_EXPLAIN = {
+    "a": "The mapping file has the vendor's **contributions**: codebase 1 inverts them "
+         "into prior means (contribution / support / mean KPI, per region) and takes the "
+         "signs from them. A share file, if given, supplies the pillars and the baseline "
+         "flag, and the means of variables the vendor did not report.",
+    "b": "The mapping file has **no contributions**, so the means come from the **share "
+         "file** (each piece's share of sales, split by spend inside media and expert "
+         "pillars). The mapping only groups variables.",
+    "c": "The means come from the **share file**: each piece's share of sales, split by "
+         "spend inside media and expert pillars.",
+    "d": "No mapping contributions and no share file: codebase 1 writes a **blank "
+         "template** - one row per datacube variable, means and signs left for you to "
+         "fill in.",
+}
+FILE_TEXT = {
+    "feature_priors_national.csv": (
+        "One row per variable with its national prior mean.",
+        "For **pooling: hierarchical** - the regions share one prior and borrow "
+        "strength from each other (codebase 1's default)."),
+    "feature_priors_regional.csv": (
+        "The same rows, plus one override row per region with that region's own mean.",
+        "For **pooling: independent** - each region gets its own prior."),
+    "prior_calculation.xlsx": ("The arithmetic behind every generated mean.", ""),
+    "prior_calculation.csv": ("The arithmetic behind every generated mean.", ""),
+    "00_warnings.zip": ("What the generator objected to - listed below as well.", ""),
+}
+FILLED_TEXT = (
+    "**What the generated file fills in:** `variable`; `global_prior_mean` and "
+    "`sign_constraint` where the mapping or share file covered the variable; "
+    "`prior_sd_basis` = relative and `prior_mean_basis` = median; `pillar` and "
+    "`baseline` from the share file.  \n"
+    "**What it leaves blank** - blank means codebase 1's default, and a blank cell is "
+    "legal: `pooling` (hierarchical), `global_prior_sd` (1.0, which under relative is "
+    "±100% - write the width you can defend: 0.02 pins the variable, 0.3–0.5 lets the "
+    "data speak), `regional_sd_prior`, `center_mode` (consider `mean` for TDP, price "
+    "and category), `scale_mode`, `contribution_reference`. A variable neither file "
+    "covered also has a blank mean and sign.")
+
+
 def _generation_signature(cfg):
     data, run = cfg.get("data") or {}, cfg.get("run") or {}
     keys = (data.get("dv_aggregation"), data.get("national_basis"), data.get("sheet"),
@@ -696,118 +735,188 @@ def _generation_signature(cfg):
     return (keys, files)
 
 
+def _set_prior(prepared, name, origin, from_generator=False):
+    """A prior table (uploaded, generated or from a reused run) becomes the
+    prior file the run will use."""
+    ss = st.session_state
+    ss["prior_source_name"] = name
+    ss["prior_working_table"] = prepared
+    ss["prior_effective_bytes"] = codebase.prior_csv_bytes(prepared)
+    ss["prior_effective_name"] = _csv_file_name(name)
+    ss["prior_is_edited"] = False
+    ss["prior_popup_toggle_version"] = 0
+    ss["prior_popup_editor_version"] = ss.get("prior_popup_editor_version", 0) + 1
+    ss["prior_from_generator"] = from_generator
+    ss["prior_origin"] = origin
+    if origin != "upload":                  # empty the upload box: this file replaces it
+        ss["prior_uploader_version"] = ss.get("prior_uploader_version", 0) + 1
+        ss.pop("prior_upload_sig", None)
+
+
 def _use_generated(file_name, file_bytes):
+    """'Open in the editor': the generated file becomes the prior file - the
+    same as downloading it and uploading it in step 3."""
     table, error = read_file_bytes_as_table(file_bytes, file_name)
     if error:
         st.error(error)
         return
-    prepared = prepare_prior_table(table)
-    st.session_state["prior_source_name"] = file_name
-    st.session_state["prior_working_table"] = prepared
-    st.session_state["prior_effective_bytes"] = codebase.prior_csv_bytes(prepared)
-    st.session_state["prior_effective_name"] = file_name
-    st.session_state["prior_is_edited"] = False
-    st.session_state["prior_popup_toggle_version"] = 0
-    st.session_state["prior_popup_editor_version"] = st.session_state.get("prior_popup_editor_version", 0) + 1
-    st.session_state["prior_uploaded_to_adls"] = False
-    st.session_state.pop("uploaded_prior_name", None)
-    st.session_state["prior_from_generator"] = True
-    # clear the "upload your own" box, or the file in it would take over again
-    st.session_state["prior_uploader_version"] = st.session_state.get("prior_uploader_version", 0) + 1
+    _set_prior(prepare_prior_table(table), file_name, origin="generated", from_generator=True)
     st.rerun()
 
 
-def _render_generator(cfg, df):
-    st.markdown("**Generate from the datacube**")
-    mapping_ok = bool(st.session_state.get("mapping_ok"))
-    share_ok = bool(st.session_state.get("share_ok"))
-    used = ["the datacube"] + (["the mapping file"] if mapping_ok else []) + (
-        ["the share file"] if share_ok else [])
-    st.caption("codebase 1's pre-model step (build_priors), using " + ", ".join(used) + ".")
+def _side_table(kind):
+    """The validated mapping/share table, or None."""
+    if not st.session_state.get(f"{kind}_ok"):
+        return None
+    cached = st.session_state.get(f"{kind}_check")
+    return cached[1].value["table"] if cached and cached[1].ok else None
+
+
+def _render_generate_step(cfg, df):
+    st.markdown("#### 1 · Generate it")
+    mapping_bad = bool(st.session_state.get("mapping_bytes")) and not st.session_state.get("mapping_ok")
+    share_bad = bool(st.session_state.get("share_bytes")) and not st.session_state.get("share_ok")
+    case = codebase.expected_case(_side_table("mapping"), _side_table("share"))
+    letter = case.value["case"] if case.ok else "?"
+    if case.ok:
+        st.info(f"**Case {letter}** with the files in ④. {CASE_EXPLAIN[letter]}")
+    if mapping_bad or share_bad:
+        st.warning("Fix or remove the mapping / share file above first - generation "
+                   "would stop on it.")
     has_table = st.session_state.get("prior_working_table") is not None
-    restrict = st.checkbox("Only the variables of the current prior table",
-                           key="gen_restrict", disabled=not has_table,
-                           help="The prior file may carry MORE variables than the "
-                                "mapping/share files, never fewer.")
-    ready = df is not None and st.session_state.get("datacube_ok", False)
+    restrict = False
+    if has_table and letter in ("a", "b", "c"):
+        restrict = st.checkbox(
+            "List only the variables of my current prior file", key="gen_restrict",
+            help="Instead of every datacube column. The mapping and share files may then "
+                 "name only those variables - codebase 1's rule: the prior file may carry "
+                 "more variables than they do, never fewer.")
+    ready = (df is not None and st.session_state.get("datacube_ok", False)
+             and not (mapping_bad or share_bad))
     if st.button("Generate prior file", key="generate_prior_button", type="primary",
                  disabled=not ready):
         with st.spinner("Running codebase 1's pre-model step ..."):
             outcome = generate_prior(
                 (st.session_state["datacube_bytes"], st.session_state["datacube_name"]), cfg,
                 mapping=(st.session_state["mapping_bytes"], st.session_state["mapping_name"])
-                if mapping_ok else None,
+                if st.session_state.get("mapping_ok") else None,
                 share=(st.session_state["share_bytes"], st.session_state["share_name"])
-                if share_ok else None,
+                if st.session_state.get("share_ok") else None,
                 restrict_to=st.session_state.get("prior_working_table") if restrict else None)
         st.session_state["gen_result"] = outcome
         st.session_state["gen_signature"] = _generation_signature(cfg)
-    if not ready:
+    if df is None:
         st.caption("Upload a datacube that passes the checks first.")
 
+
+def _render_fill_step(cfg):
     outcome = st.session_state.get("gen_result")
     if outcome is None:
         return
+    st.markdown("#### 2 · Download it and fill it in")
     if not outcome.ok:
         for error in outcome.errors:
             st.error(error)
         return
     result = outcome.value
-    st.success(f"Case {result['case']}: {result['case_text']}")
     if st.session_state.get("gen_signature") != _generation_signature(cfg):
         st.warning("The datacube, a mapping/share file or a setting it depends on has "
-                   "changed since this was generated - generate again.")
-    files = result["files"]
-    mimes = {".csv": "text/csv", ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-             ".zip": "application/zip"}
-    for name, data in files.items():
-        st.download_button(f"Download {name}", data=data, file_name=name,
-                           mime=mimes.get(os.path.splitext(name)[1], "application/octet-stream"),
-                           key=f"gen_download_{name}")
-    use_cols = st.columns(2)
-    if "feature_priors_national.csv" in files:
-        with use_cols[0]:
-            if st.button("Use national (hierarchical)", key="use_generated_national",
-                         help="One row per variable - for pooling: hierarchical."):
-                _use_generated("feature_priors_national.csv", files["feature_priors_national.csv"])
-    if "feature_priors_regional.csv" in files:
-        with use_cols[1]:
-            if st.button("Use regional (independent)", key="use_generated_regional",
-                         help="Plus one override row per region - for pooling: independent."):
-                _use_generated("feature_priors_regional.csv", files["feature_priors_regional.csv"])
-    if result.get("index_md"):
-        with st.expander("Warnings from the pre-model step"):
-            st.markdown(result["index_md"])
+                   "changed since this was generated - generate it again.")
+    st.caption("Download the file for your pooling choice, fill in the blanks in Excel "
+               "(keep the column names), and upload it in step 3. Or open it in the "
+               "app's editor instead of Excel - it then becomes your prior file straight away.")
+    for name, data in result["files"].items():
+        what, use = FILE_TEXT.get(name, ("", ""))
+        text_col, dl_col, edit_col = st.columns([4, 1.3, 1.5], vertical_alignment="center")
+        with text_col:
+            st.markdown(f"**{name}**  \n{what} {use}")
+        with dl_col:
+            st.download_button("Download", data=data, file_name=name,
+                               key=f"gen_download_{name}", on_click="ignore",
+                               use_container_width=True)
+        with edit_col:
+            if name.startswith("feature_priors_") and st.button(
+                    "Open in the editor", key=f"gen_edit_{name}", use_container_width=True):
+                _use_generated(name, data)
+    st.markdown(FILLED_TEXT)
+    rows = result.get("warnings") or []
+    if rows:
+        with st.expander(f"Warnings from the generator ({len(rows)})"):
+            docs = result.get("warning_docs") or {}
+            render_warnings_table(pd.DataFrame(rows), lambda slug: docs.get(slug), key="gen")
     if outcome.log:
         with st.expander("Log"):
-            st.code(outcome.log, language="text")
+            with st.container(height=300):
+                st.code(outcome.log, language="text")
 
 
-def _render_prior_block():
+def _prior_is_valid():
+    table = st.session_state.get("prior_working_table")
+    return table is not None and validate_prior(table).ok
+
+
+@st.fragment
+def _prior_fragment():
+    ss = st.session_state
     cfg = live_config() or {}
-    df = st.session_state.get("datacube_df")
+    df = ss.get("datacube_df")
     with st.container(border=True):
-        st.markdown("### Prior file")
-        st.caption("Generate it with codebase 1, or upload your own. Then preview and edit "
-                   "it here - or download it, edit it in Excel and upload it again - and "
-                   "upload it to ADLS.")
-        gen_col, upload_col = st.columns(2, gap="large")
-        with gen_col:
-            _render_generator(cfg, df)
-        with upload_col:
-            st.markdown("**Or upload your own prior file**")
+        st.markdown("### ⑤ Prior file" + (" ✅" if _prior_is_valid() else ""))
+        st.caption("Every run needs a prior file: one row per variable with its prior "
+                   "mean, sign and width. codebase 1 generates it from the datacube, you "
+                   "fill in what only you can decide, then choose it in step 3.")
+        with st.expander("1 · Generate it from the datacube · 2 · Download it and fill it in",
+                         expanded=ss.get("prior_working_table") is None):
+            _render_generate_step(cfg, df)
+            _render_fill_step(cfg)
+        st.markdown("#### 3 · Your prior file")
+        st.caption("The file you filled in (CSV or Excel), or a prior file from an earlier "
+                   "run - or reuse a run's inputs in ①. It is saved in the run's folder "
+                   "when you press Run Model.")
+        up_col, edit_col = st.columns([3, 1], vertical_alignment="bottom")
+        with up_col:
             prior_file = st.file_uploader(
                 "Choose prior file",
                 type=["csv", "xlsx"],
-                key=f"prior_file_{st.session_state.get('prior_uploader_version', 0)}",
-                help="A feature-prior file (CSV or Excel): a downloaded generated file "
-                     "you edited, or one from an earlier run.",
+                key=f"prior_file_{ss.get('prior_uploader_version', 0)}",
             )
-    return prior_file
+        with edit_col:
+            edit_clicked = st.button("Preview / Edit", key="prior_preview_edit",
+                                     use_container_width=True,
+                                     disabled=ss.get("prior_working_table") is None,
+                                     help="See the table, edit it, paste from Excel, "
+                                          "download it.")
+        handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup)
+        if edit_clicked:
+            show_prior_file_popup()
+
+
+def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup):
+    ss = st.session_state
+    if prior_file:
+        prior_table, prior_error = read_uploaded_file_as_table(prior_file)
+        signature = (prior_file.name, _sha(prior_file.getvalue()))
+        if ss.get("prior_upload_sig") != signature and prior_table is not None:
+            _set_prior(prepare_prior_table(prior_table), prior_file.name, origin="upload")
+            ss["prior_upload_sig"] = signature
+            st.rerun()                    # the Run checklist re-checks against it
+        if prior_error:
+            st.toast(f"Error: {prior_error}", icon="🚨")
+    table = ss.get("prior_working_table")
+    if table is None:
+        ss["prior_is_edited"] = False
+        return
+    origin = ss.get("prior_origin")
+    where = (" (generated by codebase 1)" if origin == "generated" or
+             (origin is None and ss.get("prior_from_generator"))
+             else f" (from {origin})" if origin and origin != "upload" else "")
+    st.success(f"Prior file in use: {ss.get('prior_effective_name', 'feature_priors.csv')}"
+               + where + (" - edited here" if ss.get("prior_is_edited") else ""))
+    show_prior_validation(validate_prior(table), compact=True)
 
 
 # --------------------------------------------------------------------------- #
-# 5. run
+# 6. run
 # --------------------------------------------------------------------------- #
 def _prior_variables():
     table = st.session_state.get("prior_working_table")
@@ -834,201 +943,233 @@ def _side_against_prior(kind):
     return cached[1]
 
 
+def _job_parameters():
+    """The job's parameter names (re-read every 5 minutes); None if unreadable."""
+    ss = st.session_state
+    cached = ss.get("_job_params")
+    if cached and time.time() - cached[0] < 300:
+        return cached[1]
+    job_id = os.environ.get("MDR_JOB_ID", "")
+    try:
+        names = job_parameter_names(job_id) if job_id else None
+    except Exception:
+        names = None
+    ss["_job_params"] = (time.time(), names)
+    return names
+
+
 def _readiness():
     ss = st.session_state
-    ready = {
-        "Input data uploaded to ADLS": (bool(ss.get("input_uploaded_to_adls")),
-                                        ss.get("uploaded_input_name", "")),
-        "Model settings valid": (bool(ss.get("cfg_valid")), ""),
-        "Prior file validated and uploaded to ADLS": (bool(ss.get("prior_uploaded_to_adls")),
-                                                     ss.get("uploaded_prior_name", "")),
-    }
+    bmc, run, problem = _run_target()
+    ready = {"BMC and run name": (problem is None,
+                                  problem or f"Secondary Modelling/{bmc}/{run}/")}
+    ready["Input data checked"] = (ss.get("datacube_bytes") is not None
+                                   and bool(ss.get("datacube_ok")),
+                                   ss.get("datacube_name", ""))
+    ready["Model settings valid"] = (bool(ss.get("cfg_valid")), "")
+    has_prior = ss.get("prior_working_table") is not None
+    ready["Prior file valid"] = (_prior_is_valid(),
+                                 ss.get("prior_effective_name", "") if has_prior else "")
     for kind, label in (("mapping", "Mapping file"), ("share", "Share file")):
         if not ss.get(f"{kind}_bytes"):
             continue
-        ok = bool(ss.get(f"{kind}_ok")) and bool(ss.get(f"{kind}_uploaded_to_adls"))
-        note = ss.get(f"uploaded_{kind}_name", "") if ok else "validate and upload it, or remove it"
-        if ok and ss.get("prior_working_table") is not None:
+        ok = bool(ss.get(f"{kind}_ok"))
+        note = ss.get(f"{kind}_name", "") if ok else "fix it, or remove it"
+        if ok and has_prior:
             against = _side_against_prior(kind)
             if not against.ok:
                 ok, note = False, "names variables the prior file does not have: " + \
                     " ".join(against.errors)[:300]
-        ready[f"{label} uploaded to ADLS"] = (ok, note)
+        ready[f"{label} valid"] = (ok, note)
+    params = _job_parameters()
+    if params is not None and not {"bmc_name", "run_name"} <= params:
+        ready["The job has the parameters bmc_name and run_name"] = (
+            False, "add both to the job's Job parameters, default empty - see changes.md")
     return ready
 
 
+@st.dialog("Nothing has changed")
+def _confirm_unchanged(label):
+    st.warning(f"The datacube, the settings and the prior file (and the mapping/share "
+               f"files) are exactly those of **{label}**. With the same seed "
+               "(sampler.seed) a new run gives the same result.")
+    st.markdown("Run it again anyway?")
+    yes, no = st.columns(2)
+    with yes:
+        if st.button("Run anyway", type="primary", key="confirm_rerun",
+                     use_container_width=True):
+            _start_run()
+    with no:
+        if st.button("Cancel", key="cancel_rerun", use_container_width=True):
+            st.rerun()
+
+
+def _start_run():
+    """Save the inputs into the run's folder, record the request, start the job."""
+    ss = st.session_state
+    bmc, run, problem = _run_target()
+    if problem:
+        st.error(_sentence(problem))
+        return None
+    cfg = ss.get("cfg_values")
+    check = codebase.validate_config(cfg)
+    if not check.ok:
+        st.error("The settings are not valid: " + " | ".join(check.errors))
+        return None
+    config_text = codebase.config_yaml(cfg)
+    if not config_text.ok:
+        st.error("The settings could not be written: " + " | ".join(config_text.errors))
+        return None
+    prior = validate_prior(ss["prior_working_table"])
+    if not prior.ok:
+        st.error("Fix the prior file first: " + " | ".join(prior.errors))
+        return None
+    files = {"config_file": ("config.yaml", config_text.value.encode("utf-8")),
+             "data_file": (ss["datacube_name"], ss["datacube_bytes"]),
+             "prior_file": (_csv_file_name(ss.get("prior_effective_name")), prior.value["csv"])}
+    for kind in ("mapping", "share"):
+        if ss.get(f"{kind}_bytes"):
+            files[f"{kind}_file"] = (ss[f"{kind}_name"], ss[f"{kind}_bytes"])
+    changes = _changes_since_source()
+    src = ss.get("source_run")
+    source = None
+    if src:
+        ref = src.get("ref") or {}
+        source = {"bmc": ref.get("bmc"), "run": ref.get("run"),
+                  "job_run_id": ref.get("job_run_id")}
+    job_id = os.environ.get("MDR_JOB_ID", "")
+    try:
+        if projects.run_exists(bmc, run):
+            _forget_bmc_runs()
+            st.error(f"{bmc} / {run} already exists - choose another run name.")
+            return None
+        with st.spinner(f"Saving the inputs to Secondary Modelling/{bmc}/{run}/ ..."):
+            names = projects.save_inputs(bmc, run, files)
+            request = projects.new_request(
+                bmc, run, names, user=_user_email(), source=source,
+                changed=changes[1] if changes else None, job_id=job_id,
+                app_codebase=codebase.status().get("version", ""))
+            if changes and changes[2]:
+                request["changed_settings"] = changes[2]
+            projects.write_request(bmc, run, request)
+    except Exception as e:
+        st.error(f"The inputs could not be saved to ADLS: {e}")
+        return None
+    try:
+        with st.spinner("Starting the model job ..."):
+            response = run_model_job(
+                prior_file=names["prior_file"],
+                data_file=names["data_file"],
+                job_id=job_id,
+                config_file=names["config_file"],
+                mapping_file=names.get("mapping_file", ""),
+                share_file=names.get("share_file", ""),
+                bmc_name=bmc,
+                run_name=run,
+            )
+            payload = response.json()
+    except Exception as e:
+        payload = {"message": str(e)}
+    run_id = get_run_id_from_response(payload)
+    _forget_bmc_runs()
+    if not run_id:
+        message = str(payload.get("message") or payload.get("error") or payload) \
+            if isinstance(payload, dict) else str(payload)
+        request.update(job_error=message, state="not started")
+        try:
+            projects.write_request(bmc, run, request)
+        except Exception:
+            pass
+        # the folder now holds this attempt's inputs, so its name is taken:
+        # propose the next one and say what happened on the refreshed page
+        ss["run_start_error"] = (f"The job did not start: {message}. The inputs are saved "
+                                 f"in {bmc} / {run} (listed as not started); fix the "
+                                 "problem, then press Run Model again - a new run name "
+                                 "is proposed.")
+        ss["_pending_new_run_name"] = projects.next_free_name(run, {run})
+        st.rerun()
+    request.update(job_run_id=str(run_id), state="submitted")
+    try:
+        projects.write_request(bmc, run, request)
+    except Exception as e:
+        st.warning(f"The run started, but its run_request.json could not be updated: {e}")
+    ss["current_run"] = projects.make_ref(run_id, bmc, run)
+    ss["last_run_id"] = str(run_id)
+    ss.pop("recent_runs", None)
+    # the run just started is now what "changed since" compares with
+    _remember_source(ss["current_run"], f"{bmc} / {run}")
+    ss["_pending_new_run_name"] = projects.next_free_name(run, {run})
+    st.toast(f"Run {bmc} / {run} started (job run {run_id}).")
+    st.rerun()
+
+
+@st.fragment
 def render_run_section():
-    """The Run block - rendered AFTER the prior section, so a prior uploaded in
-    this rerun is already ticked in the checklist."""
+    """The checklist, Run Model, and the panel of the run started here - which
+    stays until dismissed, refreshing itself while the job runs."""
+    ss = st.session_state
     with st.container(border=True):
-        st.markdown("### Run")
+        st.markdown("### ⑥ Run")
+        start_error = ss.pop("run_start_error", None)
+        if start_error:
+            st.error(start_error)
         ready = _readiness()
         for label, (ok, note) in ready.items():
             st.markdown(f"{'✅' if ok else '⬜'} {label}" + (f" - {note}" if note else ""))
+        changes = _changes_since_source()
+        if changes:
+            label, items, settings = changes
+            if items:
+                st.info(f"Changed since **{label}**: {', '.join(items)}.")
+                if settings:
+                    with st.expander(f"The {len(settings)} changed setting(s)"):
+                        st.code("\n".join(settings), language="text")
+            else:
+                st.caption(f"Nothing has changed since **{label}** yet.")
         submit_disabled = not all(ok for ok, _ in ready.values())
         _, center_col, _ = st.columns([1, 1, 1])
         with center_col:
             run_model_clicked = st.button(
                 "Run Model",
                 type="primary",
+                key="run_model_button",
                 disabled=submit_disabled,
                 use_container_width=True,
+                help="Saves the inputs in the run's folder, then starts the job.",
             )
-    return submit_disabled, run_model_clicked
+        if run_model_clicked:
+            if changes and not changes[1]:
+                _confirm_unchanged(changes[0])
+            else:
+                _start_run()
+        current = ss.get("current_run")
+        if current:
+            render_run_panel(current, "current", on_reuse=reuse_run)
+
+
+def render_all_runs_section():
+    """Every recent run of the job (all BMCs, and runs from before the run
+    folders), each with its panel and "Reuse inputs"."""
+    render_runs_section(on_reuse=reuse_run)
 
 
 def render_input_upload_section():
-    """Input data, Model settings, mapping/share files and the prior file.
-    Returns (prior_file, input_data_file, run_config)."""
+    """The header, then the BMC and run, the input data, Model settings, the
+    mapping/share files and the prior file - each block a fragment."""
     init_config_state()
     with st.container(border=True):
         header_left, header_right = st.columns([3, 1])
         with header_left:
             st.markdown("### Model Setup")
-            st.caption("Upload the datacube, check the settings, prepare the prior file, then run.")
+            st.caption("① choose the BMC and name the run · ② datacube · ③ settings · "
+                       "④ mapping/share files · ⑤ prior file · ⑥ run. A run's inputs can "
+                       "be reused from any earlier run.")
             render_backend_status()
         with header_right:
             render_cluster_status_controls()
-        input_data_file = _render_data_block()
 
-    run_config, _config_ok = render_settings_section()
-    _render_pre_model_block()
-    prior_file = _render_prior_block()
-    return prior_file, input_data_file, run_config
-
-
-def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup):
-    if prior_file:
-        st.success(f"Prior file selected: {prior_file.name}")
-        prior_table, prior_error = read_uploaded_file_as_table(prior_file)
-        current_source_name = st.session_state.get("prior_source_name")
-        if current_source_name != prior_file.name and prior_table is not None:
-            prepared = prepare_prior_table(prior_table)
-            st.session_state["prior_source_name"] = prior_file.name
-            st.session_state["prior_working_table"] = prepared
-            st.session_state["prior_effective_bytes"] = codebase.prior_csv_bytes(prepared)
-            st.session_state["prior_effective_name"] = prior_file.name.rsplit(".", 1)[0] + ".csv"
-            st.session_state["prior_is_edited"] = False
-            st.session_state["prior_popup_toggle_version"] = 0
-            st.session_state["prior_popup_editor_version"] = st.session_state.get("prior_popup_editor_version", 0) + 1
-            st.session_state["prior_uploaded_to_adls"] = False
-            st.session_state.pop("uploaded_prior_name", None)
-            st.session_state["prior_from_generator"] = False
-        if prior_error:
-            st.toast(f"Error: {prior_error}", icon="🚨")
-    elif st.session_state.get("prior_working_table") is not None:
-        st.success(
-            f"Prior file in use: {st.session_state.get('prior_effective_name', 'feature_priors.csv')}"
-            + (" (generated by codebase 1)" if st.session_state.get("prior_from_generator") else "")
-        )
-    else:
-        st.session_state.pop("prior_source_name", None)
-        st.session_state.pop("prior_working_table", None)
-        st.session_state.pop("prior_effective_bytes", None)
-        st.session_state.pop("prior_effective_name", None)
-        st.session_state["prior_is_edited"] = False
-        st.session_state["prior_uploaded_to_adls"] = False
-        return
-
-    table = st.session_state.get("prior_working_table")
-    if table is None:
-        return
-    if st.button("Preview / Edit Prior File"):
-        show_prior_file_popup()
-    if st.session_state.get("prior_is_edited"):
-        st.info("Edited prior file is active and will be used for model run.")
-    outcome = validate_prior(table)
-    show_prior_validation(outcome, compact=True)
-    if st.button("Upload prior file to ADLS", type="secondary", key="upload_prior_to_adls",
-                 disabled=not outcome.ok):
-        try:
-            ok, result = upload_active_prior()
-            if ok:
-                st.success(f"Uploaded **{result[0]}** to ADLS.")
-            else:
-                st.warning(result)
-        except Exception as e:
-            st.session_state["prior_uploaded_to_adls"] = False
-            st.error(f"Upload failed: {e}")
-    if st.session_state.get("prior_uploaded_to_adls"):
-        st.caption(f"Prior file uploaded to ADLS as {st.session_state.get('uploaded_prior_name')}.")
-
-
-def handle_run_and_status(
-    prior_file, input_data_file, run_model_clicked, submit_disabled, run_config=None
-):
-    if input_data_file:
-        st.success(f"Input data file selected: {input_data_file.name}")
-
-    if run_model_clicked:
-        if submit_disabled:
-            st.error("Complete the checklist in the Run section before running the model.")
-            return
-        cfg = st.session_state.get("cfg_values") or run_config
-        config_text = codebase.config_yaml(cfg)
-        if not config_text.ok:
-            st.error("The settings could not be written: " + " | ".join(config_text.errors))
-            return
-        config_file_name = unique_name("config.yaml")
-        try:
-            upload_to_adls(config_text.value.encode("utf-8"), config_file_name,
-                           adls_folder("config_file"))
-        except Exception as e:
-            st.error(f"Could not upload the settings to ADLS: {e}")
-            return
-
-        st.session_state["prior_file_name"] = st.session_state.get("uploaded_prior_name")
-        st.session_state["input_data_file_name"] = st.session_state.get("uploaded_input_name")
-        st.session_state["config_file_name"] = config_file_name
-        st.session_state.pop("cancel_run_clicked_once", None)
-        st.session_state.pop("cancel_run_response", None)
-        st.session_state["run_start_time"] = time.time()
-        st.toast("Model run started with selected files.")
-        mapping_name = st.session_state.get("uploaded_mapping_name", "") \
-            if st.session_state.get("mapping_bytes") else ""
-        share_name = st.session_state.get("uploaded_share_name", "") \
-            if st.session_state.get("share_bytes") else ""
-        try:
-            response = run_model_job(
-                prior_file=st.session_state["prior_file_name"],
-                data_file=st.session_state["input_data_file_name"],
-                job_id=os.environ.get("MDR_JOB_ID"),
-                config_file=config_file_name,
-                mapping_file=mapping_name,
-                share_file=share_name,
-            )
-            run_model_response = response.json()
-            st.session_state["run_model_response"] = run_model_response
-            st.session_state["current_run_id"] = get_run_id_from_response(
-                run_model_response
-            )
-            if st.session_state["current_run_id"]:
-                st.session_state["last_run_id"] = st.session_state["current_run_id"]
-        except Exception as e:
-            st.session_state["run_model_response"] = {"error": str(e)}
-            st.session_state.pop("current_run_id", None)
-
-        st.session_state["show_run_model_response"] = True
-
-    if st.session_state.get("show_run_model_response"):
-        show_run_model_response_popup()
-
-    if submit_disabled:
-        st.info("Complete the checklist in the Run section to run the model.")
-    else:
-        st.caption("Everything is ready.")
-
-
-def render_model_file_section(show_model_file_adls_popup):
-    with st.container(border=True):
-        st.subheader("Run outputs from ADLS")
-        st.caption(
-            "Open a finished run's key tables (warnings, convergence, fit, contributions) "
-            "by its run ID - also after the status popup has been closed."
-        )
-        if st.button(
-            "Open Run Outputs",
-            type="secondary",
-            key="open_model_file_adls_popup",
-        ):
-            show_model_file_adls_popup()
+    _project_fragment()
+    _data_fragment()
+    render_settings_section()
+    _pre_model_fragment()
+    _prior_fragment()

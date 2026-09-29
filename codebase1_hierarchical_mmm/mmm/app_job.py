@@ -6,14 +6,27 @@ the logic lives here so it can be tested on a laptop without Databricks.
 
 Where the files are
 -------------------
-The web app uploads to ADLS under `Secondary Modelling/<Folder>/<name>`. On
-the cluster the same files are `<base_path>/<Folder>/<name>`, where
-`base_path` is the mount the original notebook used:
+Every run has its own folder, one per BMC and run name, holding its inputs
+and its outputs together:
+
+    <base_path>/<bmc_name>/<run_name>/
+        run_request.json               written by the web app: who, when, reused from
+        Config/  Data/  Prior/         the run's inputs (Mapping/ and Share/ when used)
+        Outputs/                       written here: the stage folders, run_info.json,
+                                       job_log.txt, app_config.yaml
+
+`base_path` is the mount the original notebook used, the web app's ADLS root
+`Secondary Modelling` as the cluster sees it:
 
     /dbfs/mnt/testuat/Secondary Modelling
 
 A Unity Catalog volume path (`/Volumes/<catalog>/<schema>/<volume>/...`)
 works the same way - pass it as the `base_path` job parameter.
+
+With `bmc_name` and `run_name` both blank, the old shared layout is used:
+inputs from `<base_path>/<Folder>/<name>`, outputs to
+`<base_path>/Outputs/<run_id>` (runs made before the run folders existed, and
+hand runs).
 
 What it changes, and what it never changes
 ------------------------------------------
@@ -26,7 +39,7 @@ so running the codebase by hand from the workspace is unaffected by app runs.
 once overwrote each other's settings.)
 
 Outputs are written to local disk first (HDF5 `trace.nc` and fast PNG writes
-are fragile on FUSE storage) and then copied to `<base_path>/Outputs/<run_id>`
+are fragile on FUSE storage) and then copied to the run folder's `Outputs/`
 - also when the run fails, so the warnings of a failed run can be read.
 
 Running by hand
@@ -36,12 +49,16 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29"   # must equal mmm.__version__
+__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
 
+import contextlib
 import copy
 import json
+import logging
 import os
+import re
 import shutil
+import sys
 import tempfile
 import time
 import traceback
@@ -49,8 +66,10 @@ import traceback
 import yaml
 
 DEFAULT_BASE_PATH = "/dbfs/mnt/testuat/Secondary Modelling"
+LOG_FILE = "job_log.txt"        # everything the run printed, published with the outputs
+RUN_REQUEST = "run_request.json"  # written into the run folder by the web app
 
-# job parameter -> folder under base_path (and under the app's ADLS root)
+# job parameter -> folder under the run folder (old layout: under base_path)
 FOLDERS = {
     "data_file": "Data",
     "prior_file": "Prior",
@@ -59,10 +78,19 @@ FOLDERS = {
     "share_file": "Share",
 }
 OUTPUT_FOLDER = "Outputs"
+# the old layout's shared folders directly under base_path - not BMC names
+SHARED_FOLDERS = tuple(FOLDERS.values()) + (OUTPUT_FOLDER,)
 
 # the job parameters demo.ipynb defines as widgets, all blank by default
 PARAMS = ("config_file", "data_file", "prior_file", "mapping_file",
-          "share_file", "run_id", "base_path")
+          "share_file", "run_id", "base_path", "bmc_name", "run_name")
+
+# A BMC or run name is ONE folder level: letters, digits, spaces, _ - and .,
+# starting with a letter or digit and not ending in a space or a dot (ADLS
+# trims those). No slash and no "..", so a name can never point outside
+# base_path. The web app checks names with this same rule.
+NAME_PATTERN = r"[A-Za-z0-9](?:[A-Za-z0-9 _.\-]{0,78}[A-Za-z0-9_\-])?"
+_NAME_RE = re.compile(NAME_PATTERN)
 
 # the ONLY config keys the job sets; a UI should show them read-only
 JOB_OWNED_KEYS = ("data.input_path", "data.feature_priors", "data.mapping_file",
@@ -86,23 +114,66 @@ def normalise_params(params: dict | None) -> dict:
 
 
 def input_path(base_path: str, param: str, name: str) -> str | None:
-    """`<base_path>/<Folder>/<name>` for a file parameter, None when blank."""
+    """`<base_path>/<Folder>/<name>` for a file parameter, None when blank.
+    Pass the run folder as `base_path` for a run in the per-run layout."""
     return os.path.join(base_path, FOLDERS[param], name) if name else None
+
+
+def name_problem(name: str, what: str = "name") -> str | None:
+    """Why `name` cannot be a BMC or run folder name - None when it can."""
+    n = str(name or "")
+    if not n.strip():
+        return f"the {what} is empty"
+    if n != n.strip():
+        return f"the {what} '{n}' starts or ends with a space"
+    if not _NAME_RE.fullmatch(n):
+        return (f"the {what} '{n}' may use letters, digits, spaces, _ - and ., must "
+                "start with a letter or digit, must not end with a space or a dot, "
+                "and must be at most 80 characters")
+    return None
+
+
+def bmc_problem(name: str) -> str | None:
+    """name_problem for a BMC name, which also must not be a shared folder."""
+    problem = name_problem(name, "BMC name")
+    if problem:
+        return problem
+    if str(name).lower() in {f.lower() for f in SHARED_FOLDERS}:
+        return (f"'{name}' is one of the shared folders ({', '.join(SHARED_FOLDERS)}) "
+                "- pick another BMC name")
+    return None
+
+
+def run_folder(base_path: str, bmc_name: str, run_name: str) -> str | None:
+    """`<base_path>/<bmc_name>/<run_name>`, or None for the old shared layout
+    (both blank). Raises ValueError for one without the other or a bad name."""
+    bmc, run = str(bmc_name or "").strip(), str(run_name or "").strip()
+    if not bmc and not run:
+        return None
+    if not (bmc and run):
+        raise ValueError("bmc_name and run_name go together - set both or neither "
+                         f"(got bmc_name={bmc!r}, run_name={run!r})")
+    for problem in (bmc_problem(bmc), name_problem(run, "run name")):
+        if problem:
+            raise ValueError(problem)
+    return os.path.join(base_path, bmc, run)
 
 
 def effective_config(raw: dict | None, params: dict, base_path: str,
                      local_root: str, config_dir: str) -> dict:
     """The config the job runs: `raw` with only the job-owned keys replaced.
 
-    A file parameter that is set points its key at `<base_path>/<Folder>/`;
-    a blank one keeps the config's own value, resolved against `config_dir`
-    (the uploaded file is moved to the run folder, so a relative path would
-    otherwise resolve against the wrong place).
+    A file parameter that is set points its key at `<run folder>/<Folder>/`
+    (old layout: `<base_path>/<Folder>/`); a blank one keeps the config's own
+    value, resolved against `config_dir` (the uploaded file is moved to the
+    run folder, so a relative path would otherwise resolve against the wrong
+    place).
     """
     params = normalise_params(params)
     run_id = params["run_id"]
     if not run_id:
         raise ValueError("effective_config needs params['run_id']")
+    root = run_folder(base_path, params["bmc_name"], params["run_name"]) or base_path
     cfg = copy.deepcopy(raw or {})
     if not isinstance(cfg, dict):
         raise ValueError("the config must be a mapping of sections")
@@ -115,7 +186,7 @@ def effective_config(raw: dict | None, params: dict, base_path: str,
             data[key] = os.path.normpath(os.path.join(config_dir, str(v)))
     for param, key in _PARAM_KEY.items():
         if params[param]:
-            data[key] = input_path(base_path, param, params[param])
+            data[key] = input_path(root, param, params[param])
 
     run["output_dir"] = local_root
     run["run_name"] = run_id
@@ -158,6 +229,73 @@ def _tail(text: str, n: int = 40) -> str:
     return "\n".join(str(text).rstrip().splitlines()[-n:])
 
 
+def _read_request(root: str | None) -> dict:
+    """The web app's run_request.json in the run folder ({} when absent)."""
+    if not root:
+        return {}
+    try:
+        with open(os.path.join(root, RUN_REQUEST), encoding="utf-8") as fh:
+            request = json.load(fh)
+        return request if isinstance(request, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+class _LogTee:
+    """Write to the notebook AND to the job log.
+
+    A sampler progress bar rewrites one line with carriage returns thousands
+    of times; the file keeps only each line's final state, so the log stays
+    readable (and small) while the notebook shows the live bar."""
+
+    def __init__(self, stream, fh):
+        self._stream, self._fh, self._buf = stream, fh, ""
+
+    def write(self, text):
+        n = self._stream.write(text)
+        self._buf += str(text)
+        while "\n" in self._buf:
+            line, self._buf = self._buf.split("\n", 1)
+            self._fh.write(line.rsplit("\r", 1)[-1] + "\n")
+        return n
+
+    def flush(self):
+        self._stream.flush()
+        self._fh.flush()
+
+    def close_line(self):
+        if self._buf:
+            self._fh.write(self._buf.rsplit("\r", 1)[-1] + "\n")
+            self._buf = ""
+
+    def __getattr__(self, name):            # isatty, encoding, fileno, ...
+        return getattr(self._stream, name)
+
+
+@contextlib.contextmanager
+def tee_log(path: str):
+    """Copy stdout, stderr and log records into `path` while the block runs."""
+    fh = open(path, "a", encoding="utf-8")
+    out, err = _LogTee(sys.stdout, fh), _LogTee(sys.stderr, fh)
+    handler = logging.StreamHandler(fh)
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    loggers = [logging.getLogger()] + [logging.getLogger(n) for n in ("pymc", "pytensor")
+                                       if not logging.getLogger(n).propagate]
+    old = sys.stdout, sys.stderr
+    sys.stdout, sys.stderr = out, err
+    for lg in loggers:
+        lg.addHandler(handler)
+    try:
+        yield path
+    finally:
+        for lg in loggers:
+            lg.removeHandler(handler)
+        out.close_line()
+        err.close_line()
+        sys.stdout, sys.stderr = old
+        fh.close()
+
+
 def run_app_job(params: dict | None = None, *, base_path: str | None = None,
                 config_dir: str | None = None, local_root: str | None = None,
                 publish: bool = True, runner=None, copier=None) -> dict:
@@ -166,8 +304,15 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     `params` are the job parameters (see PARAMS). `runner` defaults to
     `run_from_yaml` and `copier` to `copy_tree`; both are arguments so a test
     can run the whole path without PyMC. Returns the `run_info` dict (also
-    written to `<run>/run_info.json`). A failed run is published first and
-    then RE-RAISED, so the Databricks job fails with the real error.
+    written to `<run>/run_info.json`). Everything the run prints goes to the
+    notebook AND to `<run>/job_log.txt`, which the web app shows. A failed run
+    - including one whose config cannot be read - is published first and then
+    RE-RAISED, so the Databricks job fails with the real error.
+
+    With `bmc_name` and `run_name` set, the inputs come from, and the outputs
+    go to, `<base_path>/<bmc_name>/<run_name>/` (see the module docstring).
+    A bad name is an error of the run like any other - recorded and published
+    to the old shared `Outputs/<run_id>`, never to a path built from it.
     """
     import mmm
 
@@ -181,54 +326,77 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     local_root = local_root or local_output_root()
     copier = copier or copy_tree
 
+    try:
+        root = run_folder(base_path, p["bmc_name"], p["run_name"])
+        folder_error = None
+    except ValueError as e:
+        root, folder_error = None, e
     if p["config_file"]:
-        cfg_src = input_path(base_path, "config_file", p["config_file"])
+        cfg_src = input_path(root or base_path, "config_file", p["config_file"])
         cfg_dir = os.path.dirname(cfg_src)
     else:
         cfg_src = os.path.join(config_dir, "config.yaml")
         cfg_dir = config_dir
-    print(f"[app_job] codebase {mmm.__version__}  run_id={run_id}")
-    print(f"[app_job] config   {cfg_src}")
-    with open(cfg_src, encoding="utf-8") as fh:
-        raw = yaml.safe_load(fh) or {}
-
-    cfg = effective_config(raw, p, base_path, local_root, cfg_dir)
     run_dir = os.path.join(local_root, run_id)
     os.makedirs(run_dir, exist_ok=True)
-    cfg_path = os.path.join(run_dir, "app_config.yaml")
-    with open(cfg_path, "w", encoding="utf-8") as fh:
-        yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
-    for k in JOB_OWNED_KEYS:
-        sec, key = k.split(".")
-        print(f"[app_job]   {k:22s} = {cfg[sec].get(key)}")
-
-    published = os.path.join(base_path, OUTPUT_FOLDER, run_id)
+    published = (os.path.join(root, OUTPUT_FOLDER) if root
+                 else os.path.join(base_path, OUTPUT_FOLDER, run_id))
     info = {"status": "running", "run_id": run_id,
+            "bmc_name": p["bmc_name"], "run_name": p["run_name"], "run_folder": root,
             "codebase": mmm.__version__, "config_source": cfg_src,
             "params": p, "local_dir": run_dir,
             "output_dir": published if publish else run_dir,
             "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+    request = _read_request(root)
+    if request.get("submitted_by"):
+        info["submitted_by"] = request["submitted_by"]
     error = None
+    with tee_log(os.path.join(run_dir, LOG_FILE)):
+        try:
+            print(f"[app_job] codebase {mmm.__version__}  run_id={run_id}  "
+                  f"started {info['started']}")
+            if folder_error is not None:
+                raise folder_error
+            if root:
+                print(f"[app_job] run      {p['bmc_name']} / {p['run_name']}  ->  {root}"
+                      + (f"  (submitted by {request['submitted_by']})"
+                         if request.get("submitted_by") else ""))
+            print(f"[app_job] config   {cfg_src}")
+            with open(cfg_src, encoding="utf-8") as fh:
+                raw = yaml.safe_load(fh) or {}
+            cfg = effective_config(raw, p, base_path, local_root, cfg_dir)
+            cfg_path = os.path.join(run_dir, "app_config.yaml")
+            with open(cfg_path, "w", encoding="utf-8") as fh:
+                yaml.safe_dump(cfg, fh, sort_keys=False, default_flow_style=False)
+            for k in JOB_OWNED_KEYS:
+                sec, key = k.split(".")
+                print(f"[app_job]   {k:22s} = {cfg[sec].get(key)}")
+            if runner is None:
+                from mmm.core.settings import run_from_yaml as runner
+            result = runner(cfg_path)
+            info["status"] = "success"
+            if isinstance(result, dict) and result.get("output_dir"):
+                info["model_output_dir"] = str(result["output_dir"])
+        except Exception as e:  # noqa: BLE001 - recorded, published, re-raised
+            error = e
+            info["status"] = "failed"
+            info["error"] = f"{type(e).__name__}: {e}"
+            info["traceback"] = _tail(traceback.format_exc())
+            print(f"[app_job] FAILED: {info['error']}\n{info['traceback']}")
+        finally:
+            info["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+            info["seconds"] = round(time.time() - t0, 1)
+            print(f"[app_job] {info['status']} after {info['seconds']} s")
     try:
-        if runner is None:
-            from mmm.core.settings import run_from_yaml as runner
-        result = runner(cfg_path)
-        info["status"] = "success"
-        if isinstance(result, dict) and result.get("output_dir"):
-            info["model_output_dir"] = str(result["output_dir"])
-    except Exception as e:  # noqa: BLE001 - recorded, published, re-raised
-        error = e
-        info["status"] = "failed"
-        info["error"] = f"{type(e).__name__}: {e}"
-        info["traceback"] = _tail(traceback.format_exc())
-    finally:
-        info["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
-        info["seconds"] = round(time.time() - t0, 1)
         with open(os.path.join(run_dir, "run_info.json"), "w",
                   encoding="utf-8") as fh:
             json.dump(info, fh, indent=2, default=str)
+    finally:
         if publish:
             try:
+                if root and os.path.isdir(published) and os.listdir(published):
+                    print(f"[app_job] note: {published} already had files (this run "
+                          "folder was run before) - they are overwritten")
                 n = copier(run_dir, published)
                 print(f"[app_job] published {n} files -> {published}")
             except Exception as e:  # noqa: BLE001 - keep the local copy

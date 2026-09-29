@@ -1,3 +1,4 @@
+import csv
 import hashlib
 import io
 import json
@@ -6,16 +7,20 @@ import pandas as pd
 import streamlit as st
 
 from src import codebase
-from src.files import adls_dir, download_from_adls, unique_name, upload_to_adls
 
-# where each kind of file lives under the ADLS root (codebase 1's app_job.FOLDERS
-# says the same; the backend's copy wins when it is loaded)
-DEFAULT_FOLDERS = {"data_file": "Data", "prior_file": "Prior", "config_file": "Config",
-                   "mapping_file": "Mapping", "share_file": "Share"}
-PASTE_HINT = ("Copy / paste: click a cell and Shift+click another to select a range, "
-              "Ctrl+C to copy. To paste a column copied from Excel, click its first "
-              "cell here and press Ctrl+V - it fills downward. For a whole column, "
-              "'Fill or paste a whole column' below always works.")
+# Why Ctrl+V onto the grid can do nothing: st.data_editor's grid reads the
+# clipboard with the browser's async Clipboard API (navigator.clipboard.read),
+# which needs the "clipboard read" permission - it never falls back to the
+# paste event's own data. When a company policy, a dismissed prompt or the
+# site settings block that permission, the paste is dropped silently, for one
+# cell or many. A text box needs no permission, hence "Paste cells from Excel".
+PASTE_HINT = ("**Editing:** double-click a cell to type in it, or to paste ONE value "
+              "copied from Excel (Ctrl+V, then Enter). **Many cells:** use *Paste cells "
+              "from Excel* below - it always works. Ctrl+V straight onto the grid works "
+              "only if your browser lets this page read the clipboard (Chrome and Edge "
+              "ask the first time; if nothing happens: the icon left of the address bar "
+              "→ Site settings → Clipboard → Allow - unless your company blocks it). "
+              "Copying out of the grid (select cells, Ctrl+C) always works.")
 
 
 def read_uploaded_file_as_table(uploaded_file):
@@ -124,15 +129,6 @@ def get_prior_spec():
         return None
     st.session_state["prior_spec"] = (version, out.value)
     return out.value
-
-
-def adls_folder(kind):
-    """'Secondary Modelling/<Folder>' for data_file / prior_file / config_file / ..."""
-    from src.config_editor import get_schema
-    schema = get_schema() or {}
-    folders = dict(DEFAULT_FOLDERS)
-    folders.update(schema.get("folders") or {})
-    return adls_dir(folders[kind])
 
 
 def _as_text(v):
@@ -254,33 +250,133 @@ def parse_cell(text, kind, options=None, regions=None):
     return s, None
 
 
-def paste_column(table, column, text, spec, regions=None, scope="all rows"):
-    """Assign a pasted column (one value per line, top to bottom) to the rows in
-    `scope`. Returns (table, problems); nothing changes when there are problems."""
-    lines = str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n")
-    if lines and lines[-1] == "":
-        lines = lines[:-1]                       # the newline Excel adds at the end
+def _blank(v):
+    if v is None:
+        return True
+    try:
+        if pd.isna(v):
+            return True
+    except (TypeError, ValueError):
+        pass
+    return isinstance(v, str) and not v.strip()
+
+
+def parse_pasted_block(text):
+    """Excel's clipboard text -> a rectangle of cells: one row per line, cells
+    split on tabs (Excel quotes a cell holding a tab, a line break or a quote)."""
+    text = str(text or "").replace("\r\n", "\n").replace("\r", "\n")
+    if not text.strip():
+        return []
+    rows = list(csv.reader(io.StringIO(text), delimiter="\t"))
+    while rows and all(not str(c).strip() for c in rows[-1]):
+        rows.pop()                               # the line break Excel adds at the end
+    if not rows:
+        return []
+    width = max(len(r) for r in rows)
+    return [[str(c) for c in r] + [""] * (width - len(r)) for r in rows]
+
+
+def detect_header(first_row, columns):
+    """{position: column} when every non-blank cell of the first pasted row
+    names a column (any case; 'Serial No' / 'Remove' map to None = skip).
+    None when the first row is data."""
+    lookup = {str(c).strip().lower(): c for c in columns}
+    lookup.update({"serial no": None, "remove": None})
+    named = [(j, str(v).strip()) for j, v in enumerate(first_row) if str(v).strip()]
+    if not named or not all(v.lower() in lookup for _, v in named):
+        return None
+    return {j: lookup[v.lower()] for j, v in named}
+
+
+def paste_block(table, text, spec, regions=None, start_row=0, start_col=None,
+                skip_columns=("Remove",)):
+    """Cells copied from Excel -> (new table, summary, problems). Nothing
+    changes when there is any problem.
+
+    With a header row the columns are matched by name - and when `variable`
+    is one of them the rows are matched by variable (and region, when that
+    column is pasted too) instead of by position. Without one the block goes
+    where an Excel paste would put it: its top-left cell at row position
+    `start_row` and column `start_col`, filling right and down."""
+    rows = parse_pasted_block(text)
+    if not rows:
+        return table, None, ["Nothing to paste yet."]
     t = table.copy()
-    mask = _row_mask(t, scope)
-    rows = list(t.index[mask])
-    if len(lines) != len(rows):
-        return table, [f"{len(lines)} pasted values for {len(rows)} rows - they must "
-                       "match (copy exactly as many cells as there are rows)."]
-    kind = (spec or {}).get("kinds", {}).get(column, "text")
-    options = (spec or {}).get("options", {}).get(column)
-    values, problems = [], []
-    for i, line in enumerate(lines, start=1):
-        value, problem = parse_cell(line, kind, options, regions)
-        if problem:
-            problems.append(f"line {i}: {problem}")
-        values.append(value)
+    columns = [c for c in t.columns if c not in skip_columns]
+    header = detect_header(rows[0], columns)
+    body = rows[1:] if header else rows
+    if not body:
+        return table, None, ["Only a header row was pasted - copy the values too."]
+    kinds = (spec or {}).get("kinds", {})
+    options = (spec or {}).get("options", {})
+    first_line = 2 if header else 1
+
+    if header:
+        targets = {j: c for j, c in header.items() if c is not None}
+    else:
+        if start_col not in columns:
+            return table, None, ["Pick the column of the top-left cell."]
+        c0, width = columns.index(start_col), len(body[0])
+        if c0 + width > len(columns):
+            return table, None, [f"The block is {width} columns wide, but only "
+                                 f"{len(columns) - c0} columns start at '{start_col}'."]
+        targets = {j: columns[c0 + j] for j in range(width)}
+
+    problems = []
+    by_variable = header is not None and "variable" in targets.values()
+    index = list(t.index)
+    if by_variable:
+        var_pos = next(j for j, c in targets.items() if c == "variable")
+        reg_pos = next((j for j, c in targets.items() if c == "region"), None)
+        keys = {}
+        for i in index:
+            reg = t.at[i, "region"] if "region" in t.columns else None
+            keys.setdefault((str(t.at[i, "variable"]).strip().lower(),
+                             "" if _blank(reg) else str(reg).strip().lower()), i)
+        row_for = []
+        for n, r in enumerate(body, start=first_line):
+            var = str(r[var_pos]).strip()
+            reg = str(r[reg_pos]).strip() if reg_pos is not None else ""
+            i = keys.get((var.lower(), reg.lower()))
+            if i is None:
+                problems.append(f"line {n}: '{var}'" + (f" / region '{reg}'" if reg else "")
+                                + " is not a row of the table")
+            row_for.append(i)
+        write = {j: c for j, c in targets.items() if c not in ("variable", "region")}
+    else:
+        start_row = int(start_row or 0)
+        if start_row + len(body) > len(index):
+            return table, None, [f"{len(body)} pasted rows, but only {len(index) - start_row} "
+                                 f"rows from row {start_row + 1} down."]
+        row_for = index[start_row:start_row + len(body)]
+        write = targets
     if problems:
-        return table, problems
-    if kind not in ("number", "flag"):
-        t[column] = t[column].astype(object)
-    for row, value in zip(rows, values):
-        t.at[row, column] = value
-    return t, []
+        return table, None, problems
+    if not write:
+        return table, None, ["The pasted columns only name the rows (variable / region) "
+                             "- copy the columns to change too."]
+
+    values = []
+    for n, (r, i) in enumerate(zip(body, row_for), start=first_line):
+        for j, col in write.items():
+            value, problem = parse_cell(r[j], kinds.get(col, "text"), options.get(col), regions)
+            if problem:
+                problems.append(f"line {n}, {col}: {problem}")
+            else:
+                values.append((i, col, value))
+    if problems:
+        return table, None, problems
+    for col in dict.fromkeys(c for _, c, _ in values):
+        if kinds.get(col, "text") in ("number", "flag"):
+            t[col] = pd.to_numeric(t[col], errors="coerce").astype(float)
+        else:
+            t[col] = t[col].astype(object)
+    for i, col, value in values:
+        t.at[i, col] = value
+    summary = {"cells": len(values), "rows": len(body),
+               "columns": list(dict.fromkeys(write.values())),
+               "by": "variable" if by_variable else "position"}
+    return t, summary, []
 
 
 def _prior_cache_key(table):
@@ -325,40 +421,84 @@ def _csv_name(name):
 
 
 def save_prior_table(effective_table):
-    """What Save does: the edited table becomes the active prior file."""
+    """What Save does: the edited table becomes the active prior file (it is
+    saved to the run's folder when the run starts)."""
     serial_table = to_serial_index_table(effective_table)
     st.session_state["prior_working_table"] = serial_table
     st.session_state["prior_effective_bytes"] = codebase.prior_csv_bytes(serial_table)
     st.session_state["prior_is_edited"] = True
     st.session_state["prior_effective_name"] = _csv_name(st.session_state.get("prior_source_name"))
-    st.session_state["prior_uploaded_to_adls"] = False
-    st.session_state.pop("uploaded_prior_name", None)
     st.session_state["prior_popup_editor_version"] = st.session_state.get("prior_popup_editor_version", 0) + 1
 
 
-def upload_active_prior():
-    """Validate the active prior table and upload it (a unique name). -> (ok, message)"""
-    table = st.session_state.get("prior_working_table")
-    if table is None or table.empty:
-        return False, "At least one row is required before upload."
-    outcome = validate_prior(table)
-    if not outcome.ok:
-        return False, "Fix the prior file first: " + " | ".join(outcome.errors)
-    name = unique_name(_csv_name(st.session_state.get("prior_effective_name")))
-    url = upload_to_adls(outcome.value["csv"], name, adls_folder("prior_file"))
-    st.session_state["prior_effective_bytes"] = outcome.value["csv"]
-    st.session_state["prior_uploaded_to_adls"] = True
-    st.session_state["uploaded_prior_name"] = name
-    return True, (name, url)
+def _row_label(table, position):
+    row = table.iloc[position]
+    var = row.get("variable")
+    reg = row.get("region") if "region" in table.columns else None
+    return (f"{position + 1} · {'(blank)' if _blank(var) else var}"
+            + ("" if _blank(reg) else f" · {reg}"))
+
+
+def _render_block_paste(edited_table, remove_column_name, spec, regions, columns, version):
+    """Paste cells copied from Excel through a text box - no clipboard permission needed."""
+    text = st.text_area(
+        "Cells copied from Excel", key=f"prior_block_text_{version}", height=140,
+        placeholder="In Excel, copy one cell or a block - with or without the header "
+                    "row. Click here and press Ctrl+V.")
+    rows = parse_pasted_block(text)
+    if not rows:
+        st.caption("With the header row copied too, columns are matched by name - and if "
+                   "`variable` is among them, rows are matched by variable (and region), "
+                   "so the row order in Excel does not matter.")
+        return
+    header = detect_header(rows[0], columns)
+    start_row, start_col = 0, None
+    if header and "variable" in header.values():
+        named = [c for c in header.values() if c and c not in ("variable", "region")]
+        st.caption(f"Header row found: {len(rows) - 1} row(s) matched by variable"
+                   + (" and region" if "region" in header.values() else "")
+                   + (f"; columns {', '.join(named)}." if named else "."))
+    else:
+        left, right = st.columns(2)
+        with left:
+            start_row = st.selectbox("Top-left cell - row", list(range(len(edited_table))),
+                                     format_func=lambda i: _row_label(edited_table, i),
+                                     key=f"prior_block_row_{version}")
+        with right:
+            if header:
+                st.caption("Header row found: columns matched by name, rows from the "
+                           "row on the left down.")
+            else:
+                start_col = st.selectbox(
+                    "Top-left cell - column", columns, key=f"prior_block_col_{version}",
+                    index=columns.index("global_prior_sd") if "global_prior_sd" in columns else 0)
+    new, summary, problems = paste_block(edited_table, text, spec, regions, start_row,
+                                         start_col, skip_columns=(remove_column_name,))
+    for p in problems[:12]:
+        st.error(p)
+    if len(problems) > 12:
+        st.caption(f"... and {len(problems) - 12} more.")
+    if summary:
+        st.info(f"Ready: {summary['cells']} cell(s) in {summary['rows']} row(s) - "
+                f"{', '.join(summary['columns'])}.")
+    if st.button("Apply paste", key=f"prior_block_apply_{version}", type="primary",
+                 disabled=bool(problems)):
+        save_prior_table(apply_row_removals(new, remove_column_name))
+        st.toast(f"Pasted {summary['cells']} cell(s).", icon="✅")
+        st.rerun(scope="fragment")
 
 
 def _render_column_tools(edited_table, remove_column_name, spec):
-    """Fill / paste a whole column; the result is saved and the dialog stays open."""
+    """Paste cells from Excel, or fill a column; the result is saved and the
+    dialog stays open."""
     regions = st.session_state.get("datacube_regions") or []
     columns = [c for c in edited_table.columns if c not in (remove_column_name,)]
     version = st.session_state.get("prior_popup_editor_version", 0)
-    with st.expander("Fill or paste a whole column"):
-        fill_tab, paste_tab = st.tabs(["Fill a column", "Paste a column"])
+    with st.expander("Paste cells from Excel · Fill a column"):
+        paste_tab, fill_tab = st.tabs(["Paste cells from Excel", "Fill a column"])
+        with paste_tab:
+            _render_block_paste(edited_table, remove_column_name, spec, regions, columns,
+                                version)
         with fill_tab:
             col = st.selectbox("Column", columns, key=f"prior_fill_col_{version}",
                                index=columns.index("global_prior_sd") if "global_prior_sd" in columns else 0)
@@ -384,23 +524,6 @@ def _render_column_tools(edited_table, remove_column_name, spec):
                 save_prior_table(apply_row_removals(new, remove_column_name))
                 st.toast(f"Filled {n} cell(s) of {col}.", icon="✅")
                 st.rerun(scope="fragment")
-        with paste_tab:
-            col = st.selectbox("Column", columns, key=f"prior_paste_col_{version}")
-            scope = st.radio("Rows", ["all rows", "feature rows (region blank)"],
-                             horizontal=True, key=f"prior_paste_scope_{version}")
-            n_rows = int(_row_mask(edited_table, scope).sum())
-            text = st.text_area(f"Paste {n_rows} values, one per line (copy the column "
-                                "in Excel, Ctrl+V here)", key=f"prior_paste_text_{version}",
-                                height=150)
-            if st.button("Apply paste", key=f"prior_paste_apply_{version}", type="primary"):
-                new, problems = paste_column(edited_table, col, text, spec, regions, scope)
-                if problems:
-                    for p in problems[:15]:
-                        st.error(p)
-                else:
-                    save_prior_table(apply_row_removals(new, remove_column_name))
-                    st.toast(f"Pasted {n_rows} value(s) into {col}.", icon="✅")
-                    st.rerun(scope="fragment")
 
 
 def close_prior_file_popup():
@@ -413,7 +536,8 @@ def show_prior_file_popup():
         st.warning("No prior file data available for preview.")
         return
 
-    st.caption("Preview, edit, download, or upload the prior file.")
+    st.caption("Preview, edit or download the prior file. It is saved to the run's "
+               "folder when you press Run Model.")
     spec = get_prior_spec()
     regions = st.session_state.get("datacube_regions") or []
 
@@ -448,7 +572,8 @@ def show_prior_file_popup():
 
                 save_prior_table(effective_edited_table)
                 st.session_state["prior_popup_toggle_version"] = toggle_version + 1
-                st.toast("Changes saved. Edited prior file is active and ready to upload to ADLS.", icon="✅")
+                st.toast("Changes saved - the edited prior file is the one the run will use.",
+                         icon="✅")
 
                 st.rerun()
             else:
@@ -462,86 +587,12 @@ def show_prior_file_popup():
         file_name = _csv_name(st.session_state.get("prior_effective_name", st.session_state.get("prior_source_name", "prior.csv")))
         csv_bytes = codebase.prior_csv_bytes(active_table)
 
-        download_col, upload_col = st.columns(2)
-        with download_col:
-            st.download_button(
-                "Download CSV",
-                data=csv_bytes,
-                file_name=file_name,
-                mime="text/csv",
-                key="download_prior_csv_from_popup",
-                use_container_width=True,
-            )
-
-        with upload_col:
-            if st.button("Upload to ADLS", type="secondary", key="upload_prior_to_adls_from_popup",
-                         use_container_width=True, disabled=not outcome.ok):
-                try:
-                    ok, result = upload_active_prior()
-                    if ok:
-                        name, url = result
-                        st.success(f"Uploaded **{name}** to ADLS.")
-                        st.caption(url)
-                    else:
-                        st.warning(result)
-                except Exception as e:
-                    st.session_state["prior_uploaded_to_adls"] = False
-                    st.error(f"Upload failed: {e}")
-
-
-# --------------------------------------------------------------------------- #
-# a finished run's outputs (the old version showed Secondary Modelling/Model/summary.csv)
-# --------------------------------------------------------------------------- #
-RUN_FILES = [
-    ("Run info", "run_info.json", "json"),
-    ("Warnings", "00_warnings/00_INDEX.md", "markdown"),
-    ("Convergence", "02_convergence/convergence_report.txt", "text"),
-    ("Fit", "04_fit/fit_metrics.csv", "csv"),
-    ("Contributions", "05_contributions/contribution_summary.csv", "csv"),
-    ("Coefficients", "03_coefficients/coefficient_report.csv", "csv"),
-]
-
-
-def _output_folder():
-    from src.config_editor import get_schema
-    return (get_schema() or {}).get("output_folder", "Outputs")
-
-
-@st.dialog("Run outputs from ADLS", width="large")
-def show_model_file_adls_popup():
-    run_id = st.text_input("Run ID", value=str(st.session_state.get("last_run_id") or ""),
-                           help="The job run ID - the folder name under "
-                                "Secondary Modelling/Outputs/.")
-    if not run_id.strip():
-        st.info("Enter the run ID of a finished run.")
-        return
-    base = f"{adls_dir(_output_folder())}/{run_id.strip()}"
-    tabs = st.tabs([label for label, _, _ in RUN_FILES])
-    for tab, (label, rel, kind) in zip(tabs, RUN_FILES):
-        with tab:
-            cache_key = f"run_file_{run_id}_{rel}"
-            if cache_key not in st.session_state:
-                try:
-                    st.session_state[cache_key] = download_from_adls(f"{base}/{rel}")
-                except Exception:
-                    st.session_state[cache_key] = None
-            data = st.session_state[cache_key]
-            if data is None:
-                st.info(f"{rel} is not in this run's folder (the run failed early, or "
-                        "config.yaml's output settings switched it off).")
-                continue
-            if kind == "json":
-                st.json(json.loads(data.decode("utf-8")))
-            elif kind == "markdown":
-                st.markdown(data.decode("utf-8"))
-            elif kind == "text":
-                st.code(data.decode("utf-8"), language="text")
-            else:
-                table, error = read_file_bytes_as_table(data, rel)
-                if error:
-                    st.error(error)
-                else:
-                    st.dataframe(table, use_container_width=True, height=380)
-            st.download_button(f"Download {rel.rsplit('/', 1)[-1]}", data=data,
-                               file_name=rel.rsplit("/", 1)[-1],
-                               key=f"download_{cache_key}")
+        st.download_button(
+            "Download CSV",
+            data=csv_bytes,
+            file_name=file_name,
+            mime="text/csv",
+            key="download_prior_csv_from_popup",
+            use_container_width=True,
+            on_click="ignore",
+        )

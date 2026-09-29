@@ -25,7 +25,7 @@ console just stops being the place you are expected to read them.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29"   # must equal mmm.__version__
+__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
 
 import contextlib
 import os

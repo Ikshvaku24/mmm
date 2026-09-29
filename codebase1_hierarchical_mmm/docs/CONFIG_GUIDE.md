@@ -24,10 +24,13 @@ python run_real_data.py config.yaml
 `mmm.core.settings.CHOICES` lists the allowed values, this guide's one-line
 help as the tooltip. So a key you add to a config dataclass (plus its `HELP`
 line) appears in the app by itself. The app starts from this folder's
-`config.yaml`, writes EVERY key into the file it sends (`settings_text`), and
-the job (`demo.ipynb` -> `mmm/app_job.py`) replaces only the input paths, the
-output folder and the run name - `app_job.JOB_OWNED_KEYS`. It never edits this
-folder's `config.yaml`.
+`config.yaml` and writes EVERY key into the file it saves with the run
+(`settings_text`) - `Config/config.yaml` in the run's own folder,
+`Secondary Modelling/<BMC>/<run name>/`. The job (`demo.ipynb` ->
+`mmm/app_job.py`) replaces only the input paths, the output folder and the run
+name - `app_job.JOB_OWNED_KEYS`. It never edits this folder's `config.yaml`.
+"Reuse inputs" in the app loads an earlier run's `config.yaml` back into the
+editor.
 
 **Two rules that save time:**
 

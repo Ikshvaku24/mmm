@@ -55,7 +55,9 @@ import pandas as pd
 import requests
 import yaml
 
-MIN_CODEBASE = "2026.09.29"      # the first version with config_schema / app_job
+# the first version whose job reads bmc_name / run_name (the per-run folders);
+# an older job would put a run's outputs where the app does not look
+MIN_CODEBASE = "2026.09.29.2"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
@@ -376,6 +378,17 @@ def schema() -> Outcome:
     return _guarded(impl)
 
 
+def layout() -> Outcome:
+    """Where a run's files live - the job's own folder names and name rule,
+    so the app and the job can never disagree about a path."""
+    def impl():
+        aj = _m("mmm.app_job")
+        return {"folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
+                "shared_folders": list(aj.SHARED_FOLDERS),
+                "run_request": aj.RUN_REQUEST, "name_pattern": aj.NAME_PATTERN}
+    return _guarded(impl)
+
+
 def _full_config(raw: dict) -> dict:
     """Every key filled: what the job would actually run for `raw`."""
     st_ = _m("mmm.core.settings")
@@ -490,8 +503,11 @@ def datacube_regions(df: pd.DataFrame, cfg: dict) -> list:
 
 
 def check_datacube(df: pd.DataFrame, cfg: dict) -> Outcome:
-    """Everything that would stop or mislead the model, found before upload.
+    """What would STOP the run, found before upload - errors only.
 
+    Per-variable notes (constant columns, dust, uneven periods) are left to
+    the run itself: codebase 1 writes them to 00_warnings/ with the EDA, where
+    they are grouped and explained, instead of a wall of names here.
     Nothing is renamed or changed: the file that is uploaded is the file that
     was checked (the old check lower-cased the first three columns in place).
     """
@@ -537,25 +553,6 @@ def check_datacube(df: pd.DataFrame, cfg: dict) -> Outcome:
         if dups:
             errors.append(f"{dups} duplicate region x date rows.")
 
-        num = [c for c in feats if c not in non_num]
-        dust = [c for c in num if 0 < float(df[c].abs().max()) < 1e-9]
-        if dust:
-            warns.append(f"Columns that are pure numerical dust (every value below "
-                         f"1e-9, like the broken Coupon extract): {dust}. Drop them "
-                         "or fix the extract.")
-        dead = [c for c in num if float(df[c].abs().max()) == 0]
-        if dead:
-            warns.append(f"Columns that are zero everywhere: {dead}.")
-        if num:
-            sd = df.groupby(rc)[num].std(ddof=0)
-            flat = {c: [str(r) for r in sd.index[sd[c] == 0]]
-                    for c in num if c not in dead and (sd[c] == 0).any()}
-            if flat:
-                ex = "; ".join(f"{c} in {', '.join(r[:4])}" for c, r in
-                               list(flat.items())[:8])
-                warns.append(f"Constant within a region (no variation to learn "
-                             f"from): {ex}{' ...' if len(flat) > 8 else ''}")
-
         summary = {"rows": int(len(df)), "regions": datacube_regions(df, cfg),
                    "features": feats, "n_periods": int(dates.nunique()),
                    "date_min": str(dates.min().date()) if dates.notna().any() else "",
@@ -568,12 +565,8 @@ def check_datacube(df: pd.DataFrame, cfg: dict) -> Outcome:
                 _mask, holdout, plan = dp.split_train(dates, s.run)
                 summary["plan"] = plan.describe()
                 summary["holdout"] = int(holdout)
-            except Exception as e:  # noqa: BLE001 - the summary is a courtesy
-                warns.append(f"Could not work out the period plan: {e}")
-            per = df.assign(_d=dates).groupby(rc)["_d"].nunique()
-            if per.nunique() > 1:
-                warns.append("Regions cover different numbers of periods: "
-                             + ", ".join(f"{r}={n}" for r, n in per.items()))
+            except Exception:  # noqa: BLE001 - the summary is a courtesy; the
+                pass           # settings block reports a bad config itself
         return _Checked(summary, errors, warns)
     return _guarded(impl)
 
@@ -822,11 +815,17 @@ def generate_priors(datacube: tuple, cfg: dict, mapping: tuple | None = None,
                 with open(p, "rb") as fh:
                     files[os.path.basename(p)] = fh.read()
         wdir = res.get("warnings_dir") or os.path.join(out, "00_warnings")
-        index_md = ""
+        index_md, rows, docs = "", [], {}
         if os.path.isdir(wdir):
             idx = os.path.join(wdir, "00_INDEX.md")
             if os.path.exists(idx):
                 index_md = open(idx, encoding="utf-8").read()
+            table = os.path.join(wdir, "all_warnings.csv")
+            if os.path.exists(table):
+                rows = pd.read_csv(table).fillna("").to_dict("records")
+            for f in sorted(os.listdir(wdir)):
+                if f.endswith(".md") and f != "00_INDEX.md":
+                    docs[f[:-3]] = open(os.path.join(wdir, f), encoding="utf-8").read()
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
                 for f in sorted(os.listdir(wdir)):
@@ -835,7 +834,21 @@ def generate_priors(datacube: tuple, cfg: dict, mapping: tuple | None = None,
         shutil.rmtree(tmp, ignore_errors=True)
         return {"case": res.get("case"), "basis": res.get("basis"),
                 "case_text": pb.CASE_TEXT.get(res.get("case"), ""),
-                "files": files, "index_md": index_md}
+                "files": files, "index_md": index_md,
+                "warnings": rows, "warning_docs": docs}
+    return _guarded(impl)
+
+
+def expected_case(mapping_table=None, share_table=None) -> Outcome:
+    """Which of codebase 1's four cases (a-d) the uploaded files lead to - its
+    own `decide_case`, so the preview can never disagree with the builder."""
+    def impl():
+        pb, mp = _m("mmm.data.prior_builder"), _m("mmm.data.mapping")
+        mapping = mapping_table if mapping_table is not None \
+            else mp.load_mapping_table(None)
+        shares = share_table if share_table is not None else pd.DataFrame()
+        case = pb.decide_case(mapping, shares)
+        return {"case": case, "text": pb.CASE_TEXT[case]}
     return _guarded(impl)
 
 

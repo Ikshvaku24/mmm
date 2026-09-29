@@ -19,7 +19,3 @@ env:
     valueFrom: DATABRICKS_TOKEN
   - name: MDR_JOB_ID
     valueFrom: MDR_JOB_ID
-  - name: MAPPING_JOB_ID
-    valueFrom: MAPPING_JOB_ID
-  - name: FEASIBILITY_JOB_ID
-    valueFrom: FEASIBILITY_JOB_ID

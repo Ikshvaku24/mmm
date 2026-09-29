@@ -5,19 +5,22 @@ import json
 from datetime import datetime
 DATABRICKS_HOST = f"https://{os.environ.get('DATABRICKS_HOST', '')}"
 DATABRICKS_TOKEN = os.environ.get("DATABRICKS_TOKEN", "")
+TIMEOUT = 30   # seconds - a hung request would freeze the page
 
 
 def _job_id(job_id):
     return int(job_id) if str(job_id).strip().isdigit() else job_id
 
 
-def run_model_job(prior_file, data_file, job_id, config_file="", mapping_file="", share_file=""):
+def run_model_job(prior_file, data_file, job_id, config_file="", mapping_file="", share_file="",
+                  bmc_name="", run_name=""):
     """Trigger the model job (it runs codebase 1's demo.ipynb).
 
-    Every value is a FILE NAME; the notebook reads it from its folder under
-    /dbfs/mnt/testuat/Secondary Modelling/ (Data, Prior, Config, Mapping,
-    Share). The job's own parameter run_id = {{job.run_id}} names the output
-    folder, so it is not sent from here.
+    Every file value is a FILE NAME. With bmc_name and run_name the notebook
+    reads them from the run's own folder,
+    /dbfs/mnt/testuat/Secondary Modelling/<bmc_name>/<run_name>/<Data|Prior|
+    Config|Mapping|Share>/, and writes the outputs to its Outputs/. The job's
+    own parameter run_id = {{job.run_id}} is not sent from here.
     """
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
@@ -31,24 +34,36 @@ def run_model_job(prior_file, data_file, job_id, config_file="", mapping_file=""
             "share_file": str(share_file or ""),
         }
     }
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    if bmc_name or run_name:
+        payload["job_parameters"].update(bmc_name=str(bmc_name), run_name=str(run_name))
+    response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=TIMEOUT)
     return response
+def job_parameter_names(job_id):
+    """The job parameters the job defines (jobs/get) - the app checks that
+    bmc_name and run_name are among them before it starts a run."""
+    url = f"{DATABRICKS_HOST}/api/2.1/jobs/get"
+    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
+    response = requests.get(url, headers=headers, params={"job_id": _job_id(job_id)},
+                            timeout=TIMEOUT)
+    response.raise_for_status()
+    settings = response.json().get("settings") or {}
+    return {p.get("name") for p in settings.get("parameters") or [] if p.get("name")}
 def get_run_logs(run_id):
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get-output?run_id={run_id}"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=TIMEOUT)
     return response.json()
 def get_run_status(run_id):
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/get?run_id={run_id}"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
-    response = requests.get(url, headers=headers)
+    response = requests.get(url, headers=headers, timeout=TIMEOUT)
     return response.json()
 def cancel_run(run_id):
     """Cancel a running workflow run (asynchronous)."""
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/cancel"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
     payload = {"run_id": int(run_id)}
-    response = requests.post(url, headers=headers, data=json.dumps(payload))
+    response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=TIMEOUT)
     return response
 def get_task_run_id(run_id, task_key=None):
     """The run id of one TASK of a job run (the first task when task_key is None).
@@ -65,6 +80,16 @@ def get_run_output(run_id):
     error_trace) for a job run."""
     task_run_id = get_task_run_id(run_id) or run_id
     return get_run_logs(task_run_id)
+def list_runs(job_id, limit=20):
+    """The job's most recent runs, newest first (run_id, start_time, state,
+    run_page_url, job_parameters) - so a run can be found again after its
+    status panel was closed or the page reloaded."""
+    url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/list"
+    headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
+    params = {"job_id": _job_id(job_id), "limit": int(limit), "expand_tasks": "false"}
+    response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
+    response.raise_for_status()
+    return response.json().get("runs", []) or []
 # def run_mapping_job/vendor, channel, bmc, channel_list, start_date, end_date, kpi, attributes, job_id):
 #     url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
 #     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}

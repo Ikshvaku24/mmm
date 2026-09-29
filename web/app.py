@@ -1,9 +1,9 @@
 
 import streamlit as st
-from src.app_functions import read_uploaded_file_as_table, show_model_file_adls_popup, show_prior_file_popup
 from src.components.app_header import render_app_header
 #from src.pages.feasibility_check_page import render_feasibility_check_page
-from src.pages.model_setup_page import handle_prior_file_section, handle_run_and_status, render_input_upload_section, render_model_file_section, render_run_section
+from src.pages.model_setup_page import (render_all_runs_section, render_input_upload_section,
+                                        render_run_section)
 #from src.pages.transformation_page import render_transformation_page
 from src.styles import inject_global_styles
 import html
@@ -66,11 +66,13 @@ render_app_header()
 # elif selected_page == "Transformation":
 #     render_transformation_page()
 # else:
-# input data, model settings (config.yaml), mapping/share files, prior file
-prior_file, input_data_file, run_config = render_input_upload_section()
-handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup)
-# the Run block comes after the prior section so its checklist is never a rerun behind
-submit_disabled, run_model_clicked = render_run_section()
-handle_run_and_status(prior_file, input_data_file, run_model_clicked, submit_disabled, run_config)
+# BMC and run (with the BMC's earlier runs), input data, model settings
+# (config.yaml), mapping/share files, prior file - each block an st.fragment,
+# so a click refreshes that block, not the page
+render_input_upload_section()
+# checklist + Run Model (saves the inputs in the run's folder, starts the job)
+# + the panel of the run started here (it stays until dismissed)
+render_run_section()
 st.divider()
-render_model_file_section(show_model_file_adls_popup)
+# every recent run of the job - all BMCs, and runs from before the run folders
+render_all_runs_section()

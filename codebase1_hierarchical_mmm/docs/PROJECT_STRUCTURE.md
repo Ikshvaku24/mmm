@@ -17,7 +17,8 @@ codebase1_hierarchical_mmm/
 ├── mmm/                      the package
 │   ├── run_pipeline.py       run() - ties the stages together
 │   ├── app_job.py            what demo.ipynb does: the uploaded config with only
-│   │                         the job-owned keys replaced, run, publish Outputs/
+│   │                         the job-owned keys replaced, run, publish to the
+│   │                         run folder's Outputs/ (<BMC>/<run name>/)
 │   ├── core/
 │   │   ├── config.py         every config dataclass + the prior-unit maths
 │   │   ├── settings.py       the config.yaml front end (run_from_yaml)
@@ -97,6 +98,12 @@ runs, i.e. this one - and re-checks it every few minutes, so re-uploading this
 folder updates the app, the job and anyone running it by hand at once. The app
 needs `mmm.__version__` >= the version in `web/src/codebase.py :: MIN_CODEBASE`.
 Everything it calls: `web/src/codebase.py`; setup: `web/README.md`.
+
+Each run the app starts has its own folder, `Secondary Modelling/<BMC>/<run
+name>/`, with its inputs (`Config/ Data/ Prior/ [Mapping/ Share/]`),
+`run_request.json` and `Outputs/`. The job gets `bmc_name` and `run_name`;
+`app_job.run_folder` builds the path, and `app_job.NAME_PATTERN` is the name
+rule the app checks too. With both blank, the job uses the old shared folders.
 
 ## Output tree
 
