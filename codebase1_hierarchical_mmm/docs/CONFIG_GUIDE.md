@@ -24,13 +24,35 @@ python run_real_data.py config.yaml
 `mmm.core.settings.CHOICES` lists the allowed values, this guide's one-line
 help as the tooltip. So a key you add to a config dataclass (plus its `HELP`
 line) appears in the app by itself. The app starts from this folder's
-`config.yaml` and writes EVERY key into the file it saves with the run
-(`settings_text`) - `Config/config.yaml` in the run's own folder,
-`Secondary Modelling/<BMC>/<run name>/`. The job (`demo.ipynb` ->
-`mmm/app_job.py`) replaces only the input paths, the output folder and the run
-name - `app_job.JOB_OWNED_KEYS`. It never edits this folder's `config.yaml`.
-"Reuse inputs" in the app loads an earlier run's `config.yaml` back into the
-editor.
+`config.yaml`. The file it saves with a run - `Config/config.yaml` in the
+run's own folder, `Secondary Modelling/<BMC>/<run name>/` - holds **only the
+settings that person may change** (`settings_text(only=...)`); the job
+(`demo.ipynb` -> `mmm/app_job.py`) lays it over this folder's `config.yaml`
+(`app_job.merge_config`), so a fixed setting always comes from here, then
+replaces only the input paths, the output folder and the run name -
+`app_job.JOB_OWNED_KEYS`. It never edits this folder's `config.yaml`. "Reuse
+inputs" in the app loads an earlier run's settings back into the editor, on
+top of this `config.yaml`.
+
+**Who may change which setting in the app** is `app_access.yaml`, next to
+`config.yaml` - one role-based access file (it replaced `config_ui.yaml` in
+2026.09.30.1):
+
+| Key | Who | What they get |
+|---|---|---|
+| `full_access:` | login e-mails | every setting, and the admin tools: "Reload codebase 1", the backend folder, "Open in Databricks" on a run |
+| `config_full_access:` | login e-mails | every setting (no admin tools) |
+| `editable:` | everyone else (analysts) | only the settings listed here get a widget |
+| `show_fixed:` | analysts | `true` lists the settings they may not change, read-only |
+
+`editable` is an allow-list. Every other setting is fixed at its value in
+`config.yaml` - also when an analyst uploads another config.yaml (only its
+editable settings are taken; the app says which were ignored) or reuses an
+older run. `sampler: all` opens a section and `editable: all` opens
+everything. A setting added to codebase 1 later stays fixed until it is
+listed. `settings.app_access()` reads the file; a misspelt setting is
+reported, and a broken file fixes every setting and grants nobody full
+access. The app re-reads it with the rest of codebase 1 - no redeploy.
 
 **Two rules that save time:**
 

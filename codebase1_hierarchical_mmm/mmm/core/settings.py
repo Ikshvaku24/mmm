@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
 
 import dataclasses
 import difflib
@@ -496,6 +496,87 @@ def config_schema() -> list[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# who may do what in the web app (app_access.yaml)
+# --------------------------------------------------------------------------- #
+ACCESS_FILE = "app_access.yaml"
+_ACCESS_KEYS = ("full_access", "config_full_access", "editable", "show_fixed")
+
+
+def _emails(raw: dict, key: str) -> list:
+    people = raw.get(key) or []
+    if not isinstance(people, list):
+        raise ValueError(f"{ACCESS_FILE}: `{key}` must be a list of e-mails")
+    return sorted({str(p).strip().lower() for p in people if str(p).strip()})
+
+
+def app_access(path: str | None = None) -> dict:
+    """Read app_access.yaml - who may do what in the web app (role-based).
+
+    Returns
+        full_access         lower-case e-mails that may do EVERYTHING: change
+                            every setting, and use the admin tools a UI hides
+                            from everyone else
+        config_full_access  lower-case e-mails that may change every setting
+        editable            what everyone else (an analyst) may change: sorted
+                            ["section.key", ...], or None = every setting
+        show_fixed          list the settings an analyst may not change,
+                            read-only
+        unknown             "section.key" the file names that are not settings
+                            (ignored)
+        source              the file read, "" when there is none
+
+    Without the file every setting is editable and nobody has full access -
+    the behaviour before the file existed. `editable` is an ALLOW-list, so a
+    setting added to codebase 1 later stays fixed until someone lists it. A
+    file that cannot be understood raises ValueError; a UI should then fix
+    every setting and show no admin tool rather than guess.
+    """
+    if path is None:
+        root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        path = os.path.join(root, ACCESS_FILE)
+    if not os.path.exists(path):
+        return {"full_access": [], "config_full_access": [], "editable": None,
+                "show_fixed": False, "unknown": [], "source": ""}
+    with open(path, encoding="utf-8") as fh:
+        try:
+            raw = yaml.safe_load(fh) or {}
+        except yaml.YAMLError as e:
+            raise ValueError(f"{ACCESS_FILE} is not valid YAML: {e}") from None
+    if not isinstance(raw, dict):
+        raise ValueError(f"{ACCESS_FILE}: expected {', '.join(_ACCESS_KEYS)} at the top "
+                         f"level, got {type(raw).__name__}")
+    _check_keys(raw, _ACCESS_KEYS, ACCESS_FILE)
+    known = [(r["section"], r["key"]) for r in config_schema()]
+    wanted = raw.get("editable", {})
+    unknown = []
+    if wanted == "all":
+        editable = None
+    elif isinstance(wanted, dict) or wanted is None:
+        editable = []
+        for section, keys in (wanted or {}).items():
+            if keys == "all":
+                keys = [k for s, k in known if s == section]
+                if not keys:
+                    unknown.append(f"{section}.*")
+            elif keys is None:
+                keys = []
+            elif not isinstance(keys, list):
+                raise ValueError(f"{ACCESS_FILE}: editable.{section} must be a list of "
+                                 f"setting names or `all`, got {keys!r}")
+            for key in keys:
+                name = f"{section}.{key}"
+                (editable if (section, str(key)) in known else unknown).append(name)
+        editable = sorted(set(editable))
+    else:
+        raise ValueError(f"{ACCESS_FILE}: `editable` must map sections to lists of "
+                         f"settings, or be `all` - got {wanted!r}")
+    return {"full_access": _emails(raw, "full_access"),
+            "config_full_access": _emails(raw, "config_full_access"),
+            "editable": editable, "show_fixed": bool(raw.get("show_fixed", False)),
+            "unknown": unknown, "source": path}
+
+
+# --------------------------------------------------------------------------- #
 # writing
 # --------------------------------------------------------------------------- #
 def _yaml_scalar(v) -> str:
@@ -598,6 +679,20 @@ VALUES_HEADER = """\
 """
 
 
+PARTIAL_HEADER = """\
+# ===========================================================================
+#  Codebase 1 - hierarchical MMM: the settings of one run
+# ===========================================================================
+#  Only the settings the person who ran it may change are written here. The
+#  job runs this file ON TOP OF the codebase folder's config.yaml (the team's
+#  settings), which supplies every setting not listed.
+#
+#  A typo is an ERROR, not a silent default: an unknown key stops the run and
+#  names the closest valid spelling.
+# ===========================================================================
+"""
+
+
 def _same_value(a, b) -> bool:
     if isinstance(a, bool) or isinstance(b, bool):
         return a is b
@@ -607,7 +702,8 @@ def _same_value(a, b) -> bool:
         return False
 
 
-def settings_text(values: dict | None = None, header: str | None = None) -> str:
+def settings_text(values: dict | None = None, header: str | None = None,
+                  only=None) -> str:
     """The annotated YAML: every field, one line of help above it.
 
     With no `values` this is the all-defaults template (`default_settings_text`).
@@ -616,20 +712,30 @@ def settings_text(values: dict | None = None, header: str | None = None) -> str:
     shipped config.yaml says - and each value that differs from the default
     ends its help line with "(default: x)", so the file documents its own
     deviations. Unknown sections or keys raise, exactly as the loader does.
+
+    `only` ("section.key" names) writes just those settings - a run's partial
+    config.yaml, which the job lays over the team's config.yaml
+    (`app_job.merge_config`); a section with none of them is left out.
     """
     if header is None:
-        header = HEADER if values is None else VALUES_HEADER
+        header = HEADER if values is None else (VALUES_HEADER if only is None
+                                                else PARTIAL_HEADER)
     values = values or {}
     if not isinstance(values, dict):
         raise ValueError("values must be a mapping of sections, got "
                          f"{type(values).__name__}")
     _check_keys(values, set(SECTIONS) | {"data"}, "top level")
+    only = None if only is None else {str(k) for k in only}
 
     out = [header]
     for key in ("data",) + tuple(SECTIONS):
         defaults = section_defaults(key)
         given = dict(values.get(key) or {})
         _check_keys(given, set(defaults), key)
+        if only is not None:
+            defaults = {n: d for n, d in defaults.items() if f"{key}.{n}" in only}
+            if not defaults:
+                continue
         out.append("")
         out.append("# " + "-" * 74)
         out.extend(_wrap_comment(SECTION_BLURB[key], 0))

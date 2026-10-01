@@ -46,8 +46,10 @@ The app does not need redeploying.
 The config editor, the prior table and the run-folder layout come from
 codebase 1 itself (its schema, and `mmm/app_job.py`'s folder names and name
 rule), so a new setting or a new allowed value appears in the app by itself.
-The app needs codebase 1 **2026.09.29.2 or later** (`MIN_CODEBASE` in
-`src/codebase.py`), the first version whose job reads `bmc_name` / `run_name`.
+The app needs codebase 1 **2026.09.30.1 or later** (`MIN_CODEBASE` in
+`src/codebase.py`): 2026.09.29.2 brought the run folders (`bmc_name` /
+`run_name`), 2026.09.30.1 `app_access.yaml` (who may do what), the partial
+run config and the live job log.
 It says so plainly if the workspace copy is older.
 
 ---
@@ -90,7 +92,8 @@ It says so plainly if the workspace copy is older.
    - **read the codebase 1 workspace folder**.
 4. **`app.yml`** is unchanged. Set `CODEBASE1_WORKSPACE_PATH` only if the job is
    Git-sourced, or to pin a different folder.
-5. **`requirements.txt`** now also installs `pyyaml`.
+5. **`requirements.txt`** now also installs `pyyaml` and `plotly` (the result
+   charts; without it the app shows their tables).
 6. Copy the real logo to `assest/aommm.png`. The header simply omits a missing
    logo.
 7. Sync `web/` to the workspace and redeploy the app.
@@ -178,18 +181,44 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 3. **③ Model settings.** codebase 1's `config.yaml`, with one widget per key
    and dropdowns for the allowed values. Switch on **Edit settings** to show
    them.
+   - **Who may change what is codebase 1's `app_access.yaml`** (role-based;
+     `settings.app_access` reads it, `config_editor.access()` applies it to
+     the viewer's login e-mail, from the `X-Forwarded-Email` header):
+
+     | Role | Settings | Admin tools* |
+     |---|---|---|
+     | `full_access` | every setting | yes |
+     | `config_full_access` | every setting | no |
+     | everyone else (analyst) | only those under `editable:` | no |
+
+     *Reload codebase 1, the backend's folder path, Open in Databricks.
+
+     For an analyst every other setting is fixed at the team's
+     `config.yaml` value, and `config_editor.enforce_fixed` puts it back when
+     a `config.yaml` is loaded (only its editable settings are taken; the app
+     lists the ones it ignored), a run is reused or a run starts.
+     `show_fixed: true` lists the fixed ones read-only. A file that cannot
+     be read fixes every setting and grants nobody full access. The file is
+     part of the backend's fingerprint, so a re-upload that only edits it
+     still reaches open sessions.
    - A changed value is marked ● (changed from the team's base config), and a
      table under the block lists every change: *setting · base config · now*.
-   - You can load or download a `config.yaml`, and reset to the base.
+   - You can load or download a `config.yaml`, and reset to the base. A
+     loaded file, or a reused run's settings, shows where the settings came
+     from; its ✕ goes back to the team's `config.yaml`.
    - Validation runs on every change.
    - The paths and the run name are set by the job, so they are read-only.
-   - The file saved with the run carries **every** key.
+   - The file saved with the run (and Download) holds **only the settings
+     the person may change** (`settings_text(only=...)`); the job lays it
+     over the team's `config.yaml` (`app_job.merge_config`).
+     `run_request.json` records the person's role.
 4. **④ Mapping and share files** (optional). Each has:
    - codebase 1's sample, and a template pre-filled with your datacube's
      variables;
    - a file picker, checked by codebase 1's own reader (names, regions, one
      contribution per vendor cell);
-   - for a reused file, **Remove** to run without it.
+   - a ✕ on every file: the upload box's own ✕, or, for a reused file, the
+     ✕ on its *Using … from …* line - the run then goes without one.
 5. **⑤ Prior file**, in three steps (`docs/FEATURE_PRIOR_GUIDE.md` §5 in
    codebase 1 explains the arithmetic). Steps 1-2 sit in an expander, open
    while there is no prior file yet.
@@ -216,8 +245,10 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
         file** or **Download CSV**;
       - **Use**: the draft becomes the run's prior file, and every blank cell
         of the feature rows gets the defaults (`app_functions.fill_blank_priors`):
-        pooling `global`, sign_constraint `free`, global_prior_sd `1`,
-        regional_sd_prior `0`. There are two exceptions that codebase 1's
+        pooling `global`, sign_constraint `free`, global_prior_mean `0`
+        (`0.05` for a positive/negative sign, whose mean is a size and must
+        be above 0), global_prior_sd `1`, regional_sd_prior `0`. There are
+        two exceptions that codebase 1's
         loader forces: a variable with per-region rows gets pooling
         `independent` (global cannot carry per-region priors), and a
         hierarchical row gets regional sd `0.5` (hierarchical needs more than
@@ -234,7 +265,13 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
         you pick. Values are checked (numbers, `0,5` read as 0.5, dropdown
         values in any case), and nothing changes if any cell is wrong;
       - **Fill a column**;
-      - **Fill blanks with the defaults**: the same fill as Use, on request.
+      - **Fill blanks with the defaults**: the same fill as Use, on request;
+      - **☑ Remove all** / **☐ Keep all** under the grid: tick (or untick)
+        Remove on every row - then untick the rows to keep and Save.
+
+      The *Prior file in use* line has a ✕ whatever the file came from
+      (uploaded, generated or reused); the upload box's own ✕ does the same
+      for an uploaded file.
 
       Ctrl+V straight onto the grid works only where the browser lets the page
       read the clipboard (see "Why Ctrl+V on the grid can do nothing"). The
@@ -248,16 +285,37 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
    If **nothing** changed since the run the inputs came from, it asks *Run it
    again anyway?* first. The run's panel stays on the page until
    **Dismiss**:
-   - while it runs: the status every 5 s, **Cancel run**, **Open in
-     Databricks**;
-   - on failure: the notebook's actual error;
+   - while it runs: the status every 5 s, **Cancel run**, and the **job log
+     as it grows** - the job copies `job_log.txt` into `Outputs/` every 30 s
+     (`app_job.LIVE_LOG_SECONDS`) and the panel re-reads it every 15 s, with
+     the newest line above it;
+   - on failure: the notebook's actual error, its **full** traceback, and the
+     job log opened;
    - on success: which codebase version ran;
    - then **Prepare run zip** (the run folder: the inputs, `Outputs/` and
-     `run_request.json`; `trace.nc` only if you tick it), the **Job log**
-     (`job_log.txt`, everything the run printed), **Results** (warnings,
-     convergence, fit, contributions, coefficients, run info) and **Reuse
-     inputs**. **↻ Re-read files** reads the run's files from ADLS again (rarely
-     needed: a missing file is looked up again by itself after 20 s).
+     `run_request.json`; `trace.nc` only if you tick it), the complete **Job
+     log** (`job_log.txt`, everything the run printed - never the copy read
+     while it ran), **Results** and **Reuse inputs**. **↻ Re-read files**
+     reads the run's files from ADLS again (rarely needed: a missing file is
+     looked up again by itself after 20 s).
+   - **Open in Databricks** only for `full_access` (`app_access.yaml`);
+     everyone else reads the log in the app.
+
+   **Results** (`src/charts.py`, Plotly; the viewer's light or dark theme):
+
+   | View | What it shows | Reads |
+   |---|---|---|
+   | Fit | actual vs fitted, the 90% prediction band (one region) and the holdout shaded; R² within region, MAPE and holdout coverage as tiles | `04_fit/fit_metrics.csv`, `actual_vs_predicted.csv` |
+   | Contributions | each driver's % of sales, coloured by pillar, by variable or by pillar, any region and period; the baseline core and residual as tiles (the three add to 100%) | `05_contributions/contribution_summary.csv` |
+   | Decomposition | weekly sales stacked by baseline core and pillar, with the actual line; *Drivers only* zooms in | `05_contributions/contribution_timeseries.csv` |
+   | Prior vs posterior | one point per variable (contraction vs shift; the flagged ones labelled) - click a point, or pick it, for its prior / data / posterior curves | `02_convergence/prior_posterior_contraction.csv` |
+   | Convergence | the report as text | `02_convergence/convergence_report.txt` |
+   | Warnings | the warnings table, each category explained | `00_warnings/all_warnings.csv` |
+
+   Every chart has its table underneath, with a download of the file. A
+   pillar's colour comes from its size over the whole run, so it is the
+   same in every region, period and view; past seven pillars the rest are
+   *Other*. Without Plotly the views show the tables.
 
    If the job does not start, the inputs stay saved in that run folder
    (listed as *not started*), the error is shown and a new run name is
@@ -312,8 +370,11 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #   test_v20_web_app.py        src/codebase.py (live loading from a fake workspace) and
 #                              src/projects.py (run folders, run lists, reuse, change detection)
 #   test_v21_web_ui_smoke.py   the whole app.py flow against a scripted streamlit stand-in:
-#                              BMC/run, paste from Excel, run, zip, reuse, "nothing changed"
-#   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest); SKIPs without it
+#                              BMC/run, paste from Excel, run, live log, results, zip, reuse,
+#                              "nothing changed", app_access roles, every ✕, the chart data
+#   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest) - the charts too,
+#                              with plotly; SKIPs without streamlit
+#   fixture_run_outputs.py     (not a suite) a synthetic Outputs/ tree in codebase 1's formats
 ```
 
 v19-v21 need no Streamlit, Azure or Databricks. v22 runs the app in
@@ -323,14 +384,14 @@ is faked. AppTest reruns the whole script, so it cannot click inside a dialog;
 dialogs are checked to open cleanly. It needs Streamlit:
 
 ```bash
-pip install "streamlit~=1.54.0"
+pip install "streamlit~=1.54.0" plotly
 python tests/test_v22_web_apptest.py
 ```
 
 To click through the real UI:
 
 ```bash
-pip install streamlit~=1.54 openpyxl pyyaml azure-identity azure-storage-file-datalake
+pip install streamlit~=1.54 openpyxl pyyaml plotly azure-identity azure-storage-file-datalake
 set LOCAL_STORAGE_DIR=C:\temp\bridge_store     # a folder instead of ADLS
 set CODEBASE1_DIR=..\codebase1_hierarchical_mmm
 streamlit run app.py
@@ -353,7 +414,8 @@ web/
 │   ├── projects.py        run folders: paths, names, run lists, a run's inputs, what changed (no Streamlit)
 │   ├── config_editor.py   Model settings
 │   ├── app_functions.py   prior editor dialog, paste from Excel
-│   ├── runs.py            the run panel (status, cancel, results, job log, zip, reuse) and All recent runs
+│   ├── runs.py            the run panel (status, cancel, live/complete job log, results, zip, reuse) and All recent runs
+│   ├── charts.py          the result charts: data from the output CSVs (pandas) + Plotly figures
 │   ├── pages/model_setup_page.py   the page's blocks (one fragment each), reuse, Run Model
 │   ├── generate_prior.py  hands generation to codebase 1
 │   ├── validation.py      shows the datacube checks

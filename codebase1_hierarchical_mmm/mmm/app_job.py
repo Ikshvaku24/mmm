@@ -49,7 +49,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
 
 import contextlib
 import copy
@@ -60,6 +60,7 @@ import re
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -67,6 +68,7 @@ import yaml
 
 DEFAULT_BASE_PATH = "/dbfs/mnt/testuat/Secondary Modelling"
 LOG_FILE = "job_log.txt"        # everything the run printed, published with the outputs
+LIVE_LOG_SECONDS = 30           # while a run runs, its log so far is copied to Outputs/
 RUN_REQUEST = "run_request.json"  # written into the run folder by the web app
 
 # job parameter -> folder under the run folder (old layout: under base_path)
@@ -229,6 +231,32 @@ def _tail(text: str, n: int = 40) -> str:
     return "\n".join(str(text).rstrip().splitlines()[-n:])
 
 
+def merge_config(base: dict | None, over: dict | None) -> dict:
+    """`over` laid on top of `base`, section by section - a run's config.yaml
+    (only the settings its author may change, see settings.app_access) over
+    the team's config.yaml, which supplies everything else."""
+    out = copy.deepcopy(base or {})
+    for section, block in (over or {}).items():
+        if isinstance(block, dict) and isinstance(out.get(section), dict):
+            out[section] = {**out[section], **copy.deepcopy(block)}
+        else:
+            out[section] = copy.deepcopy(block)
+    return out
+
+
+def _live_log(src: str, dst_dir: str, stop: threading.Event, every: float) -> None:
+    """Copy the log so far to Outputs/ now and every `every` s until `stop`,
+    so the web app can show a run's progress while it runs."""
+    while True:
+        try:
+            os.makedirs(dst_dir, exist_ok=True)
+            shutil.copyfile(src, os.path.join(dst_dir, LOG_FILE))
+        except Exception:  # noqa: BLE001 - a live copy must never stop a run
+            pass
+        if stop.wait(every):
+            return
+
+
 def _read_request(root: str | None) -> dict:
     """The web app's run_request.json in the run folder ({} when absent)."""
     if not root:
@@ -254,9 +282,13 @@ class _LogTee:
     def write(self, text):
         n = self._stream.write(text)
         self._buf += str(text)
+        wrote = False
         while "\n" in self._buf:
             line, self._buf = self._buf.split("\n", 1)
             self._fh.write(line.rsplit("\r", 1)[-1] + "\n")
+            wrote = True
+        if wrote:
+            self._fh.flush()           # the live copy reads the file as it grows
         return n
 
     def flush(self):
@@ -298,7 +330,8 @@ def tee_log(path: str):
 
 def run_app_job(params: dict | None = None, *, base_path: str | None = None,
                 config_dir: str | None = None, local_root: str | None = None,
-                publish: bool = True, runner=None, copier=None) -> dict:
+                publish: bool = True, runner=None, copier=None,
+                live_log_every: float | None = None) -> dict:
     """Run one model for the web app and publish its output folder.
 
     `params` are the job parameters (see PARAMS). `runner` defaults to
@@ -313,6 +346,11 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     go to, `<base_path>/<bmc_name>/<run_name>/` (see the module docstring).
     A bad name is an error of the run like any other - recorded and published
     to the old shared `Outputs/<run_id>`, never to a path built from it.
+
+    The uploaded config.yaml is laid over the codebase folder's config.yaml
+    (`merge_config`): the web app saves only the settings its user may change.
+    While the run runs, its log so far is copied to the output folder every
+    `live_log_every` seconds (LIVE_LOG_SECONDS; 0 = off).
     """
     import mmm
 
@@ -351,7 +389,14 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     if request.get("submitted_by"):
         info["submitted_by"] = request["submitted_by"]
     error = None
-    with tee_log(os.path.join(run_dir, LOG_FILE)):
+    log_path = os.path.join(run_dir, LOG_FILE)
+    every = LIVE_LOG_SECONDS if live_log_every is None else live_log_every
+    stop_live, live = threading.Event(), None
+    with tee_log(log_path):
+        if publish and every:
+            live = threading.Thread(target=_live_log, daemon=True,
+                                    args=(log_path, published, stop_live, every))
+            live.start()
         try:
             print(f"[app_job] codebase {mmm.__version__}  run_id={run_id}  "
                   f"started {info['started']}")
@@ -364,6 +409,18 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
             print(f"[app_job] config   {cfg_src}")
             with open(cfg_src, encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}
+            if p["config_file"]:
+                team = os.path.join(config_dir, "config.yaml")
+                if os.path.exists(team):
+                    with open(team, encoding="utf-8") as fh:
+                        raw = merge_config(yaml.safe_load(fh) or {}, raw)
+                    print(f"[app_job] settings {p['config_file']} on top of the team's {team}")
+                # the app names every input it sends: a mapping / share file in the
+                # team's config.yaml must not slip into a run that has none
+                raw["data"] = dict(raw.get("data") or {})
+                for param in ("mapping_file", "share_file"):
+                    if not p[param]:
+                        raw["data"][param] = None
             cfg = effective_config(raw, p, base_path, local_root, cfg_dir)
             cfg_path = os.path.join(run_dir, "app_config.yaml")
             with open(cfg_path, "w", encoding="utf-8") as fh:
@@ -387,6 +444,9 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
             info["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
             info["seconds"] = round(time.time() - t0, 1)
             print(f"[app_job] {info['status']} after {info['seconds']} s")
+    if live is not None:
+        stop_live.set()
+        live.join(timeout=60)
     try:
         with open(os.path.join(run_dir, "run_info.json"), "w",
                   encoding="utf-8") as fh:
@@ -394,7 +454,8 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     finally:
         if publish:
             try:
-                if root and os.path.isdir(published) and os.listdir(published):
+                if root and os.path.isdir(published) and [
+                        f for f in os.listdir(published) if f != LOG_FILE]:
                     print(f"[app_job] note: {published} already had files (this run "
                           "folder was run before) - they are overwritten")
                 n = copier(run_dir, published)

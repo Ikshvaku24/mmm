@@ -348,7 +348,11 @@ in the notebook — which meant nobody read any of them. The run now captures it
 warnings, groups them by category, and writes one document per category. The
 console gets **one line per category**, not one per feature.
 
-Nothing is suppressed: every warning still reaches `all_warnings.csv` verbatim.
+Nothing is suppressed: every warning still reaches `all_warnings.csv` verbatim
+- except deprecation notices raised by OTHER packages (netCDF4, numpy, pandas
+...) and import-time notices: they say nothing about the model, so they go to
+`library_notices.csv` (one row per distinct notice, with a count) and stay
+out of the index.
 
 | File | Contents |
 |---|---|
@@ -374,7 +378,9 @@ Nothing is suppressed: every warning still reaches `all_warnings.csv` verbatim.
 | Slug | Severity | Fires when |
 |---|---|---|
 | `prior_pins_coefficient` | high | `prior_sd` converts to a log-scale sigma < 0.05, so the posterior ≈ the prior. **The most common one**, and usually `0.2 * prior_mean` written where `prior_sd=0.2` + `prior_sd_basis=relative` was meant |
-| `prior_mean_not_a_magnitude` | high | A sign-constrained feature was given `prior_mean <= 0`. The value was **replaced by a default** — the model is not using your number |
+| `prior_mean_not_a_magnitude` | high | A sign-constrained feature was given `prior_mean = 0`, or a negative mean with `sign_constraint=positive`. The value was **replaced by a default** (0.05) — the model is not using your number |
+| `negative_mean_read_as_size` | review | A `sign_constraint=negative` feature was given a negative mean (`-0.08`); it was read as its size (`0.08`). The model uses your number - write the size to silence it |
+| `relative_sd_read_as_absolute` | info | A `free` feature with mean 0 under `prior_sd_basis=relative`: the sd was read as absolute (a fraction of 0 is 0). Expected for a generated prior whose blank means the web app filled with 0 |
 | `negative_values_uncentred` | high | A sign-constrained feature has negative values but is scaled without centring |
 | `collinear_with_intercept` | high | An always-on feature is ~constant after scaling and fights the region intercept. This is the defect that broke `real_data_v1` |
 | `degenerate_feature_column` | high | A column is constant, empty or non-positive over the training window; the scale fell back to 1.0 |
@@ -579,8 +585,19 @@ parameters whose posterior barely moved from the prior.
 
 ### `posterior_summary_full.csv`
 
-ArviZ's per-parameter table: `mean`, `sd`, `hdi_3%`, `hdi_97%`, `mcse_mean`,
-`mcse_sd`, `ess_bulk`, `ess_tail`, `r_hat`.
+ArviZ's per-parameter table: `mean`, `sd`, an interval, `mcse_mean`,
+`mcse_sd`, `ess_bulk`, `ess_tail`, `r_hat` (the interval columns follow the
+installed ArviZ: `hdi_3%`/`hdi_97%` in 0.x, its own ETI columns in 1.x).
+
+🆕 2026.10.01.1: built **one parameter at a time** and **unrounded**. ArviZ
+1.x summarising the whole posterior at once lines every parameter up on the
+dimension order in which dimensions first appear; with no intercept and no
+trend (the team's config) a feature-level parameter comes first, so the
+`(region, feature)` rows of `beta_*` / `z_beta_*` carried another pair's
+numbers. And the old `round_to=6` meant six decimals, which left a raw-unit
+coefficient of 0.000275 three digits. Runs before 2026.10.01.1 on ArviZ 1.x:
+read region x feature rows here with suspicion - `coefficient_report.csv`
+and the contraction file were always right.
 
 Parameter naming, so you can find things:
 
@@ -636,8 +653,9 @@ and **not** on `beta`, which is lognormal. So:
 | hierarchical | signed | `mu_logbeta_<bucket>` | log |
 | hierarchical | free | `mu_beta_<bucket>` | natural |
 | independent | signed | `logbeta_<bucket>` | log |
+| independent | free | `beta_ifree` (the sampled parameter itself) | natural |
 
-`beta_<bucket>` is a **deterministic** transform, reported for reference only.
+For every other bucket `beta_<bucket>` is a **deterministic** transform, reported for reference only.
 Under `pooling=global` it is also identical in every region (one shared
 coefficient broadcast), which is why those rows used to fill the file with
 duplicates. `tau_*` is the cross-region *spread*, not the location, so it is
@@ -740,8 +758,17 @@ predict. Check the scaling before you accept the number.
 
 - **Energy** — the two histograms should overlap. A narrow marginal against a
   wide transition distribution means the sampler is exploring badly.
-- **Trace** — the 4 chains for the worst-R-hat parameters. Want a fuzzy
-  caterpillar; want *not* to see chains sitting at different levels.
+- **Trace** — the chains for the 3 worst-R-hat parameters, density left and
+  trace right. Want a fuzzy caterpillar; want *not* to see chains sitting at
+  different levels.
+
+🆕 2026.10.01.1: both are drawn with matplotlib from the trace itself. They
+were `az.plot_energy` / `az.plot_trace` calls, which ArviZ 1.x no longer
+accepts - so on ArviZ 1.x both charts were silently missing, and so was the
+report's **BFMI** line (`az.bfmi` returns a DataTree there). BFMI is now
+computed from the sampler's energy: `mean(diff(E)^2) / var(E)` per chain,
+OK above 0.3. With one chain (ADVI, `chains=1`) the report says `max R-hat :
+n/a` instead of `nan (FAIL)`.
 - **Prior predictive** — sales the model generates *before seeing data*. If it
   produces impossible values, the priors are wrong on their scale.
 

@@ -435,12 +435,14 @@ def save_prior_table(effective_table):
 # blanks -> the modeller's defaults (what "Use" does to a generated file)
 # --------------------------------------------------------------------------- #
 PRIOR_DEFAULTS = {"pooling": "global", "sign_constraint": "free",
-                  "global_prior_sd": 1.0, "regional_sd_prior": 0.0}
+                  "global_prior_mean": 0.0, "global_prior_sd": 1.0,
+                  "regional_sd_prior": 0.0}
 DEFAULTS_TEXT = ("pooling **global** (**independent** for a variable that has per-region "
                  "rows - global cannot carry them), sign_constraint **free**, "
-                 "global_prior_sd **1**, regional_sd_prior **0** (**0.5** where pooling is "
-                 "hierarchical, which needs more than 0). Region rows and the other columns "
-                 "stay as they are.")
+                 "global_prior_mean **0** (**0.05** for a positive / negative sign, whose "
+                 "mean is a size and must be above 0), global_prior_sd **1**, "
+                 "regional_sd_prior **0** (**0.5** where pooling is hierarchical, which "
+                 "needs more than 0). Region rows and the other columns stay as they are.")
 
 
 def fill_blank_priors(table):
@@ -450,7 +452,9 @@ def fill_blank_priors(table):
       * pooling: global - but independent for a variable with per-region rows,
         because pooling global cannot carry per-region priors;
       * regional_sd_prior: 0 - but 0.5 (codebase 1's default) where pooling is
-        hierarchical, which requires a value above 0.
+        hierarchical, which requires a value above 0;
+      * global_prior_mean: 0 - but 0.05 (codebase 1's default) for a positive or
+        negative sign: a signed mean is a size, and the loader replaces 0 by 0.05.
     Region rows (their pooling / sign / sd are not read) and every other column
     are left as they are. Returns (table, [(column, value, cells filled)])."""
     t = table.copy()
@@ -477,6 +481,9 @@ def fill_blank_priors(table):
     fill("pooling", feature & ~var.isin(with_regions), "global")
     fill("pooling", feature & var.isin(with_regions), "independent")
     fill("sign_constraint", feature, "free")
+    signed = t["sign_constraint"].map(lambda v: str(v).strip().lower() in ("positive", "negative"))
+    fill("global_prior_mean", feature & ~signed, 0.0)
+    fill("global_prior_mean", feature & signed, 0.05)
     fill("global_prior_sd", feature, 1.0)
     hierarchical = t["pooling"].map(lambda v: str(v).strip().lower() == "hierarchical")
     fill("regional_sd_prior", feature & ~hierarchical, 0.0)
@@ -601,6 +608,16 @@ def _render_column_tools(edited_table, remove_column_name, spec, prefix="prior",
                 st.rerun(scope="fragment")
 
 
+def _seed_remove(prefix, edited_table, remove_column_name, value, editor_version):
+    """Remove all / Keep all: the grid as it is now (unsaved edits included)
+    with every Remove box set, drawn again as a new editor."""
+    seeded = edited_table.copy()
+    seeded[remove_column_name] = bool(value)
+    st.session_state[f"{prefix}_popup_editor_version"] = editor_version + 1
+    st.session_state[f"{prefix}_editor_seed"] = (editor_version + 1, seeded)
+    st.rerun(scope="fragment")
+
+
 def render_prior_editor(table, prefix, save, use=None, download_name="feature_priors.csv",
                         saved_message="Changes saved.", after_save="app"):
     """The body of a prior-file dialog: view (table, validation, download) or
@@ -615,10 +632,14 @@ def render_prior_editor(table, prefix, save, use=None, download_name="feature_pr
     toggle_version = ss.get(f"{prefix}_popup_toggle_version", 0)
     edit_mode = st.toggle("Edit", key=f"{prefix}_popup_edit_mode_{toggle_version}")
     use_help = "Make it the run's prior file. Blank cells get the defaults: pooling " \
-               "global, sign free, sd 1, regional sd 0."
+               "global, sign free, mean 0 (0.05 when signed), sd 1, regional sd 0."
     if edit_mode:
-        edit_table, remove_column_name = build_edit_table_with_remove_column(table)
         editor_version = ss.get(f"{prefix}_popup_editor_version", 0)
+        seed = ss.get(f"{prefix}_editor_seed")
+        if seed is not None and seed[0] == editor_version:
+            edit_table, remove_column_name = seed[1], "Remove"   # after Remove all / Keep all
+        else:
+            edit_table, remove_column_name = build_edit_table_with_remove_column(table)
         edited_table = st.data_editor(
             edit_table,
             use_container_width=True,
@@ -627,6 +648,16 @@ def render_prior_editor(table, prefix, save, use=None, download_name="feature_pr
             key=f"{prefix}_popup_editor_{editor_version}",
             column_config=prior_column_config(spec, regions, remove_column_name),
         )
+        all_col, none_col, _gap = st.columns([1, 1, 3])
+        with all_col:
+            if st.button("☑ Remove all", key=f"{prefix}_remove_all", use_container_width=True,
+                         help="Tick Remove on every row - then untick the rows to keep "
+                              "and press Save Changes."):
+                _seed_remove(prefix, edited_table, remove_column_name, True, editor_version)
+        with none_col:
+            if st.button("☐ Keep all", key=f"{prefix}_remove_none", use_container_width=True,
+                         help="Untick Remove on every row."):
+                _seed_remove(prefix, edited_table, remove_column_name, False, editor_version)
         st.caption(PASTE_HINT)
         _render_column_tools(edited_table, remove_column_name, spec, prefix, save)
 

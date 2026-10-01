@@ -15,8 +15,9 @@ from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
                                show_prior_file_popup, show_prior_validation,
                                to_serial_index_table, validate_prior)
 from src.clusters import get_cluster_status, start_cluster
-from src.config_editor import (init_config_state, job_owned_keys, live_config, load_config,
-                               render_settings_section)
+from src.config_editor import (access, enforce_fixed, has_full_access, init_config_state,
+                               job_owned_keys, live_config, load_config,
+                               render_settings_section, role)
 from src.generate_prior import generate_prior
 from src.jobs import job_parameter_names, run_model_job
 from src.runs import (fetch_run, job_params, job_state_label, local_time, render_run_panel,
@@ -64,6 +65,17 @@ def _now_local():
 def _csv_file_name(name):
     stem = str(name or "feature_priors").rsplit(".", 1)[0]
     return f"{stem}.csv"
+
+
+def file_chip(text, key, help_text="Remove this file."):
+    """'Using X from Y' with a ✕ - for a file that did not come from the upload
+    box (a reused run's, a generated one), which therefore has no ✕ of its
+    own. True when the ✕ was pressed."""
+    note, cross = st.columns([14, 1], vertical_alignment="center")
+    with note:
+        st.caption(text)
+    with cross:
+        return st.button("✕", key=key, help=help_text)
 
 
 def _sentence(text):
@@ -193,20 +205,25 @@ def render_cluster_status_controls():
 
 
 def render_backend_status():
+    """The backend's version for everyone; its folder and "Reload codebase 1"
+    only for full access (app_access.yaml)."""
     status = codebase.status()
+    full = status.get("ok") and has_full_access()
     if status.get("ok"):
         where = status.get("where", "")
         source = "workspace" if status.get("source") == "workspace" else "local folder"
-        st.caption(f"Backend: codebase 1 **{status['version']}** from the {source} `{where}`")
+        st.caption(f"Backend: codebase 1 **{status['version']}**"
+                   + (f" from the {source} `{where}`" if full else ""))
         if status.get("out_of_sync"):
             stale = ", ".join(f"{m} ({s})" for m, s in status["out_of_sync"])
             st.warning("codebase 1 is only partly updated - these modules are from "
                        f"another version: {stale}. Re-upload the WHOLE mmm/ folder.")
     else:
         st.error(f"codebase 1 (the backend) could not be loaded: {status.get('error')}")
-    if st.button("Reload codebase 1", key="reload_backend", type="secondary",
-                 help="Read codebase 1 from the workspace again now. It is also "
-                      "re-checked automatically every few minutes."):
+    if (full or not status.get("ok")) and st.button(
+            "Reload codebase 1", key="reload_backend", type="secondary",
+            help="Read codebase 1 from the workspace again now. It is also "
+                 "re-checked automatically every few minutes."):
         codebase.status(force=True)
         for key in ("cfg_schema", "prior_spec", "prior_validation", "datacube_key"):
             st.session_state.pop(key, None)
@@ -423,9 +440,14 @@ def reuse_run(ref):
     # the settings first: the datacube is read with their column names
     if "config_file" in got:
         parsed = codebase.parse_config_yaml(
-            got["config_file"][1].decode("utf-8-sig", errors="replace"))
+            got["config_file"][1].decode("utf-8-sig", errors="replace"),
+            base=ss.get("cfg_base"))
         if parsed.ok:
-            load_config(parsed.value)
+            reset = load_config(parsed.value, origin="run", name=label)
+            if reset:
+                notes.append(f"{len(reset)} setting(s) of {label} are now fixed by the team "
+                             "and take the team's current values: "
+                             + ", ".join(reset[:12]) + (" ..." if len(reset) > 12 else ""))
         else:
             notes.append(f"The settings of {label} could not be read ("
                          + "; ".join(parsed.errors) + ") - the current settings are kept.")
@@ -539,8 +561,11 @@ def _data_fragment():
 
         origin = ss.get("datacube_origin")
         if origin and origin != "upload":
-            st.caption(f"Using **{ss.get('datacube_name')}** from {origin}. Upload a file "
-                       "above to replace it.")
+            if file_chip(f"Using **{ss.get('datacube_name')}** from {origin}. Upload a file "
+                         "above to replace it.", "remove_datacube",
+                         "Remove this datacube."):
+                _reset_datacube()
+                st.rerun()                # the other blocks forget the datacube too
         for error in ss.get("datacube_read_errors") or []:
             st.error(f"Could not read the datacube: {error}")
         if ss.get("datacube_check") is not None:
@@ -655,13 +680,10 @@ def _render_side_file(kind, df, cfg):
     outcome = ss[f"{kind}_check"][1]
     origin = ss.get(f"{kind}_origin")
     if origin and origin != "upload":
-        note, remove = st.columns([4, 1], vertical_alignment="center")
-        with note:
-            st.caption(f"Using **{ss.get(f'{kind}_name')}** from {origin}.")
-        with remove:
-            if st.button("Remove", key=f"remove_{kind}", help=f"Run without a {title.lower()}."):
-                _clear_side(kind)
-                st.rerun()
+        if file_chip(f"Using **{ss.get(f'{kind}_name')}** from {origin}.", f"remove_{kind}",
+                     f"Remove this {title.lower()} - run without one."):
+            _clear_side(kind)
+            st.rerun()
     if outcome.ok:
         v = outcome.value
         if kind == "mapping":
@@ -769,6 +791,18 @@ def _set_prior(prepared, name, origin, from_generator=False, note=None):
         ss.pop("prior_upload_sig", None)
 
 
+def _clear_prior():
+    """Deselect the prior file, whatever it came from (the ✕)."""
+    ss = st.session_state
+    for key in ("prior_working_table", "prior_effective_bytes", "prior_effective_name",
+                "prior_source_name", "prior_origin", "prior_fill_note", "prior_upload_sig",
+                "prior_validation"):
+        ss.pop(key, None)
+    ss["prior_is_edited"] = False
+    ss["prior_from_generator"] = False
+    ss["prior_uploader_version"] = ss.get("prior_uploader_version", 0) + 1   # empty the box
+
+
 # --- a generated file is a DRAFT: preview / edit it here, download it, or Use it
 def _draft_prefix(name):
     return "gen_" + re.sub(r"[^A-Za-z0-9]+", "_", str(name).rsplit(".", 1)[0]).strip("_")
@@ -797,7 +831,7 @@ def _save_draft(name, table):
 
 def _use_generated(file_name, table):
     """'Use': the draft becomes the run's prior file, its blanks filled with
-    the defaults (pooling global, sign free, sd 1, regional sd 0)."""
+    the defaults (pooling global, sign free, mean 0, sd 1, regional sd 0)."""
     filled, changes = fill_blank_priors(table)
     note = (f"Blanks filled with the defaults: {describe_fill(changes)}."
             if changes else "Nothing was blank - used as it is.")
@@ -932,7 +966,8 @@ def _render_fill_step(cfg):
             if st.button("Use", key=f"gen_use_{name}", type="primary",
                          use_container_width=True, disabled=draft is None,
                          help="Make it the run's prior file. Blank cells get the defaults: "
-                              "pooling global, sign free, sd 1, regional sd 0."):
+                              "pooling global, sign free, mean 0 (0.05 when signed), sd 1, "
+                              "regional sd 0."):
                 _use_generated(name, draft)
     st.markdown(FILLED_TEXT)
     rows = result.get("warnings") or []
@@ -998,6 +1033,9 @@ def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prio
             st.rerun()                    # the Run checklist re-checks against it
         if prior_error:
             st.toast(f"Error: {prior_error}", icon="🚨")
+    elif ss.get("prior_origin") == "upload" and ss.get("prior_working_table") is not None:
+        _clear_prior()                    # its file was taken out of the upload box (✕)
+        st.rerun()
     table = ss.get("prior_working_table")
     if table is None:
         ss["prior_is_edited"] = False
@@ -1006,8 +1044,15 @@ def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prio
     where = (" (generated by codebase 1)" if origin == "generated" or
              (origin is None and ss.get("prior_from_generator"))
              else f" (from {origin})" if origin and origin != "upload" else "")
-    st.success(f"Prior file in use: {ss.get('prior_effective_name', 'feature_priors.csv')}"
-               + where + (" - edited here" if ss.get("prior_is_edited") else ""))
+    line, cross = st.columns([14, 1], vertical_alignment="center")
+    with line:
+        st.success(f"Prior file in use: {ss.get('prior_effective_name', 'feature_priors.csv')}"
+                   + where + (" - edited here" if ss.get("prior_is_edited") else ""))
+    with cross:
+        if st.button("✕", key="remove_prior",
+                     help="Deselect this prior file (a generated draft stays below)."):
+            _clear_prior()
+            st.rerun()
     if ss.get("prior_fill_note"):
         st.caption(ss["prior_fill_note"])
     show_prior_validation(validate_prior(table), compact=True)
@@ -1110,11 +1155,12 @@ def _start_run():
         st.error(_sentence(problem))
         return None
     cfg = ss.get("cfg_values")
+    enforce_fixed(cfg, ss.get("cfg_base") or {})     # the team's fixed settings, always
     check = codebase.validate_config(cfg)
     if not check.ok:
         st.error("The settings are not valid: " + " | ".join(check.errors))
         return None
-    config_text = codebase.config_yaml(cfg)
+    config_text = codebase.config_yaml(cfg, only=access()["editable"])
     if not config_text.ok:
         st.error("The settings could not be written: " + " | ".join(config_text.errors))
         return None
@@ -1147,6 +1193,7 @@ def _start_run():
                 bmc, run, names, user=_user_email(), source=source,
                 changed=changes[1] if changes else None, job_id=job_id,
                 app_codebase=codebase.status().get("version", ""))
+            request["role"] = role()
             if changes and changes[2]:
                 request["changed_settings"] = [f"{c['setting']}: {c['before']} → {c['after']}"
                                                for c in changes[2]]

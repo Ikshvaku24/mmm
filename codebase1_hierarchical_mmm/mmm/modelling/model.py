@@ -103,7 +103,13 @@ def _bucket_betas(model, bname, specs, region_names):
         # every region has its own prior and its own coefficient - no pooling
         raw = pm.Normal(f"{pref}_{bname}", mu=reg_loc, sigma=reg_sd,
                         dims=("region", dim))
-        beta = sgn * pt.exp(raw) if signed else raw
+        if not signed:
+            # a free coefficient IS the sampled parameter, already named
+            # beta_<bucket> with dims (region, feature). Wrapping it in a
+            # Deterministic of the same name raised "Variable name beta_ifree
+            # already exists" - every independent + free feature failed.
+            return raw
+        beta = sgn * pt.exp(raw)
     else:  # global - one coefficient shared by all regions
         b = pm.Normal(f"g{pref}_{bname}", mu=pop_loc, sigma=pop_sd, dims=dim)
         shared = sgn * pt.exp(b) if signed else b

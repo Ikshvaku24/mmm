@@ -25,7 +25,7 @@ console just stops being the place you are expected to read them.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
 
 import contextlib
 import os
@@ -137,6 +137,43 @@ _RULES = (
             "genuinely gets its own prior. TUNING_GUIDE section 1.7."),
     ),
     dict(
+        slug="relative_sd_read_as_absolute",
+        severity="info",
+        match=("has nothing to be a fraction OF",),
+        title="A free variable with mean 0 had its relative sd read as absolute",
+        means=(
+            "`prior_sd_basis=relative` reads `global_prior_sd` as a FRACTION of "
+            "the mean. A free variable whose mean is 0 has nothing to take a "
+            "fraction of, so its sd was read as an absolute sd in coefficient "
+            "units - for global_prior_sd=1, Normal(0, 1)."),
+        why=(
+            "Expected for a generated prior file (relative basis) whose blank "
+            "means were filled with 0 by the web app's Use / Fill blanks: the "
+            "variable starts from 'no effect, wide uncertainty'."),
+        fix=(
+            "Nothing, if that is the intent. Otherwise give the variable a mean, "
+            "or set prior_sd_basis=absolute to say the sd is absolute. "
+            "FEATURE_PRIOR_GUIDE.md."),
+    ),
+    dict(
+        slug="negative_mean_read_as_size",
+        severity="review",
+        match=("feature was read as its size",),
+        title="A negative prior_mean was read as its size",
+        means=(
+            "For `sign_constraint=negative` the coefficient is built as "
+            "`-exp(...)`, so `prior_mean` is a SIZE. A negative number written "
+            "there (e.g. -0.08 for a price) is read as its size (0.08): the "
+            "model uses the number you wrote, with the sign from "
+            "`sign_constraint`."),
+        why=(
+            "Writing the mean with its sign is the natural reading. It is kept, "
+            "and noted so the prior file can be tidied."),
+        fix=(
+            "Nothing is wrong. To silence it, write the size (0.08) - "
+            "TUNING_GUIDE section 1.4."),
+    ),
+    dict(
         slug="prior_mean_not_a_magnitude",
         severity="high",
         match=("need prior_mean > 0", "(a magnitude)"),
@@ -147,13 +184,16 @@ _RULES = (
             "The direction comes from `sign_constraint`, never from the sign "
             "of the mean."),
         why=(
-            "Writing a negative mean for a negative feature is the common "
-            "reading, and it is wrong here - the value was replaced by a "
-            "default (0.05) or fell back to the feature-level prior, so the "
-            "model is NOT using the number you wrote."),
+            "A mean of 0 has no size, and a NEGATIVE mean on a "
+            "`sign_constraint=positive` feature contradicts its own sign - so "
+            "the value was replaced by a default (0.05), or a region row fell "
+            "back to the feature-level prior. The model is NOT using the number "
+            "you wrote. (A negative mean on a `negative` feature is read as its "
+            "size instead - see negative_mean_read_as_size.)"),
         fix=(
-            "Write the positive magnitude and set `sign_constraint=negative`. "
-            "TUNING_GUIDE section 1.4."),
+            "Write the size (> 0), and check the sign: if the effect really is "
+            "negative, set `sign_constraint=negative`. TUNING_GUIDE section "
+            "1.4."),
     ),
     dict(
         slug="negative_values_uncentred",
@@ -484,15 +524,53 @@ def _table(df: pd.DataFrame) -> list[str]:
     return out
 
 
+_LIBRARY_NOTICES = (DeprecationWarning, PendingDeprecationWarning, FutureWarning)
+_PACKAGE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def split_library_notices(caught) -> tuple[list, list]:
+    """(warnings about the model, deprecation notices from other packages).
+
+    A library's DeprecationWarning / FutureWarning (e.g. 92 from netCDF4 while
+    trace.nc is written, under numpy 2.5) says nothing about the model, yet it
+    landed in 00_warnings as "Uncategorised" - the loudest category. Notices
+    raised from code outside this package are kept apart for maintainers
+    (library_notices.csv); everything raised from the package stays."""
+    model, library = [], []
+    for w in caught or []:
+        cat = getattr(w, "category", None)
+        raw = str(getattr(w, "filename", "") or "")
+        where = os.path.abspath(raw)
+        outside = not where.startswith(_PACKAGE_DIR)
+        # import machinery ("<frozen importlib._bootstrap>": numpy's binary
+        # compatibility notice) is never about the model either
+        if raw.startswith("<frozen") or (
+                isinstance(cat, type) and issubclass(cat, _LIBRARY_NOTICES)
+                and outside):
+            library.append(w)
+        else:
+            model.append(w)
+    return model, library
+
+
 def write_warning_docs(caught, outdir: str, run_name: str = "") -> pd.DataFrame:
     """Write 00_INDEX.md, one <category>.md per category, and all_warnings.csv.
 
     Returns the frame so callers can print a summary. Writing an index even
     when there are no warnings matters: a missing file is ambiguous ("did it
     not run, or was it clean?"), an explicit "no warnings" is not.
+    Deprecation notices from other packages go to library_notices.csv instead
+    (`split_library_notices`).
     """
-    df = to_frame(caught)
+    caught, library = split_library_notices(caught)
     os.makedirs(outdir, exist_ok=True)
+    if library:
+        lib = to_frame(library)
+        (lib.groupby(["warning_class", "source", "template"], as_index=False)
+            .agg(n=("template", "size"), example=("message", "first"))
+            .sort_values("n", ascending=False)
+            .to_csv(os.path.join(outdir, "library_notices.csv"), index=False))
+    df = to_frame(caught)
     # Two files rather than one, so the prose is not repeated on every row:
     #   all_warnings.csv  one row per warning - who, where, and the numbers
     #   warning_texts.csv one row per distinct MESSAGE, with its full text

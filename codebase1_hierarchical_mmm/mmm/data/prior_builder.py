@@ -105,7 +105,7 @@ falls out of the model.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
 
 import os
 import warnings

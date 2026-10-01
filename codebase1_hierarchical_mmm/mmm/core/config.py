@@ -69,7 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
-__codebase__ = "2026.09.29.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
 
 import math
 import warnings
@@ -525,6 +525,15 @@ class FeatureSpec:
         else:
             if s.prior_mean is None:
                 s.prior_mean = 0.05
+            elif s.sign == "negative" and s.prior_mean < 0:
+                # "-0.08" is the natural way to write a negative driver's
+                # prior, and its size is not in doubt: keep it. (Until
+                # 2026-10-01 it was replaced by 0.05, discarding the number.)
+                warnings.warn(
+                    f"{s.name}: prior_mean={s.prior_mean:g} for a sign_constraint=negative "
+                    f"feature was read as its size, {abs(s.prior_mean):g}. The sign "
+                    "comes from sign_constraint; the mean is a size.")
+                s.prior_mean = abs(float(s.prior_mean))
             elif s.prior_mean <= 0:
                 warnings.warn(
                     f"{s.name}: sign-constrained features need prior_mean > 0 "
@@ -624,7 +633,14 @@ class FeatureSpec:
             rp = rp if isinstance(rp, RegionPrior) else RegionPrior(**dict(rp))
             if rp.prior_mean is not None:
                 rp.prior_mean = float(rp.prior_mean)
-                if s.sign != "free" and rp.prior_mean <= 0:
+                if s.sign == "negative" and rp.prior_mean < 0:
+                    warnings.warn(
+                        f"{s.name}[{reg}]: prior_mean={rp.prior_mean:g} for a "
+                        "sign_constraint=negative feature was read as its size, "
+                        f"{abs(rp.prior_mean):g}. The sign comes from "
+                        "sign_constraint; the mean is a size.")
+                    rp.prior_mean = abs(rp.prior_mean)
+                elif s.sign != "free" and rp.prior_mean <= 0:
                     warnings.warn(
                         f"{s.name}[{reg}]: sign-constrained features need "
                         f"prior_mean > 0 (a magnitude); got {rp.prior_mean}. "

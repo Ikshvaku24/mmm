@@ -9,9 +9,19 @@ The values start from the backend folder's config.yaml - the team's current
 settings, which differ from the dataclass defaults for several keys - and the
 file sent to the job always carries EVERY key, so nothing silently falls back
 to a default. The keys the job sets itself (input paths, output folder, run
-name) are shown but cannot be edited.
+name) cannot be edited.
+
+Who may change what is codebase 1's app_access.yaml (`settings.app_access`):
+people on `full_access` or `config_full_access` may change every setting; an
+ANALYST only the settings under `editable` (an allow-list). Every other
+setting is FIXED at the team's config.yaml value: it gets no widget, and
+`enforce_fixed` puts it back whenever a config.yaml is loaded, a run is
+reused or a run starts. The config.yaml an analyst downloads or saves with a
+run holds only the settings they may change; the job lays it over the team's
+config.yaml.
 """
 import copy
+import hashlib
 
 import pandas as pd
 import streamlit as st
@@ -43,16 +53,81 @@ def _fmt(v):
 
 
 def get_schema():
-    """codebase 1's config schema, cached per backend version."""
-    version = codebase.status().get("version")
+    """codebase 1's config schema, cached per backend copy (version AND
+    fingerprint - so an edited app_access.yaml reaches open sessions too)."""
+    status = codebase.status()
+    stamp = (status.get("version"), status.get("fingerprint"))
     cached = st.session_state.get("cfg_schema")
-    if cached and cached[0] == version:
+    if cached and cached[0] == stamp:
         return cached[1]
     out = codebase.schema()
     if not out.ok:
         return None
-    st.session_state["cfg_schema"] = (version, out.value)
+    st.session_state["cfg_schema"] = (stamp, out.value)
     return out.value
+
+
+# --------------------------------------------------------------------------- #
+# who may do what (codebase 1's app_access.yaml)
+# --------------------------------------------------------------------------- #
+def _viewer_email():
+    try:
+        headers = getattr(st.context, "headers", None) or {}
+        return str(headers.get("X-Forwarded-Email", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def access():
+    """What the person viewing the page may do, from app_access.yaml:
+    {"full": bool, "config_full": bool, "editable": set | None (= every
+    setting), "show_fixed": bool, "policy": the file as read}."""
+    policy = (get_schema() or {}).get("access") or {"editable": None}
+    email = _viewer_email()
+    full = bool(email) and email in (policy.get("full_access") or [])
+    config_full = full or (bool(email) and email in (policy.get("config_full_access") or []))
+    editable = policy.get("editable")
+    return {"full": full, "config_full": config_full,
+            "editable": None if (config_full or editable is None) else set(editable),
+            "show_fixed": bool(policy.get("show_fixed")), "policy": policy}
+
+
+def has_full_access():
+    """Full access: every setting AND the admin tools (Reload codebase 1, the
+    backend folder, Open in Databricks)."""
+    return access()["full"]
+
+
+def role():
+    a = access()
+    return "full_access" if a["full"] else "config_full_access" if a["config_full"] else "analyst"
+
+
+def ui_policy():
+    """(editable 'section.key' set - None = every setting -, show_fixed, the
+    policy as read) for the person viewing the page."""
+    a = access()
+    return a["editable"], a["show_fixed"], a["policy"]
+
+
+def enforce_fixed(values, base):
+    """Every setting the analyst may not change takes the base config's value
+    (the team's config.yaml). Returns the 'section.key' that were put back."""
+    editable, _show, _ui = ui_policy()
+    if editable is None or not values or not base:
+        return []
+    job_owned = job_owned_keys()
+    reset = []
+    for section, block in values.items():
+        for key in list(block or {}):
+            name = f"{section}.{key}"
+            if name in editable or name in job_owned:
+                continue
+            fixed = (base.get(section) or {}).get(key)
+            if not _same(block[key], fixed):
+                block[key] = copy.deepcopy(fixed)
+                reset.append(name)
+    return reset
 
 
 def _sync_with_schema():
@@ -77,6 +152,10 @@ def _sync_with_schema():
         section, key = row["section"], row["key"]
         base.setdefault(section, {}).setdefault(key, row["default"])
         values.setdefault(section, {}).setdefault(key, base[section][key])
+    # app_access.yaml may have changed with the re-upload: a setting that is
+    # now fixed goes back to the team's value
+    if enforce_fixed(values, base):
+        _bump()
 
 
 def init_config_state():
@@ -152,10 +231,34 @@ def _set_config(values):
     _bump()
 
 
-def load_config(values):
-    """Replace every setting - e.g. with a reused run's config.yaml. The
-    widgets redraw with the new values; the base config stays the team's."""
+def load_config(values, origin=None, name=""):
+    """Replace every setting - with a loaded file (origin "file") or a reused
+    run's config.yaml (origin "run", `name` = its label). The widgets redraw
+    with the new values; the base config stays the team's. Settings the
+    person may not change keep the team's values; returns the 'section.key'
+    that were put back (the file's values that were ignored)."""
+    values = copy.deepcopy(values)
+    reset = enforce_fixed(values, st.session_state.get("cfg_base") or {})
     _set_config(values)
+    st.session_state["cfg_origin"] = origin
+    st.session_state["cfg_origin_name"] = name
+    if origin != "file":
+        _clear_config_upload()
+    return reset
+
+
+def _clear_config_upload():
+    """Empty the Load box (a new key) - its file no longer describes the settings."""
+    st.session_state["cfg_upload_version"] = st.session_state.get("cfg_upload_version", 0) + 1
+    st.session_state.pop("cfg_file_sig", None)
+
+
+def reset_config_to_base():
+    """Back to the team's config.yaml - what the ✕ on a loaded or reused config does."""
+    _set_config(st.session_state["cfg_base"])
+    st.session_state["cfg_origin"] = None
+    st.session_state["cfg_origin_name"] = ""
+    _clear_config_upload()
 
 
 def job_owned_keys():
@@ -276,9 +379,6 @@ def _settings_fragment():
     """A fragment: editing a setting refreshes this block only, not the page."""
     with st.container(border=True):
         st.markdown("### ③ Model settings")
-        st.caption("codebase 1's config.yaml. Dropdowns list the values codebase 1 "
-                   "accepts; hover a setting for its help. This exact file is sent "
-                   "with the run.")
         if not init_config_state():
             st.error("Model settings are unavailable until codebase 1 loads (see the "
                      "message at the top).")
@@ -289,9 +389,25 @@ def _settings_fragment():
             st.error("Could not read codebase 1's settings schema.")
             st.session_state["cfg_valid"] = False
             return
+        editable, show_fixed, policy = ui_policy()
+        st.caption("codebase 1's config.yaml. Dropdowns list the values codebase 1 "
+                   "accepts; hover a setting for its help."
+                   + (" You may change every setting." if editable is None else
+                      f" You can change the {len(editable)} settings the team opened "
+                      "(app_access.yaml); every other setting keeps the team's value, "
+                      "and the config.yaml saved with your run holds only yours."))
         for err in st.session_state.get("cfg_base_error") or []:
             st.warning("The backend's config.yaml could not be read, so these start "
                        f"from the codebase defaults: {err}")
+        if policy.get("error"):
+            st.error("codebase 1's app_access.yaml could not be read, so every setting "
+                     f"is fixed until it is corrected: {policy['error']}")
+        if policy.get("unknown"):
+            st.warning("app_access.yaml names settings codebase 1 does not have - they "
+                       "are ignored: " + ", ".join(policy["unknown"]))
+        note = st.session_state.pop("cfg_load_note", None)
+        if note:
+            st.info(note)
 
         values = st.session_state["cfg_values"]
         base = st.session_state["cfg_base"]
@@ -299,16 +415,23 @@ def _settings_fragment():
         job_owned = set(schema["job_owned"])
         watched_before = _watched(values)
         valid_before = st.session_state.get("cfg_valid")
+
+        def shown(row):
+            return editable is None or f"{row['section']}.{row['key']}" in editable
+
         rows_by = {}
         for row in schema["rows"]:
-            rows_by.setdefault(row["section"], []).append(row)
+            if shown(row):
+                rows_by.setdefault(row["section"], []).append(row)
 
-        # The widgets are only drawn while the editor is open - about a hundred
+        # The widgets are only drawn while the editor is open - up to a hundred
         # of them, which every page refresh would otherwise redraw.
         if st.toggle("Edit settings", key="cfg_editor_open"):
+            if not rows_by:
+                st.caption("Every setting is fixed by the team (app_access.yaml).")
             order = [s for s in TAB_ORDER if s in rows_by] + [
                 s for s in rows_by if s not in TAB_ORDER]
-            tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order])
+            tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order]) if order else []
             for tab, section in zip(tabs, order):
                 with tab:
                     blurb = schema["blurbs"].get(section)
@@ -316,32 +439,70 @@ def _settings_fragment():
                         st.caption(blurb)
                     _render_section(section, rows_by[section], values, base,
                                     job_owned, version)
+            if show_fixed and editable is not None:
+                fixed = [{"setting": f"{r['section']}.{r['key']}",
+                          "value": _fmt((values.get(r["section"]) or {}).get(r["key"])),
+                          "what it does": " ".join(str(r["help"]).split())[:120]}
+                         for r in schema["rows"]
+                         if not shown(r) and f"{r['section']}.{r['key']}" not in job_owned
+                         and r["kind"] != "path"]
+                with st.expander(f"Fixed by the team ({len(fixed)} settings)"):
+                    st.dataframe(pd.DataFrame(fixed), use_container_width=True,
+                                 hide_index=True)
 
+        if st.session_state.get("cfg_origin") == "run":
+            note_col, x_col = st.columns([14, 1], vertical_alignment="center")
+            with note_col:
+                st.caption("Settings from **"
+                           + str(st.session_state.get("cfg_origin_name") or "a reused run")
+                           + "**.")
+            with x_col:
+                if st.button("✕", key="cfg_origin_clear",
+                             help="Remove these settings - back to the team's config.yaml."):
+                    reset_config_to_base()
+                    st.rerun()
         up_col, dl_col, reset_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         with up_col:
-            uploaded = st.file_uploader("Load a config.yaml", type=["yaml", "yml"],
-                                        key=f"cfg_upload_{version}",
-                                        help="Replaces every setting with the file's. "
-                                             "Keys the file leaves out take codebase 1's "
-                                             "defaults.")
+            uploaded = st.file_uploader(
+                "Load a config.yaml", type=["yaml", "yml"],
+                key=f"cfg_upload_{st.session_state.get('cfg_upload_version', 0)}",
+                help="Takes the settings you may change from the file; a setting the file "
+                     "leaves out, and every setting fixed by the team, keeps the team's "
+                     "value. Remove the file (✕) to go back to the team's settings.")
             if uploaded is not None:
-                parsed = codebase.parse_config_yaml(
-                    uploaded.getvalue().decode("utf-8-sig", errors="replace"))
-                if parsed.ok:
-                    _set_config(parsed.value)
-                    st.rerun()
-                for err in parsed.errors:
-                    st.error(err)
-        text = codebase.config_yaml(values)
+                data = uploaded.getvalue()
+                signature = (uploaded.name, hashlib.sha1(data).hexdigest())
+                if st.session_state.get("cfg_file_sig") != signature:
+                    parsed = codebase.parse_config_yaml(
+                        data.decode("utf-8-sig", errors="replace"), base=base)
+                    if parsed.ok:
+                        reset = load_config(parsed.value, origin="file", name=uploaded.name)
+                        st.session_state["cfg_file_sig"] = signature
+                        if reset:
+                            st.session_state["cfg_load_note"] = (
+                                f"Loaded {uploaded.name}. {len(reset)} of its settings are "
+                                "fixed by the team and were ignored: "
+                                + ", ".join(reset[:12]) + (" ..." if len(reset) > 12 else ""))
+                        st.rerun()
+                    for err in parsed.errors:
+                        st.error(err)
+            elif st.session_state.get("cfg_origin") == "file":
+                reset_config_to_base()          # the file was taken out of the box (✕)
+                st.rerun()
+        text = codebase.config_yaml(values, only=editable)
         with dl_col:
             st.download_button("Download config.yaml",
                                data=(text.value or "").encode("utf-8"),
                                file_name="config.yaml", mime="text/yaml",
                                disabled=not text.ok, key="cfg_download",
-                               on_click="ignore")
+                               on_click="ignore",
+                               help="Every setting." if editable is None else
+                               "The settings you may change; the team's config.yaml "
+                               "supplies the rest when the file is run.")
         with reset_col:
-            if st.button("Reset to base", key="cfg_reset", type="secondary"):
-                _set_config(base)
+            if st.button("Reset to base", key="cfg_reset", type="secondary",
+                         help="Every setting back to the team's config.yaml."):
+                reset_config_to_base()
                 st.rerun()
 
         check = codebase.validate_config(values)
@@ -362,12 +523,17 @@ def _settings_fragment():
 
         if st.session_state.get("prior_from_generator"):
             units = codebase.units_problems(values)
+            unit_keys = {"run.dv_scale", "run.dv_scale_scope", "data.dv_aggregation"}
             if units.ok and units.value:
                 st.warning("The generated prior file is per unit of each region's "
                            "MEAN KPI, but " + "; ".join(units.value)
-                           + ". Every generated mean would be off by a constant.")
-                if st.button("Use dv_scale: mean, dv_scale_scope: region and "
-                             "dv_aggregation: mean", key="cfg_fix_units"):
+                           + ". Every generated mean would be off by a constant."
+                           + ("" if editable is None or unit_keys <= editable else
+                              " These settings are fixed by the team - ask whoever "
+                              "maintains config.yaml."))
+                if (editable is None or unit_keys <= editable) and st.button(
+                        "Use dv_scale: mean, dv_scale_scope: region and "
+                        "dv_aggregation: mean", key="cfg_fix_units"):
                     fixed = copy.deepcopy(values)
                     fixed["run"]["dv_scale"] = "mean"
                     fixed["run"]["dv_scale_scope"] = "region"

@@ -19,6 +19,111 @@ needs no redeploy.
 
 ---
 
+## Update 6 - codebase 1 checked under real PyMC (2026.10.01.1)
+
+Codebase 1 was run end to end with PyMC 6.3 / ArviZ 1.3 - the versions the
+job installs (its `requirements.txt` pins nothing; the client runs already
+used PyMC 6.2 / ArviZ 1.2-1.3). Besides the `independent` + `free` crash
+fixed in Update 5 (now confirmed on the real PyMC), it found:
+
+| Problem | Effect | Now |
+|---|---|---|
+| `posterior_summary_full.csv` and the report's "worst parameters by R-hat" table put region x feature rows under the wrong labels with ArviZ 1.x, whenever the model has no intercept and no trend - the team's `config.yaml` | a reader of those two could attribute a coefficient's R-hat / ESS / mean to the wrong region or feature. The coefficient report, contributions and contraction file were always right | one parameter at a time, unrounded (the old rounding also left small raw-unit coefficients two or three digits) |
+| `energy_plot.png`, `trace_worst_rhat.png` and the report's BFMI line were missing on ArviZ 1.x | three convergence diagnostics silently absent from every recent run | drawn and computed directly from the trace |
+| A negative `global_prior_mean` on a `negative` variable (`-0.08`) was replaced by 0.05 | the model used a different prior than the one written | read as its size (0.08), with a note |
+| Library deprecation notices filled `00_warnings` as "Uncategorised" | noise in the loudest category | kept apart in `library_notices.csv` |
+
+A new suite, `tests/test_v24_real_pymc.py`, samples the real model and checks
+all of this. It skips where PyMC is not installed; run it after any PyMC or
+ArviZ upgrade.
+
+**To get these changes:** re-upload the whole `codebase1_hierarchical_mmm`
+folder (Step 3). It is now **2026.10.01.1**; the app's header shows it. The
+app and the job need no change.
+
+---
+
+## Update 5 - deselect anything, access roles, the complete log, charts
+
+| You asked for | Now |
+|---|---|
+| Deselect the feature prior after **Use this file** or **Reuse inputs** | The *Prior file in use* line has a **✕**, whatever the file came from (uploaded, generated or reused). The prior's upload box empties too |
+| A ✕ on every file (mapping, input, share, config ...) | A file in an upload box is deselected with the box's own ✕: the datacube, prior, mapping, share file and config.yaml (taking an uploaded config.yaml out puts the team's settings back). A file that did not come from a box (a reused run's, a generated one) has a *Using … from …* line with a **✕**. Reused settings say *Settings from <run>*, with a **✕** that goes back to the team's config.yaml |
+| **Remove all** in the prior editor's Remove column | **☑ Remove all** under the grid ticks every row; untick the rows to keep and press **Save Changes**. **☐ Keep all** unticks them all again. Unsaved edits in the grid are kept |
+| A blank `global_prior_mean` should be 0 | The fill rule (**Use**, and **Fill blanks with the defaults**) now fills it with **0** - or **0.05** for a variable with a positive or negative sign, because codebase 1 takes that mean as a size and does not allow 0 there |
+| **Reload codebase 1** only for me | Shown only to the people under `full_access:` in codebase 1's new `app_access.yaml` - your company e-mail is there. The same goes for the backend's folder path and **Open in Databricks** |
+| Remove **Open in Databricks** (the log is in the app), and make sure the complete log is shown | Nobody else sees it any more. The run panel shows the **complete** job log - also while the run runs: the job now copies its log into the run's `Outputs/` every 30 seconds, and the panel re-reads it every 15, with the newest line above it. A failed run shows its **full** traceback (it used to be cut to the last 60 lines), and its job log opens by itself |
+| One RBAC file that merges the config one with the above, and two full-access lists | `codebase1_hierarchical_mmm/app_access.yaml` replaces `config_ui.yaml`. It has `full_access` (every setting and the admin tools), `config_full_access` (every setting), `editable` (what everyone else may change) and `show_fixed` |
+| Nobody can change a non-editable setting, even by uploading a config.yaml; the run folder keeps only the editable settings | An uploaded config.yaml gives only its editable settings, and the app lists the ones it ignored. The run folder's `Config/config.yaml` now holds only the settings that person may change. The job lays it over the team's `config.yaml`, so the fixed settings always come from there. `run_request.json` records the person's role |
+| Charts instead of the CSV tables - the important ones, not cluttered | The results are six views: **Fit** (actual vs fitted, the 90% band, the holdout shaded, and the headline fit numbers as tiles); **Contributions** (each driver's share of sales, coloured by pillar - by variable or by pillar, for any region and period); **Decomposition** (weekly sales split into the baseline core and each pillar - *Drivers only* zooms in); **Prior vs posterior** (every variable as a point, contraction against shift, with the ones to read labelled - **click a point** for its prior, data and posterior curves); **Convergence** (the report as text); **Warnings**. Every chart has a *Table* under it with its numbers and a download of the file. A pillar has the same colour in every view |
+
+Also found and fixed:
+- **A run with a `pooling: independent` + `sign_constraint: free` variable could
+  not start.** codebase 1 gave two model variables the same name
+  (`beta_ifree`), and PyMC refuses that. The fill rule gives exactly this
+  combination to a variable that has per-region rows and no sign, so a run
+  would have hit it. Fixed in codebase 1 (`mmm/modelling/model.py`). The new
+  suite `tests/test_v23_model_buckets.py` builds every pooling × sign
+  combination.
+- A finished run's panel could say *job_log.txt is not there (yet)* for 20
+  seconds if it had been open while the run was going. It now reads the
+  complete log at once.
+
+**To get these changes:**
+1. Re-upload the whole `codebase1_hierarchical_mmm` folder (Step 3). It is now
+   **2026.09.30.1**, and the app needs it. `app_access.yaml` replaces
+   `config_ui.yaml`: nothing reads the old file, so delete it from the
+   workspace copy if it is still there.
+2. In `app_access.yaml`, add anyone else who should see every setting
+   (`config_full_access`) or everything (`full_access`). A change takes
+   effect within 5 minutes of re-uploading the file, or at once with
+   **Reload codebase 1**.
+3. Copy `web/` to the app's source folder again and press **Deploy**:
+   `requirements.txt` now has `plotly`, for the charts. The job needs no
+   change.
+
+---
+
+## Update 4 - which settings an analyst can change (`config_ui.yaml`, now `app_access.yaml`)
+
+| You asked for | Now |
+|---|---|
+| A file in codebase 1 where the coder decides which `config.yaml` settings analysts may change; the rest use the defaults | `codebase1_hierarchical_mmm/config_ui.yaml`, next to `config.yaml`. List a setting under its section and analysts can change it in **③ Model settings**. Every other setting is **fixed** at its value in the team's `config.yaml`: it gets no widget, and it is put back when an analyst loads another `config.yaml`, reuses an older run, or starts a run. The app says which fixed settings it kept |
+
+How the file works:
+- **An allow-list.** A setting codebase 1 adds later stays fixed until you
+  list it. A section can be opened whole (`sampler: all`), or everything
+  (`editable: all`).
+- **Spelling is checked.** A name codebase 1 does not have is shown as a
+  warning in the app and ignored. A file that cannot be read fixes EVERY
+  setting (and says why) - it never opens them.
+- **`show_fixed: true`** lists the fixed settings read-only, with their values,
+  under "Fixed by the team". It is off in the shipped file.
+- **`full_access:`** - the Databricks login e-mails of people (e.g. whoever
+  maintains `config.yaml`) who may see and change every setting in the app.
+- The shipped file opens 18 of the 107 settings:
+
+  | Section | Opened |
+  |---|---|
+  | data | `sheet`, `date_format`, `dv_aggregation`, `national_basis` |
+  | model | `likelihood`, `fourier_order`, `include_trend`, `include_intercept` |
+  | run | `date_col`, `region_col`, `dv_col`, `holdout_periods`, `holdout_fraction` |
+  | sampler | `draws`, `tune`, `target_accept` |
+  | output | `period_split` |
+  | cv | `enabled` |
+
+  Edit it to suit the team.
+- It travels with codebase 1: re-upload the folder and the app follows within
+  5 minutes (or at once with **Reload codebase 1**). No app redeploy.
+
+**To get these changes:**
+1. Re-upload the whole `codebase1_hierarchical_mmm` folder (Step 3). It is
+   now **2026.09.30**, and the app needs it.
+2. Copy `web/` to the app's source folder again and press **Deploy**. The job
+   is unchanged.
+
+---
+
 ## Update 3 - the generated prior file is a draft; readable setting changes
 
 | You asked for | Now |
@@ -132,10 +237,10 @@ folder, `Secondary Modelling/<bmc_name>/<run_name>/`.
 | Before | Now |
 |---|---|
 | Enabled when the prior and the input data were uploaded | Enabled when a checklist is complete: BMC and run name, datacube checked, settings valid, prior file **validated**, mapping/share file valid if you added one, and the job has the `bmc_name` / `run_name` parameters |
-| Sent the files straight to the job | First saves the datacube, the settings (a config file with **every** setting in it) and the prior file (and mapping/share files) into the run's folder, and writes `run_request.json`. Then it starts the job. If nothing changed since the run you reused, it asks first |
-| A popup showed the run; closing it lost the run | A panel under **Run Model** shows the run and stays until you press **Dismiss**: the status every 5 seconds, **Cancel run**, **Open in Databricks** |
+| Sent the files straight to the job | First saves the datacube, the settings (a config file with the settings you may change - the job fills in the rest from the team's `config.yaml`) and the prior file (and mapping/share files) into the run's folder, and writes `run_request.json`. Then it starts the job. If nothing changed since the run you reused, it asks first |
+| A popup showed the run; closing it lost the run | A panel under **Run Model** shows the run and stays until you press **Dismiss**: the status every 5 seconds, **Cancel run**, the job log as it grows (and **Open in Databricks** for full access) |
 | The popup only knew Pending / Running / Success / Terminated | Also handles Queued, Failed and Internal error, and shows why a run failed |
-| After the run: a Download button | After the run: the outputs zip, the **job log**, and the main results (warnings, convergence, fit, contributions, coefficients) |
+| After the run: a Download button | After the run: the run's zip, the complete **job log**, and the results as charts - fit, contributions, decomposition, prior vs posterior - with the convergence report and the warnings (Update 5) |
 
 A BMC's runs are listed in block ①, and **All recent runs**, at the bottom of
 the page, lists every run of the job: every BMC, runs started by other people
@@ -181,8 +286,8 @@ client instead of logging in again for every file.
   - Switch on **Edit settings** to show them. Dropdowns list the allowed
     values; hovering shows the help.
   - You can load, download or reset the file.
-  - The file you see is the file the job runs; the job only fills in the file
-    paths and the run name.
+  - You see and change the settings `app_access.yaml` gives you; the rest
+    are the team's. The job fills in the file paths and the run name.
 - **Mapping and share files** (optional).
   - Download a sample, or a template pre-filled with your datacube's variables.
   - Choose the file; it is checked, and saved with the run.
@@ -211,7 +316,8 @@ client instead of logging in again for every file.
      each file: **Download** it (fill it in Excel, choose it in step 3),
      **Preview / Edit** it in the app (then **Use this file** or download
      it), or **Use** it as it is. Use fills the blanks with the defaults
-     (pooling global, sign free, sd 1, regional sd 0; see Update 3).
+     (pooling global, sign free, mean 0, sd 1, regional sd 0; see Updates 3
+     and 5).
   3. **Choose** your filled file, or keep the one you used; **Preview / Edit**
      sits next to it. It is checked, and the run can start only once codebase 1
      says it is valid.
@@ -227,7 +333,11 @@ client instead of logging in again for every file.
     variables (constant, near zero) are in the run's `00_warnings` folder.
 - **Run panel, the BMC's runs, All recent runs.** Described under "2. Run
   Model button" above. The **job log** is `job_log.txt`, in the run's
-  `Outputs/` in ADLS: everything the job printed.
+  `Outputs/` in ADLS: everything the job printed. The job copies it there
+  every 30 seconds while it runs, so the panel shows it live.
+- **Results.** Six views of a finished run - Fit, Contributions,
+  Decomposition, Prior vs posterior, Convergence, Warnings - each chart with
+  its numbers in a table underneath (Update 5).
 
 ## Changes in the job notebook (`codebase1_hierarchical_mmm/demo.ipynb`)
 
@@ -360,8 +470,9 @@ permissions are the ones that count.
 
 Upload the **whole** `codebase1_hierarchical_mmm` folder to
 `/Workspace/Modelling/Backend/mmm_v5/`. Leave `mmm_v4` alone: the old job uses
-it. The app needs version **2026.09.29.2** or later: it refuses an older one,
-because an older job does not know the run folders.
+it. The app needs version **2026.09.30.1** or later: it refuses an older one
+(2026.09.29.2 brought the run folders, 2026.09.30.1 `app_access.yaml` and the
+live job log).
 
 For a later update, upload the whole folder again the same way, while no run
 is in progress. If only some files get replaced, the app's header warns that
@@ -469,9 +580,10 @@ On the app's page:
   do there.
 
 Then open the app's URL.
-- The header should say *Backend: codebase 1 2026.09.29.2 from the workspace
-  `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*. If it says codebase
-  1 could not be loaded, check two things:
+- The header should say *Backend: codebase 1 2026.09.30.1* - and, for the
+  people under `full_access` in `app_access.yaml`, *from the workspace
+  `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
+  codebase 1**. If it says codebase 1 could not be loaded, check two things:
   - `MDR_JOB_ID` points to the **new** job (the old one runs `mmm_v4`, which is
     too old);
   - the token owner can read the `mmm_v5` folder.
@@ -487,7 +599,10 @@ Then open the app's URL.
 2. **② Input data** - choose the datacube (or keep the reused one). Only
    problems that would stop the run are listed.
 3. **③ Model settings** - switch on **Edit settings** and change what you
-   need, or **Load** a `config.yaml`.
+   need, or **Load** a `config.yaml`. Only the settings codebase 1's
+   `app_access.yaml` opens for you can change - a loaded config.yaml gives
+   only those - and the rest keep the team's values. The ✕ next to a loaded
+   or reused config goes back to the team's.
 4. **④ Mapping / share file** *(optional)* - choose each; it is checked.
 5. **⑤ Prior file**:
    1. **Generate** - the block says beforehand which case (a-d) applies;
@@ -529,9 +644,9 @@ It is quicker, but you lose the old version to fall back on while you test.
 
 ## Dependencies
 
-**The app** (`requirements.txt`; only `pyyaml` is new):
-`streamlit~=1.54`, `pandas~=2.2.3`, `openpyxl`, `pyyaml`, `azure-identity`,
-`azure-storage-file-datalake`. Kept from before: `azure-keyvault-secrets`,
+**The app** (`requirements.txt`; `pyyaml` and, since Update 5, `plotly` are
+new): `streamlit~=1.54`, `pandas~=2.2.3`, `openpyxl`, `pyyaml`, `plotly`,
+`azure-identity`, `azure-storage-file-datalake`. Kept from before: `azure-keyvault-secrets`,
 `databricks-sql-connector`, `seaborn`, `matplotlib` (used by the disabled
 feasibility page).
 
@@ -551,7 +666,8 @@ a dependent library: `pymc`, `arviz`, `numpyro`, `jax[cuda]`, `numpy`,
 comes with the Databricks runtime. The old job ran on the all-purpose cluster
 `meridian_model_mmm_test` (DBR 17.3 LTS ML).
 
-**Codebase 1** must be version **2026.09.29.2 or newer** (the run folders);
+**Codebase 1** must be version **2026.09.30.1 or newer** (the run folders came
+in 2026.09.29.2, `app_access.yaml` and the live job log in 2026.09.30.1);
 the app says so if it is older. Runs made with a version older than
 2026.09.29.1 have no job log; their panel says so.
 

@@ -9,3 +9,5 @@ seaborn~=0.13.2
 matplotlib~=3.7.2
 # codebase 1 (loaded live from the workspace) reads config.yaml with it
 pyyaml>=6.0
+# the run's result charts (src/charts.py); without it the app shows the tables
+plotly>=5.24,<7

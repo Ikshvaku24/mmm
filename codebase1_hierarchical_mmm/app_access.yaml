@@ -1,0 +1,64 @@
+# app_access.yaml - who may do what in the BRIDGE web app (role-based access).
+#
+# People are named by their Databricks login e-mail - the one shown in the
+# app's top-right corner. Case and spaces do not matter.
+#
+# There are three roles:
+#
+#   full_access          EVERYTHING: change every config.yaml setting, and see the
+#                        admin tools nobody else sees - "Reload codebase 1", the
+#                        backend folder, "Open in Databricks" on a run.
+#   config_full_access   change every config.yaml setting (no admin tools).
+#   everyone else        an ANALYST: changes only the settings under `editable`.
+#
+# What an analyst may not change stays at its value in this folder's
+# config.yaml - also when they load another config.yaml (the file's other
+# settings are ignored) or reuse an older run. The config.yaml saved in a
+# run's folder then holds only the settings that person may change; the job
+# fills the rest in from this folder's config.yaml.
+#
+# The app reads this file with the rest of codebase 1: re-upload the folder
+# and the app follows within 5 minutes. No app redeploy.
+
+full_access:
+  - ikshvaku.x.rastogi@haleon.com
+
+config_full_access: []
+
+# What an ANALYST may change in Model settings. Only these get a widget.
+# * A setting codebase 1 adds later stays fixed until you list it here.
+# * A section can be opened whole:       sampler: all
+# * Everything can be opened at once:    editable: all
+# * Spelling is checked: a name codebase 1 does not have is shown as a warning
+#   in the app and ignored.
+# * The paths and the run name (data.input_path, data.feature_priors, ...,
+#   run.output_dir, run.run_name) are always set by the job.
+editable:
+  data:
+    - sheet
+    - date_format
+    - dv_aggregation
+    - national_basis
+  model:
+    - likelihood
+    - fourier_order
+    - include_trend
+    - include_intercept
+  run:
+    - date_col
+    - region_col
+    - dv_col
+    - holdout_periods
+    - holdout_fraction
+  sampler:
+    - draws
+    - tune
+    - target_accept
+  output:
+    - period_split
+  cv:
+    - enabled
+
+# true: an analyst sees the settings they may not change, read-only, with
+# their values ("Fixed by the team"). false: those are not shown.
+show_fixed: false

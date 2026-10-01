@@ -4,12 +4,16 @@ A run is found by its folder - Secondary Modelling/<BMC>/<run name>/, see
 projects.py - and, when the Jobs API knows it, by its job run. Its panel
 stays on the page until dismissed - it is no longer a popup that loses the
 run when closed. While the job runs, the panel refreshes itself every 5
-seconds (status, elapsed time, Cancel). When it finishes it shows the
-notebook's real error or the codebase version that ran, the run's zip (its
-inputs AND its outputs), the job log (job_log.txt, written by codebase 1's
-mmm/app_job.py) and the key result tables. "Reuse inputs" hands the run to
-the page, which loads its datacube, settings and prior (and mapping/share)
-files to edit and run again.
+seconds (status, elapsed time, Cancel) and shows the job log as it grows
+(codebase 1's mmm/app_job.py copies job_log.txt to the run's Outputs/ every
+30 s). When it finishes it shows the notebook's real error with its full
+traceback, or the codebase version that ran; the run's zip (its inputs AND its
+outputs); the complete job log; and the results as charts (src/charts.py):
+fit, contributions, decomposition, prior vs posterior - plus the convergence
+report and the warnings. "Reuse inputs" hands the run to the page, which loads
+its datacube, settings and prior (and mapping/share) files to edit and run
+again. "Open in Databricks" is for the people with full access in
+app_access.yaml; everyone else reads the log here.
 
 "All recent runs" lists the job's runs from the Jobs API - every BMC, and runs
 from before the run folders existed.
@@ -30,29 +34,52 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from src import projects
+from src import charts, projects
+from src.config_editor import has_full_access
 from src.files import download_folder, download_from_adls, is_not_found, zip_folder
 from src.jobs import cancel_run, get_run_output, get_run_status, list_runs
+
+try:
+    from streamlit.errors import StreamlitAPIException
+except ImportError:                  # a stand-in streamlit (the tests) has no errors module
+    class StreamlitAPIException(Exception):
+        pass
 
 TERMINAL_STATES = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
 DONE_RESULTS = {"SUCCESS", "FAILED", "CANCELED", "TIMEDOUT", "UPSTREAM_FAILED",
                 "UPSTREAM_CANCELED", "EXCLUDED", "SUCCESS_WITH_FAILURES",
                 "MAXIMUM_CONCURRENT_RUNS_REACHED"}
 MISS_RETRY_SECONDS = 20
+LIVE_LOG_SECONDS = 15        # re-read the log this often while the run runs
+LOG_FILE = "job_log.txt"
 
-RESULT_VIEWS = {
-    "Warnings": "00_warnings/all_warnings.csv",
-    "Convergence": "02_convergence/convergence_report.txt",
-    "Fit": "04_fit/fit_metrics.csv",
-    "Contributions": "05_contributions/contribution_summary.csv",
-    "Coefficients": "03_coefficients/coefficient_report.csv",
-    "Run info": "run_info.json",
+RESULT_VIEWS = ("Fit", "Contributions", "Decomposition", "Prior vs posterior",
+                "Convergence", "Warnings")
+CHART_VIEWS = {"Fit", "Contributions", "Decomposition", "Prior vs posterior"}
+RESULT_FILES = {
+    "fit": "04_fit/fit_metrics.csv",
+    "avp": "04_fit/actual_vs_predicted.csv",
+    "summary": "05_contributions/contribution_summary.csv",
+    "timeseries": "05_contributions/contribution_timeseries.csv",
+    "contraction": "02_convergence/prior_posterior_contraction.csv",
+    "convergence": "02_convergence/convergence_report.txt",
+    "warnings": "00_warnings/all_warnings.csv",
 }
 
 
 # --------------------------------------------------------------------------- #
 # small helpers
 # --------------------------------------------------------------------------- #
+def _rerun_fragment():
+    """Rerun just this fragment - or the whole page when this is not the
+    fragment's own rerun (Streamlit allows scope="fragment" only then; a
+    full-page run reaches here too, e.g. under AppTest)."""
+    try:
+        st.rerun(scope="fragment")
+    except StreamlitAPIException:
+        st.rerun()
+
+
 def _state(run):
     s = (run or {}).get("state") or {}
     return s.get("life_cycle_state", "N/A"), s.get("result_state") or ""
@@ -157,21 +184,29 @@ def _run_output(job_run_id):
     return st.session_state[key]
 
 
-def read_run_file(ref, rel):
+def read_run_file(ref, rel, max_age=None):
     """(bytes, None) or (None, message) for a file in the run's Outputs/.
-    Found files are cached; a miss is retried after MISS_RETRY_SECONDS - the
-    run may still be publishing."""
+
+    A found file is cached - for `max_age` seconds when given (a file the job
+    is still writing: the live log), otherwise until "Re-read files". A miss
+    is retried after MISS_RETRY_SECONDS - the run may still be publishing.
+    Anything cached by a live read (a half-written log, or "not there yet")
+    is read again by the first read without `max_age`, so a finished run
+    shows its complete log at once."""
     key = f"run_file::{projects.ref_key(ref)}::{rel}"
     cached = st.session_state.get(key)
-    if cached is not None:
-        if cached[0] == "ok":
-            return cached[1], None
-        if time.time() - cached[2] < MISS_RETRY_SECONDS:
-            return None, cached[1]
+    now = time.time()
+    live = max_age is not None
+    if cached is not None and not (len(cached) > 3 and cached[3] and not live):
+        status, payload, stamp = cached[0], cached[1], cached[2]
+        fresh_for = max_age if live else (MISS_RETRY_SECONDS if status == "miss"
+                                          else float("inf"))
+        if now - stamp < fresh_for:
+            return (payload, None) if status == "ok" else (None, payload)
     folder = projects.outputs_dir(ref)
     try:
         data = download_from_adls(f"{folder}/{rel}")
-        st.session_state[key] = ("ok", data, time.time())
+        st.session_state[key] = ("ok", data, now, live)
         return data, None
     except Exception as e:
         if is_not_found(e):
@@ -180,8 +215,26 @@ def read_run_file(ref, rel):
             message = (f"Could not read `{rel}`: {e}. If this is a permission error, the "
                        "app's storage identity cannot read folders the job creates - "
                        "see changes.md, Step 1 (ADLS).")
-        st.session_state[key] = ("miss", message, time.time())
+        st.session_state[key] = ("miss", message, now, live)
         return None, message
+
+
+def read_run_frame(ref, rel):
+    """(DataFrame, None) or (None, message) - a CSV of a finished run, parsed
+    once per session (forgotten with its bytes by "Re-read files")."""
+    key = f"run_file::{projects.ref_key(ref)}::{rel}::frame"
+    cached = st.session_state.get(key)
+    if cached is not None:
+        return cached, None
+    data, problem = read_run_file(ref, rel)
+    if data is None:
+        return None, problem
+    try:
+        frame = pd.read_csv(io.BytesIO(data))
+    except Exception as e:  # noqa: BLE001 - a bad file is a message, not a crash
+        return None, f"Could not read `{rel}`: {e}"
+    st.session_state[key] = frame
+    return frame, None
 
 
 def _run_info(ref):
@@ -220,6 +273,7 @@ def render_run_panel(ref, where, on_reuse=None):
 def _live_panel(ref, where, on_reuse):
     run = fetch_run(ref.get("job_run_id"))
     if not _known(run) or is_done(run):
+        _forget_files(ref)         # anything read while it ran (the log) is stale
         st.rerun()                 # finished: switch to the static panel, stop polling
     _panel_body(ref, where, run, on_reuse)
 
@@ -260,8 +314,10 @@ def _panel_body(ref, where, run, on_reuse):
                         st.error(f"Cancel failed: status code {response.status_code}")
                 except Exception as e:
                     st.error(f"Cancel failed: {e}")
-            if run.get("run_page_url"):
-                st.link_button("Open in Databricks", run["run_page_url"])
+            if run.get("run_page_url") and has_full_access():
+                st.link_button("Open in Databricks", run["run_page_url"],
+                               help="Shown to the people with full access in "
+                                    "app_access.yaml.")
             if on_reuse and st.button(
                     "Reuse inputs", key=f"reuse_{where}_{key}", type="primary",
                     help="Load this run's datacube, settings and prior file (and its "
@@ -274,23 +330,30 @@ def _panel_body(ref, where, run, on_reuse):
                 st.rerun()
 
         if running:
-            st.caption("The job log, the results and the run's zip appear here when "
-                       "the run finishes.")
+            st.caption("The results and the run's zip appear here when the run "
+                       "finishes. The job log below is copied from the cluster about "
+                       "every 30 seconds.")
+            _render_job_log(ref, where, live=True)
             return
         if not _known(run) and not info:
             st.caption("This run has no outputs yet. Its inputs can still be reused.")
             return
 
+        succeeded = _succeeded(run, info)
         _render_result(ref, run, info)
         _render_run_zip(ref, where)
-        _render_job_log(ref, where)
-        _render_results(ref, where)
+        _render_job_log(ref, where, expanded=not succeeded)
+        if succeeded:
+            _render_results(ref, where)
+
+
+def _succeeded(run, info):
+    _life, result = _state(run)
+    return (result == "SUCCESS") if _known(run) else (info or {}).get("status") == "success"
 
 
 def _render_result(ref, run, info):
-    _life, result = _state(run)
-    succeeded =(result == "SUCCESS") if _known(run) else (info or {}).get("status") == "success"
-    if succeeded:
+    if _succeeded(run, info):
         done = {}
         if _known(run) and ref.get("job_run_id"):
             try:
@@ -316,8 +379,14 @@ def _render_result(ref, run, info):
     if error:
         st.error(f"The run stopped: {error}")
     if trace:
-        with st.expander("Error details"):
-            st.code("\n".join(str(trace).splitlines()[-60:]), language="text")
+        text = str(trace)
+        with st.expander(f"Error details - the full traceback "
+                         f"({len(text.splitlines())} lines)"):
+            with st.container(height=380):
+                st.code(text, language="text")
+    if error or trace:
+        st.caption("The job log below has everything the run printed before it "
+                   "stopped.")
 
 
 def _collect_run(ref, local, with_trace):
@@ -383,49 +452,280 @@ def _render_run_zip(ref, where):
                           "only needed if they changed after you opened the run. A file "
                           "that was missing is looked up again by itself after 20 s."):
             _forget_files(ref)
-            st.rerun(scope="fragment")
+            _rerun_fragment()
 
 
-def _render_job_log(ref, where):
+def _render_job_log(ref, where, live=False, expanded=False):
+    """The complete job log. While the run runs it is re-read every
+    LIVE_LOG_SECONDS (the job copies it every 30 s) and its newest line is
+    shown above it; the log itself scrolls."""
     key = projects.ref_key(ref)
-    with st.expander("Job log"):
-        data, problem = read_run_file(ref, "job_log.txt")
+    with st.expander("Job log" + (" - live" if live else ""), expanded=expanded or live):
+        data, problem = read_run_file(ref, LOG_FILE,
+                                      max_age=LIVE_LOG_SECONDS if live else None)
         if data is None:
-            st.caption(problem + " Runs made with a codebase older than 2026.09.29.1 "
-                       "have no job log - open the run in Databricks instead.")
+            if live:
+                st.caption("No log yet - the job writes its first copy within about 30 "
+                           "seconds of starting (codebase 1 2026.09.30.1 or later).")
+            elif has_full_access():
+                st.caption(problem + " Runs made with a codebase older than 2026.09.29.1 "
+                           "have no job log - open the run in Databricks instead.")
+            else:
+                st.caption(problem + " Runs made with a codebase older than 2026.09.29.1 "
+                           "have no job log - ask a BRIDGE admin for the Databricks log.")
             return
         text = data.decode("utf-8", errors="replace")
-        with st.container(height=380):
+        lines = text.splitlines()
+        bits = [f"{len(lines)} lines"]
+        if live:
+            bits.append(f"re-read every {LIVE_LOG_SECONDS} s")
+            last = next((ln for ln in reversed(lines) if ln.strip()), "")
+            if last:
+                bits.append(f"latest: {last.strip()[:160]}")
+        st.caption(" · ".join(bits))
+        with st.container(height=420):
             st.code(text, language="text")
-        st.download_button("Download job_log.txt", data=data, file_name="job_log.txt",
-                           key=f"dl_log_{where}_{key}", on_click="ignore")
+        if not live:
+            st.download_button("Download job_log.txt", data=data, file_name=LOG_FILE,
+                               key=f"dl_log_{where}_{key}", on_click="ignore")
+
+
+def _theme():
+    """"light" or "dark" - the viewer's Streamlit theme (light when unknown)."""
+    theme = getattr(getattr(st, "context", None), "theme", None)
+    kind = getattr(theme, "type", None)
+    if kind is None and isinstance(theme, dict):
+        kind = theme.get("type")
+    return "dark" if kind == "dark" else "light"
+
+
+def _plot(fig, key, **kw):
+    return st.plotly_chart(fig, key=key, theme=None, config=charts.PLOTLY_CONFIG, **kw)
+
+
+def _table(frame, ref, rel, tag, expanded=False):
+    """The chart's table twin, and the file it came from."""
+    name = rel.rsplit("/", 1)[-1]
+    with st.expander("Table", expanded=expanded):
+        st.dataframe(frame, use_container_width=True, hide_index=True, height=300)
+        data, _problem = read_run_file(ref, rel)
+        if data is not None:
+            st.download_button(f"Download {name}", data=data, file_name=name,
+                               key=f"dl_{tag}_{name}", on_click="ignore")
 
 
 def _render_results(ref, where):
     key = projects.ref_key(ref)
+    tag = f"{where}_{key}"
     st.markdown("**Results**")
-    view = st.radio("View", list(RESULT_VIEWS), horizontal=True,
-                    key=f"view_{where}_{key}", label_visibility="collapsed")
+    view = st.radio("View", list(RESULT_VIEWS), horizontal=True, key=f"view_{tag}",
+                    label_visibility="collapsed")
     if not view:
         return
-    rel = RESULT_VIEWS[view]
-    data, problem = read_run_file(ref, rel)
+    plotted = charts.available()
+    if view in CHART_VIEWS and not plotted:
+        st.caption("Charts need the plotly package (it is in web/requirements.txt - "
+                   "redeploy the app to install it). Showing the tables instead.")
+    mode = _theme()
+    if view == "Fit":
+        _view_fit(ref, tag, mode, plotted)
+    elif view == "Contributions":
+        _view_contributions(ref, tag, mode, plotted)
+    elif view == "Decomposition":
+        _view_decomposition(ref, tag, mode, plotted)
+    elif view == "Prior vs posterior":
+        _view_prior_posterior(ref, tag, mode, plotted)
+    elif view == "Convergence":
+        _view_convergence(ref, tag)
+    else:
+        table, problem = read_run_frame(ref, RESULT_FILES["warnings"])
+        if table is None:
+            st.info(problem)
+            return
+        render_warnings_table(table.fillna(""),
+                              lambda slug: read_run_file(ref, f"00_warnings/{slug}.md")[0],
+                              key=tag)
+
+
+def _view_fit(ref, tag, mode, plotted):
+    fit, problem = read_run_frame(ref, RESULT_FILES["fit"])
+    if fit is None:
+        st.info(problem)
+    else:
+        tiles = charts.fit_tiles(fit)
+        for col, (label, value, help_text) in zip(st.columns(len(tiles) or 1), tiles):
+            col.metric(label, value, help=help_text)
+    avp, problem = read_run_frame(ref, RESULT_FILES["avp"])
+    if avp is None:
+        st.info(problem)
+        return
+    region = st.selectbox("Region", charts.fit_regions(avp), key=f"fit_region_{tag}")
+    frame, holdout = charts.fit_series(avp, region)
+    if plotted:
+        _plot(charts.fit_figure(frame, holdout, mode), key=f"fit_chart_{tag}")
+        st.caption("Actual sales against the model's fit (the posterior median). "
+                   + ("The band is the 90% prediction interval - about 9 weeks in 10 "
+                      "should fall inside it. " if region != charts.ALL else
+                      "Summed over the regions, so there is no band (a band cannot be "
+                      "summed) - pick a region to see it. ")
+                   + ("The grey block is the holdout: weeks the model never saw."
+                      if holdout is not None else ""))
+    _table(frame, ref, RESULT_FILES["avp"], tag, expanded=not plotted)
+
+
+def _region_label(region):
+    return "All regions (portfolio)" if region == charts.PORTFOLIO else region
+
+
+def _view_contributions(ref, tag, mode, plotted):
+    summary, problem = read_run_frame(ref, RESULT_FILES["summary"])
+    if summary is None:
+        st.info(problem)
+        return
+    regions, periods = charts.summary_choices(summary)
+    c1, c2, c3 = st.columns([2, 2, 2], vertical_alignment="bottom")
+    region = c1.selectbox("Region", regions, key=f"contrib_region_{tag}",
+                          format_func=_region_label)
+    period = c2.selectbox("Period", periods, key=f"contrib_period_{tag}")
+    level = c3.radio("Show", ["By variable", "By pillar"], horizontal=True,
+                     key=f"contrib_level_{tag}")
+    bars, totals = charts.contribution_bars(summary, region, period)
+    t1, t2, t3 = st.columns(3)
+    t1.metric("Baseline core", f"{totals['core']:.1f}%",
+              help="The region intercept + seasonality + trend - the sales the drivers "
+                   "do not explain. A tile, not a bar, so the drivers stay readable.")
+    t2.metric("Drivers (the bars)", f"{totals['drivers']:.1f}%",
+              help="Every baseline feature and incremental driver in the chart.")
+    t3.metric("Residual + median gap", f"{totals['other']:.1f}%",
+              help="Actual - fitted (what the model cannot explain) and the "
+                   "sum-of-medians gap. The three tiles add up to 100%.")
+    if bars.empty:
+        st.info("No drivers in this region and period.")
+        return
+    shown = charts.by_pillar(bars) if level == "By pillar" else bars
+    if plotted:
+        colours = charts.colour_map(charts.pillar_order(summary), mode)
+        _plot(charts.contribution_figure(shown, colours, mode), key=f"contrib_chart_{tag}")
+        st.caption(f"Each driver's contribution as a share of actual sales - "
+                   f"{_region_label(region)}, {period}. The colours are the pillars; "
+                   "each keeps its colour in every region, period and chart.")
+    _table(shown.iloc[::-1].rename(columns={"pct": "contribution_pct"}), ref,
+           RESULT_FILES["summary"], tag, expanded=not plotted)
+
+
+def _view_decomposition(ref, tag, mode, plotted):
+    ts, problem = read_run_frame(ref, RESULT_FILES["timeseries"])
+    if ts is None:
+        st.info(problem + " (codebase 1 writes it unless output.contribution_timeseries "
+                "is switched off.)")
+        return
+    summary, _problem = read_run_frame(ref, RESULT_FILES["summary"])
+    pillars = charts.pillar_order(summary if summary is not None else ts)
+    regions = [charts.ALL] + sorted(ts["region"].astype(str).unique())
+    c1, c2 = st.columns([2, 3], vertical_alignment="bottom")
+    region = c1.selectbox("Region", regions, key=f"decomp_region_{tag}")
+    drivers_only = c2.toggle("Drivers only", key=f"decomp_drivers_{tag}",
+                             help="Leave out the baseline core and the actual-sales "
+                                  "line, so the drivers fill the chart.")
+    wide, actual = charts.decomposition_frame(ts, pillars, region)
+    if drivers_only:
+        wide = wide.drop(columns=[charts.BASELINE_CORE], errors="ignore")
+        actual = actual.iloc[0:0]
+    if plotted:
+        colours = charts.colour_map(pillars, mode)
+        _plot(charts.decomposition_figure(wide, actual, colours, mode),
+              key=f"decomp_chart_{tag}")
+        st.caption("Sales each week, split into the baseline core (grey) and each "
+                   "pillar's contribution; negative contributions sit below zero. Click "
+                   "a legend entry to hide or show it.")
+    table = wide.copy()
+    if len(actual):
+        table["Actual sales"] = actual
+    _table(table.reset_index(), ref, RESULT_FILES["timeseries"], tag, expanded=not plotted)
+
+
+def _clicked(event):
+    """The `key` (customdata[0]) of the point clicked on a chart, or None."""
+    selection = getattr(event, "selection", None)
+    if selection is None and isinstance(event, dict):
+        selection = event.get("selection")
+    points = (selection.get("points") if isinstance(selection, dict)
+              else getattr(selection, "points", None)) or []
+    for p in points:
+        data = p.get("customdata") if isinstance(p, dict) else None
+        if data is not None and len(data):
+            return str(data[0])
+    return None
+
+
+def _view_prior_posterior(ref, tag, mode, plotted):
+    contr, problem = read_run_frame(ref, RESULT_FILES["contraction"])
+    if contr is None:
+        st.info(problem)
+        return
+    points = charts.contraction_points(contr)
+    if points.empty:
+        st.info("prior_posterior_contraction.csv has no coefficient rows to show.")
+        return
+    keys = list(points["key"])
+    labels = dict(zip(points["key"], points["label"]))
+    pick_key, click_key, ver_key = f"pp_pick_{tag}", f"pp_click_{tag}", f"pp_ver_{tag}"
+    if st.session_state.get(pick_key) not in keys:
+        worst = points[charts.flagged(points, limit=1)]
+        st.session_state[pick_key] = worst["key"].iloc[0] if len(worst) else keys[0]
+    if plotted:
+        event = _plot(charts.contraction_figure(points, st.session_state[pick_key], mode),
+                      key=f"pp_chart_{tag}_{st.session_state.get(ver_key, 0)}",
+                      on_select="rerun", selection_mode="points")
+        clicked = _clicked(event)
+        if clicked in labels and clicked != st.session_state.get(click_key):
+            st.session_state[click_key] = clicked
+            st.session_state[pick_key] = clicked
+            _rerun_fragment()                   # redraw with the new point highlighted
+        st.caption("One point per variable: how much the data sharpened its prior "
+                   "(contraction - further right, more learned) and how far it moved "
+                   "from the prior mean (shift, in prior sds). Points left of 0.2 or "
+                   "beyond ±2 are labelled - read those first. **Click a point** (or "
+                   "pick it below) to see its prior and posterior.")
+
+    def _picked():
+        # a pick from the list starts a fresh chart, so clicking the point that
+        # was clicked before still registers
+        st.session_state[ver_key] = st.session_state.get(ver_key, 0) + 1
+        st.session_state[click_key] = None
+
+    st.selectbox("Variable", keys, key=pick_key, format_func=lambda k: labels.get(k, k),
+                 on_change=_picked)
+    point = points[points["key"] == st.session_state[pick_key]].iloc[0]
+    reading = charts.contraction_reading(point)
+    if reading:
+        st.markdown(reading)
+    fig = charts.prior_posterior_figure(point, mode) if plotted else None
+    if fig is not None:
+        _plot(fig, key=f"pp_detail_{tag}")
+        st.caption("Prior = what the prior file asserted. Data = what the data alone says "
+                   "(recovered from the two; missing when the posterior is not narrower "
+                   "than the prior). Posterior = the two combined."
+                   + (" On the log scale the coefficient is ±exp(x)."
+                      if point.get("scale") == "log" else ""))
+    cols = ["label", "scale", "prior_mean", "prior_sd", "posterior_mean", "posterior_sd",
+            "contraction", "shift"]
+    _table(points[cols].rename(columns={"label": "variable", "shift": "shift_prior_sd"}),
+           ref, RESULT_FILES["contraction"], tag, expanded=not plotted)
+
+
+def _view_convergence(ref, tag):
+    data, problem = read_run_file(ref, RESULT_FILES["convergence"])
     if data is None:
         st.info(problem)
         return
-    if view == "Warnings":
-        render_warnings_table(pd.read_csv(io.BytesIO(data)).fillna(""),
-                              lambda slug: read_run_file(ref, f"00_warnings/{slug}.md")[0],
-                              key=f"{where}_{key}")
-    elif rel.endswith(".csv"):
-        st.dataframe(pd.read_csv(io.BytesIO(data)), use_container_width=True, height=380)
-    elif rel.endswith(".json"):
-        st.json(json.loads(data.decode("utf-8")))
-    else:
-        with st.container(height=380):
-            st.code(data.decode("utf-8", errors="replace"), language="text")
-    st.download_button(f"Download {rel.rsplit('/', 1)[-1]}", data=data,
-                       file_name=rel.rsplit("/", 1)[-1], key=f"dl_{where}_{key}_{view}",
+    st.caption("R-hat < 1.01 and ESS > 400 pass; divergences should be 0 (under 1% of "
+               "draws is tolerable); a saturated tree depth means the sampler ran out of "
+               "room. The warnings at the end name the parameters to look at.")
+    with st.container(height=420):
+        st.code(data.decode("utf-8", errors="replace"), language="text")
+    st.download_button("Download convergence_report.txt", data=data,
+                       file_name="convergence_report.txt", key=f"dl_{tag}_convergence",
                        on_click="ignore")
 
 
@@ -479,7 +779,7 @@ def render_runs_section(on_reuse=None):
                          help="Ask the Jobs API for the job's runs again (otherwise at "
                               "most every 20 s)."):
                 st.session_state.pop("recent_runs", None)
-                st.rerun(scope="fragment")
+                _rerun_fragment()
         job_id = os.environ.get("MDR_JOB_ID", "")
         runs, problem = _recent_runs(job_id) if job_id else ([], "MDR_JOB_ID is not set.")
         if problem:

@@ -55,15 +55,18 @@ import pandas as pd
 import requests
 import yaml
 
-# the first version whose job reads bmc_name / run_name (the per-run folders);
-# an older job would put a run's outputs where the app does not look
-MIN_CODEBASE = "2026.09.29.2"
+# the first version with settings.app_access (app_access.yaml - who may do what)
+# and partial run configs laid over the team's config.yaml; 2026.09.29.2
+# brought the per-run folders
+MIN_CODEBASE = "2026.09.30.1"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
 
-# what the app needs from the backend folder
-_NEEDED_FILES = ("config.yaml",)
+# what the app needs from the backend folder (app_access.yaml: who may do what -
+# optional, and part of the fingerprint, so editing it reaches the app like any
+# other re-upload)
+_NEEDED_FILES = ("config.yaml", "app_access.yaml")
 _NEEDED_DIRS = ("mmm", "samples")
 _NEEDED_DOCS = ("CONFIG_GUIDE.md", "FEATURE_PRIOR_GUIDE.md")
 
@@ -226,9 +229,10 @@ def _local_fingerprint(folder: str) -> str:
                 st_ = os.stat(p)
                 h.update(f"{os.path.relpath(p, folder)}|{st_.st_mtime_ns}|"
                          f"{st_.st_size}".encode())
-    cfg = os.path.join(folder, "config.yaml")
-    if os.path.exists(cfg):
-        h.update(str(os.stat(cfg).st_mtime_ns).encode())
+    for name in _NEEDED_FILES:
+        p = os.path.join(folder, name)
+        if os.path.exists(p):
+            h.update(f"{name}|{os.stat(p).st_mtime_ns}".encode())
     return h.hexdigest()
 
 
@@ -355,6 +359,7 @@ def status(force: bool = False) -> dict:
             mmm = _m("mmm")
             return {"ok": True, "version": mmm.__version__,
                     "source": _STATE["source"], "where": _STATE["where"],
+                    "fingerprint": _STATE["fingerprint"],
                     "out_of_sync": mmm.check_sync(), "min_version": MIN_CODEBASE}
     except Exception as e:  # noqa: BLE001
         return {"ok": False, "error": str(e), "min_version": MIN_CODEBASE}
@@ -368,13 +373,23 @@ def backend_dir() -> str | None:
 # config.yaml
 # --------------------------------------------------------------------------- #
 def schema() -> Outcome:
-    """The backend's config schema, and which keys/folders the job owns."""
+    """The backend's config schema, which keys/folders the job owns, and who
+    may do what in the app (`access`, from app_access.yaml)."""
     def impl():
         st_, aj = _m("mmm.core.settings"), _m("mmm.app_job")
+        access_file = os.path.join(_STATE["dir"], st_.ACCESS_FILE)
+        try:
+            access = dict(st_.app_access(access_file), error="")
+        except ValueError as e:
+            # a file that cannot be read fixes every setting and grants nobody
+            # full access - it never opens anything
+            access = {"full_access": [], "config_full_access": [], "editable": [],
+                      "show_fixed": True, "unknown": [], "source": access_file,
+                      "error": str(e)}
         return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
                 "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
                 "sections": ["data"] + list(st_.SECTIONS),
-                "blurbs": dict(st_.SECTION_BLURB)}
+                "blurbs": dict(st_.SECTION_BLURB), "access": access}
     return _guarded(impl)
 
 
@@ -439,18 +454,25 @@ def units_problems(cfg: dict) -> Outcome:
     return _guarded(impl)
 
 
-def config_yaml(cfg: dict) -> Outcome:
-    """The annotated YAML the job will run (every key, deviations marked)."""
-    return _guarded(lambda: _m("mmm.core.settings").settings_text(copy.deepcopy(cfg)))
+def config_yaml(cfg: dict, only=None) -> Outcome:
+    """The annotated YAML the job will run: every key (deviations marked) - or,
+    with `only` ("section.key" names), just those; the job lays such a file
+    over the team's config.yaml."""
+    return _guarded(lambda: _m("mmm.core.settings").settings_text(
+        copy.deepcopy(cfg), only=only))
 
 
-def parse_config_yaml(text: str) -> Outcome:
-    """An uploaded / pasted config.yaml -> the full config dict, validated."""
+def parse_config_yaml(text: str, base: dict | None = None) -> Outcome:
+    """An uploaded config.yaml -> the full config dict, validated. With `base`
+    (the team's config) the file is laid over it, the way the job does, so a
+    file holding only some settings keeps the team's values for the rest."""
     def impl():
         raw = yaml.safe_load(text) or {}
         if not isinstance(raw, dict):
             raise ValueError("the file must be a mapping of sections "
                              "(data:, model:, run:, ...)")
+        if base:
+            raw = _m("mmm.app_job").merge_config(base, raw)
         return _full_config(raw)
     return _guarded(impl)
 

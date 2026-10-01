@@ -73,8 +73,11 @@ signs if you also hand it a mapping or share file. Jump to §5.
 
 For a sign-constrained feature the model builds `beta = ±exp(·)`. The sign comes
 from `sign_constraint`; the mean is how big the effect is. **A negative price
-effect is `sign_constraint=negative` with a positive mean**, not a negative
-mean. Writing a negative mean there triggers a warning and the value is replaced.
+effect is `sign_constraint=negative` with a positive mean**. A negative mean
+on a `negative` feature (`-0.08`) is read as its size (`0.08`) with a review
+note (since 2026.10.01.1 - it used to be replaced by 0.05). A mean of 0, or a
+negative mean on a `positive` feature, contradicts itself: it is replaced by
+0.05 with a high-severity warning.
 
 ```csv
 variable,sign_constraint,global_prior_mean

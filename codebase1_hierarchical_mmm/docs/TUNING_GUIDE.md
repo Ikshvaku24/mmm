@@ -130,7 +130,7 @@ Interpretation depends on the sign constraint:
 
 | `sign_constraint` | `global_prior_mean` is | valid values |
 |---|---|---|
-| `positive` / `negative` | a **magnitude**; direction comes from the constraint | must be `> 0` |
+| `positive` / `negative` | a **magnitude**; direction comes from the constraint | `> 0` (a negative mean on a `negative` feature is read as its size; 0, or negative on `positive`, becomes 0.05) |
 | `free` | a **location** — the sign is part of the assertion | any sign |
 
 **Derivation.** `prior_mean = contribution_target / Σx / dv_scale`. This is only

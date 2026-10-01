@@ -7,6 +7,7 @@ draws) with the correct tools: R-hat, ESS, divergences, and HDIs.
 from __future__ import annotations
 
 import os
+import warnings
 
 import arviz as az
 import matplotlib
@@ -73,9 +74,125 @@ def enforce_convergence(checks: dict, policy: str = "warn") -> None:
     print(f"[diagnostics] WARNING - {msg}")
 
 
+def posterior_summary(idata) -> pd.DataFrame:
+    """az.summary of the posterior, ONE variable at a time.
+
+    ArviZ 1.x lines all variables of a multi-variable summary up on one
+    shared dimension order: the order in which the dimensions first appear in
+    the posterior. With no intercept and no trend (the team's config.yaml) a
+    feature-level parameter (mu_logbeta_hpos, glogbeta_gpos) comes before the
+    first region-level one, so every (region, feature) parameter was
+    summarised transposed - the numbers of beta_hpos[Kroger, TV] printed under
+    another region/feature pair (found on PyMC 6.3 / ArviZ 1.3). One variable
+    at a time cannot be misaligned. Constant parameters (a fixed
+    region_prior_offset, a global coefficient's per-region copies) have no
+    R-hat; numpy's 0/0 notices for them are silenced rather than reported.
+
+    Numbers are NOT rounded (round_to="none"): the old round_to=6 meant six
+    DECIMALS, so a raw-unit coefficient of 0.000275 kept three digits and one
+    of 1e-6 printed as 0.000001.
+    """
+    post = get_group(idata, "posterior")
+    parts = []
+    with warnings.catch_warnings(), np.errstate(divide="ignore", invalid="ignore"):
+        warnings.simplefilter("ignore", RuntimeWarning)
+        for v in post.data_vars:
+            parts.append(az.summary(idata, var_names=[str(v)], round_to="none"))
+    return pd.concat(parts) if parts else pd.DataFrame()
+
+
+def bfmi_by_chain(idata):
+    """E-BFMI per chain, mean(diff(E)^2) / var(E), from the sampler's energy -
+    or None when there is no energy (ADVI). Computed here: az.bfmi returns a
+    DataTree in ArviZ 1.x, which silently dropped the line from the report."""
+    if not has_group(idata, "sample_stats"):
+        return None
+    ss = get_group(idata, "sample_stats")
+    if "energy" not in ss:
+        return None
+    e = np.asarray(ss["energy"].transpose("chain", "draw").values, dtype=float)
+    if e.ndim != 2 or e.shape[1] < 3:
+        return None
+    with np.errstate(divide="ignore", invalid="ignore"):
+        return np.mean(np.diff(e, axis=1) ** 2, axis=1) / np.var(e, axis=1)
+
+
+def _cell_draws(post, label: str, summ: pd.DataFrame):
+    """(chain, draw) draws of the summary row `label` ("beta_hpos[A, tv]").
+    A single-variable summary lists a variable's cells in C order over its
+    dims - the order `stack` uses - so the row's position finds the cell."""
+    var = label.split("[", 1)[0]
+    if var not in post:
+        return None
+    da = post[var]
+    extra = [d for d in da.dims if d not in ("chain", "draw")]
+    if extra:
+        block = [i for i in summ.index if str(i).split("[", 1)[0] == var]
+        da = da.stack(_cell=extra).isel(_cell=block.index(label))
+    return np.asarray(da.transpose("chain", "draw").values, dtype=float)
+
+
+def _energy_plot(idata, path: str) -> bool:
+    """Marginal vs transition energy, drawn with matplotlib (the az.plot_energy
+    call stopped working in ArviZ 1.x and the chart went missing silently)."""
+    if not has_group(idata, "sample_stats"):
+        return False
+    ss = get_group(idata, "sample_stats")
+    if "energy" not in ss:
+        return False
+    e = np.asarray(ss["energy"].transpose("chain", "draw").values, dtype=float)
+    marginal = (e - e.mean(axis=1, keepdims=True)).ravel()
+    transition = np.diff(e, axis=1).ravel()
+    fig, ax = plt.subplots(figsize=figsize(7, 4))
+    bins = np.histogram_bin_edges(np.concatenate([marginal, transition]), bins=50)
+    ax.hist(marginal, bins=bins, density=True, alpha=0.55, label="marginal energy (centred)")
+    ax.hist(transition, bins=bins, density=True, alpha=0.55, label="energy transition")
+    ax.legend(fontsize=8)
+    annotate(ax, "energy (nats; unitless HMC diagnostic)", "density (normalised)",
+             "Energy plot - marginal vs transition energy")
+    units_note(fig, "The two densities should overlap. A narrower transition "
+                    "energy than marginal energy means the sampler cannot "
+                    "traverse the posterior's tails - reparameterise or "
+                    "tighten priors.")
+    save_fig(fig, path)
+    plt.close(fig)
+    return True
+
+
+def _trace_plot(idata, summ: pd.DataFrame, path: str, n: int = 3) -> bool:
+    """Density and trace per chain for the n worst parameters by R-hat, drawn
+    with matplotlib (az.plot_trace stopped working in ArviZ 1.x)."""
+    post = get_group(idata, "posterior")
+    order = summ.sort_values("r_hat", ascending=False, na_position="last")
+    rows = []
+    for label in order.index:
+        draws = _cell_draws(post, str(label), summ)
+        if draws is not None and np.isfinite(draws).all() and np.ptp(draws) > 0:
+            rows.append((str(label), draws))
+        if len(rows) == n:
+            break
+    if not rows:
+        return False
+    fig, axes = plt.subplots(len(rows), 2, figsize=figsize(10, 2.2 * len(rows)),
+                             squeeze=False)
+    for i, (label, draws) in enumerate(rows):
+        for chain in draws:
+            axes[i, 0].hist(chain, bins=30, density=True, histtype="step", linewidth=1)
+            axes[i, 1].plot(chain, linewidth=0.5, alpha=0.8)
+        annotate(axes[i, 0], "parameter value (sampled axis)", "density", label)
+        annotate(axes[i, 1], "draw number (post-warmup)", "parameter value (sampled axis)")
+    units_note(fig, "Worst-Rhat parameters, one line per chain. Chains should "
+                    "overlap and look like white noise; a drifting or "
+                    "separated chain is non-convergence.")
+    fig.tight_layout()
+    save_fig(fig, path)
+    plt.close(fig)
+    return True
+
+
 def convergence_report(idata, outdir: str) -> pd.DataFrame:
     os.makedirs(outdir, exist_ok=True)
-    summ = az.summary(idata, round_to=6)
+    summ = posterior_summary(idata)
     summ.to_csv(os.path.join(outdir, "posterior_summary_full.csv"))
 
     lines = []
@@ -84,24 +201,27 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
         ss0 = get_group(idata, "sample_stats")
         if "diverging" in ss0:
             n_div = int(ss0["diverging"].values.sum())
-    worst_rhat = float(summ["r_hat"].max())
+    rhat = summ["r_hat"] if "r_hat" in summ else pd.Series(dtype=float)
+    worst_rhat = float(rhat.max()) if rhat.notna().any() else np.nan
     min_ess = float(summ["ess_bulk"].min())
     min_ess_tail = float(summ["ess_tail"].min()) if "ess_tail" in summ else np.nan
-    lines.append(f"max R-hat        : {worst_rhat:.4f}  "
-                 f"({'OK' if worst_rhat < RHAT_WARN else 'WARN' if worst_rhat < RHAT_FAIL else 'FAIL'})")
+    if np.isfinite(worst_rhat):
+        lines.append(f"max R-hat        : {worst_rhat:.4f}  "
+                     f"({'OK' if worst_rhat < RHAT_WARN else 'WARN' if worst_rhat < RHAT_FAIL else 'FAIL'})")
+    else:
+        lines.append("max R-hat        : n/a  (needs 2+ chains - ADVI or chains=1 "
+                     "cannot show convergence; refit with NUTS)")
     lines.append(f"min ESS (bulk)   : {min_ess:.0f}  "
                  f"({'OK' if min_ess > ESS_WARN else 'WARN'})")
     if np.isfinite(min_ess_tail):
         lines.append(f"min ESS (tail)   : {min_ess_tail:.0f}  "
                      f"({'OK' if min_ess_tail > ESS_WARN else 'WARN (interval endpoints unstable)'})")
     lines.append(f"divergences      : {n_div}  ({'OK' if n_div == 0 else 'INVESTIGATE'})")
-    try:
-        bfmi = az.bfmi(idata)
-        per_chain = ", ".join(f"{b:.2f}" for b in np.atleast_1d(bfmi))
+    bfmi = bfmi_by_chain(idata)
+    if bfmi is not None and np.isfinite(bfmi).all():
+        per_chain = ", ".join(f"{b:.2f}" for b in bfmi)
         lines.append(f"BFMI by chain    : [{per_chain}]  "
                      f"({'OK' if np.min(bfmi) > 0.3 else 'WARN (poor energy exploration)'})")
-    except Exception:  # noqa: BLE001
-        pass
     try:
         ss = get_group(idata, "sample_stats")
         for key in ("tree_depth", "depth"):
@@ -116,7 +236,7 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
         pass
     lines.append("")
     lines.append("Worst parameters by R-hat:")
-    worst = summ.sort_values("r_hat", ascending=False).head(10)
+    worst = summ.sort_values("r_hat", ascending=False, na_position="last").head(10)
     lines.append(worst[["mean", "sd", "ess_bulk", "r_hat"]].to_string())
     lines.append("")
     lines.append("NOTE: do not use mean/mcse t-stats for significance. Use the HDI "
@@ -126,43 +246,15 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
         f.write(report)
     print("[diagnostics]\n" + report)
 
-    # plots (best effort)
-    try:
-        az.plot_energy(idata, figsize=figsize(7, 4))
-        f = plt.gcf()
-        ax = f.axes[0] if f.axes else None
-        if ax is not None:
-            annotate(ax, "energy (nats; unitless HMC diagnostic)",
-                     "density (normalised)",
-                     "Energy plot - marginal vs transition energy")
-        units_note(f, "The two densities should overlap. A narrower transition "
-                      "energy than marginal energy means the sampler cannot "
-                      "traverse the posterior's tails - reparameterise or "
-                      "tighten priors.")
-        save_fig(f, os.path.join(outdir, "energy_plot.png"))
-        plt.close("all")
-    except Exception:  # noqa: BLE001
-        pass
-    try:
-        base_vars = sorted({i.split("[")[0] for i in worst.index[:3]})
-        az.plot_trace(idata, var_names=base_vars, compact=True,
-                      figsize=figsize(10, 2.2 * max(1, len(base_vars))))
-        f = plt.gcf()
-        for i, ax in enumerate(f.axes):
-            # arviz alternates (density, trace) per row
-            if i % 2 == 0:
-                annotate(ax, "parameter value (sampled axis)", "density")
-            else:
-                annotate(ax, "draw number (post-warmup)",
-                         "parameter value (sampled axis)")
-        units_note(f, "Worst-Rhat parameters. Chains should overlap and look "
-                      "like white noise; a drifting or separated chain is "
-                      "non-convergence.")
-        f.tight_layout()
-        save_fig(f, os.path.join(outdir, "trace_worst_rhat.png"))
-        plt.close("all")
-    except Exception:  # noqa: BLE001
-        pass
+    # plots (best effort - a chart must never stop a run)
+    for name, draw in (("energy_plot.png", lambda p: _energy_plot(idata, p)),
+                       ("trace_worst_rhat.png", lambda p: _trace_plot(idata, summ, p))):
+        try:
+            draw(os.path.join(outdir, name))
+        except Exception as e:  # noqa: BLE001
+            print(f"[diagnostics] WARNING: {name} not written: {e}")
+        finally:
+            plt.close("all")
     return summ
 
 
@@ -276,11 +368,16 @@ _LOG_SCALE_PREFIXES = ("glogbeta_", "mu_logbeta_", "logbeta_", "tau_logbeta_")
 # deterministic transforms of a sampled parameter - reported, never used for delta
 _DERIVED_PREFIXES = ("beta_", "pop_beta_", "region_prior_offset_",
                      "alpha_region", "sigma_region")
+# ...except independent + free, where beta_<bucket> IS the sampled parameter
+# (model._bucket_betas returns it as it is) - one per region, all distinct
+_SAMPLED_BETA_PREFIXES = ("beta_ifree",)
 
 
 def _use_for_delta(var: str, pooling_of_feature: str | None = None) -> bool:
     """Is this the one parameter family whose contraction feeds the delta?"""
     v = str(var)
+    if v.startswith(_SAMPLED_BETA_PREFIXES):
+        return True
     if v.startswith(_DERIVED_PREFIXES) and not v.startswith("logbeta_"):
         return False
     return v.startswith(_DELTA_PREFIXES)
@@ -481,7 +578,8 @@ def _per_parameter_plots(idata, outdir, out_cfg, skip_prefixes=()) -> int:
         if role in _UNINFORMATIVE:
             continue
         # region-level copies of a pooled/global block duplicate the block
-        if name.startswith("beta_") and not name.startswith("beta_fourier"):
+        if (name.startswith("beta_") and not name.startswith("beta_fourier")
+                and not name.startswith(_SAMPLED_BETA_PREFIXES)):
             continue
         logged = "logbeta" in name
         try:
