@@ -14,7 +14,9 @@ All example values are the real ones from the `real_data_v3` run
 > when `cv.enabled: true`).
 
 Which files a run writes is controlled by `config.yaml`; see
-`docs/TUNING_GUIDE.md` for which setting to reach for when a number looks wrong.
+`docs/TUNING_GUIDE.md` for which setting to reach for when a number looks wrong,
+and `docs/CHECKS_GUIDE.md` for what each check means and what to change when it
+fails.
 
 ---
 
@@ -822,6 +824,12 @@ One row per feature × region, plus a `__population__` row per feature.
 > cannot rule out that the driver does essentially nothing. Set the threshold
 > with `OutputConfig(rope_scaled=…)` on the scaled axis (0.01 ≈ "moves sales by
 > under 1% of a region's standard deviation").
+>
+> ⚠️ **That reading assumes features scaled to ≈ 1.** Under the `none`/`none`
+> default (2026-09-22) β is per **raw** feature unit, so the same 0.01 is a
+> different bar for a GRP, a point of distribution and a price. Judge
+> materiality on `contribution_totals.csv` (`share_of_actual_pct` and its HDI)
+> until the ROPE is per feature — `CHECKS_GUIDE.md` §6.4 has a worked example.
 
 **Original units**
 
@@ -846,9 +854,10 @@ by shrinkage, that region's data did not. Then compare `median` against
 `hdi_low`/`hdi_high`: a wide interval spanning an order of magnitude means "we
 can't tell", regardless of what `t_stat` says.
 
-For sign-constrained features, **ignore significance entirely** — `p_value` is
-blank because it is 0 by construction. Judge those on effect size and interval
-width.
+For sign-constrained features, **ignore `p_value` and `prob_positive`** — they
+are 0 and 1 by construction, which is what `p_value_basis = sign-constrained
+(vacuous)` says. Judge those on effect size, interval width and
+`prob_negligible` (with the units caveat below).
 
 ### `support_warnings.txt`
 

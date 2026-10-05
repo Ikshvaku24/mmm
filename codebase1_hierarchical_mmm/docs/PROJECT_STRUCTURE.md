@@ -82,6 +82,7 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 | generate a prior file from a vendor decomposition or shares | `mmm/data/prior_builder.py` |
 | change how vendor and our variables are matched | `mmm/data/mapping.py` |
 | understand an output column | `docs/OUTPUTS_GUIDE.md` |
+| read a check (VIF … exogeneity, CV) and decide what to change | `docs/CHECKS_GUIDE.md` |
 | decide which lever to pull | `docs/TUNING_GUIDE.md` |
 | know what order to build in | `docs/METHODOLOGY.md` |
 | add a scaling mode | `mmm/data/data_prep.py :: resolve_scaling` |
@@ -154,12 +155,13 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 | `METHODOLOGY.md` | the staged build, the prior ladder, updating a prior with no benchmark, raising an under-credited variable, how to check collinearity |
 | `TUNING_GUIDE.md` | situation → lever, recipes, anti-patterns |
 | `OUTPUTS_GUIDE.md` | every output file and column |
+| `CHECKS_GUIDE.md` | every check: theory, a real-run example, how to read it, and what to change (variables / config / priors); threshold table; symptom → fix |
 | `MERIDIAN_ASSUMPTIONS.md` | how Meridian handles all this, with source pointers |
 | `PROJECT_STRUCTURE.md` | this file |
 
 ## Tests
 
-`../tests/run_all.py` — 1341 checks, ~10s, no PyMC needed. They import the
+`../tests/run_all.py` — 1793 checks, ~1 min, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

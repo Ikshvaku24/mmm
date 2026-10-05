@@ -11,7 +11,8 @@ contribution = beta × Σ(x_scaled + reference_shift) × dv_scale
 so there are exactly four places a number can come from — **the coefficient**
 (priors), **the data** (scaling), **the counterfactual** (reporting), and **the
 model structure** (what else competes for the same variance). Diagnose which one
-before touching anything.
+before touching anything — `CHECKS_GUIDE.md` says what each diagnostic means and
+which lever it points to.
 
 ### Where the levers live
 
