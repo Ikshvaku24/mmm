@@ -60,9 +60,12 @@ printed as a standing caveat because no statistic can settle it.
 from __future__ import annotations
 
 import os
+import warnings
 
 import numpy as np
 import pandas as pd
+
+__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
 
 # Every threshold lives on config.AssumptionConfig so a modeller can widen or
 # narrow it from config.yaml without editing code (e.g. pair_warn: 0 dumps the
@@ -130,8 +133,23 @@ def _aux_r2(y: np.ndarray, others: np.ndarray, centred: bool) -> float:
     return min(max(r2, 0.0), 1.0 - 1e-12)
 
 
+NOTE_DEAD = ("no activity in this region's training window - excluded from "
+             "this region's design (it contributes 0 here whatever its "
+             "coefficient)")
+
+
+def _note_underdetermined(p: int, n: int) -> str:
+    return (f"not computable: {p} design columns vs {n} training periods in "
+            "this region. With more columns than periods every column is an "
+            "exact combination of the others, so the VIF is infinite by "
+            "construction and the design is singular. This region's data alone "
+            "cannot separate the coefficients - the priors and pooling across "
+            "regions do. Read contraction (02_convergence) to see which.")
+
+
 def vif(M: np.ndarray, names: list, has_intercept: bool,
-        top_k: int = 3) -> pd.DataFrame:
+        top_k: int = 3, warn: float = VIF_WARN,
+        bad: float = VIF_BAD) -> pd.DataFrame:
     """Variance inflation per column - reported TWO ways, on purpose.
 
     `vif` is the textbook one: R^2 of the column against the others with the
@@ -149,9 +167,17 @@ def vif(M: np.ndarray, names: list, has_intercept: bool,
     Read them together: a high `vif` means the feature duplicates other
     FEATURES; a high `vif_uncentred` with a low `vif` means it duplicates the
     LEVEL, i.e. the intercept. The `duplicates` column says which.
+
+    `warn` / `bad` are `AssumptionConfig.vif_warn` / `vif_bad`: `bad` labels
+    `duplicates`, `warn` decides which columns get `explained_by`.
+
+    `vif_note` says why a cell is blank - a VIF that cannot be computed must
+    not look like a VIF of nothing. Three causes: the column never moves in
+    this region (all zero), it is constant (no centred variance), or the
+    region has more design columns than training periods.
     """
     rows = []
-    n = M.shape[0]
+    n, p = M.shape
     for j, name in enumerate(names):
         if name == "__intercept__":
             continue
@@ -165,14 +191,24 @@ def vif(M: np.ndarray, names: list, has_intercept: bool,
         r2_u = _aux_r2(y, aux, centred=False)
         v_c = (1.0 / (1.0 - r2_c)) if np.isfinite(r2_c) else np.nan
         v_u = (1.0 / (1.0 - r2_u)) if np.isfinite(r2_u) else np.nan
-        if np.isfinite(v_c) and v_c > VIF_BAD:
+        if np.isfinite(v_c) and v_c > bad:
             dup = "other features"
-        elif has_intercept and np.isfinite(v_u) and v_u > VIF_BAD:
+        elif has_intercept and np.isfinite(v_u) and v_u > bad:
             dup = "the intercept/level"
-        elif np.isfinite(v_u) and v_u > VIF_BAD:
+        elif np.isfinite(v_u) and v_u > bad:
             dup = "a shared constant level"
         else:
             dup = ""
+        if not np.any(y):
+            note = NOTE_DEAD
+        elif aux.shape[1] >= n:
+            note = _note_underdetermined(p, n)
+        elif not np.isfinite(v_c) and np.isfinite(v_u):
+            note = ("constant in this region: no variation around its mean, "
+                    "so the centred VIF is undefined - read vif_uncentred and "
+                    "duplicates")
+        else:
+            note = ""
         row = {"column": name, "r2_vs_others": r2_c, "vif": v_c,
                "vif_uncentred": v_u, "duplicates": dup}
         # WHICH columns is it collinear with? A VIF number alone says "this is
@@ -185,14 +221,18 @@ def vif(M: np.ndarray, names: list, has_intercept: bool,
         # Only for a column that is ACTUALLY collinear. Every column has some
         # largest auxiliary coefficient; naming one for an independent feature
         # would read as an accusation where there is nothing to answer for.
-        if top_k and np.isfinite(v_c) and v_c >= VIF_WARN:
+        if top_k and np.isfinite(v_c) and v_c >= warn:
             row.update(_top_correlates(y, others,
-                                       [n for n in names if n != name],
+                                       [nm for nm in names if nm != name],
                                        top_k))
         elif top_k:
             row.update({"explained_by": "", "explained_by_weights": ""})
+        row["vif_note"] = note
         rows.append(row)
-    return pd.DataFrame(rows)
+    cols = (["column", "r2_vs_others", "vif", "vif_uncentred", "duplicates"]
+            + (["explained_by", "explained_by_weights"] if top_k else [])
+            + ["vif_note"])
+    return pd.DataFrame(rows, columns=cols)
 
 
 def _top_correlates(y, others, other_names, top_k: int) -> dict:
@@ -220,6 +260,11 @@ def condition_index(M: np.ndarray) -> tuple[float, np.ndarray]:
     """Belsley condition number and per-dimension indices of the scaled design."""
     if M.size == 0 or M.shape[1] == 0:
         return float("nan"), np.array([])
+    if M.shape[1] > M.shape[0]:
+        # more columns than rows: exactly singular. The SVD returns only
+        # min(n, p) singular values, all of which can be positive, so the
+        # ratio of those would report a finite number for a singular design.
+        return float("inf"), np.array([])
     sv = np.linalg.svd(_unit_length(M), compute_uv=False)
     sv = sv[sv > 0]
     if not len(sv):
@@ -257,7 +302,30 @@ def collinearity(pdata, model_cfg, acfg: "AssumptionConfig" = None) -> dict:
         M, names = design_matrix(pdata, model_cfg, region=g)
         if M.shape[0] <= 2:
             continue
-        v = vif(M, names, has_i, top_k=acfg.vif_top_k)
+        # A feature that is exactly zero over this region's training window
+        # multiplies nothing here - its contribution in this region is 0
+        # whatever its coefficient. Left in, it is a column of zeros: the
+        # design is singular by construction (condition number -> infinity)
+        # and it counts towards the column total, which can blank every VIF in
+        # the region. Panels where a brand's media is zero in the other brands'
+        # regions are full of these. Dropped from the region's design and
+        # listed with a note, as the contraction report drops no-support rows.
+        dead = [nm for j, nm in enumerate(names)
+                if not nm.startswith("__") and not np.any(M[:, j])]
+        if dead:
+            keep = [j for j, nm in enumerate(names) if nm not in dead]
+            M, names = M[:, keep], [names[j] for j in keep]
+        n_obs, n_cols = M.shape
+        under = n_cols > n_obs
+        v = vif(M, names, has_i, top_k=acfg.vif_top_k,
+                warn=acfg.vif_warn, bad=acfg.vif_bad)
+        if dead:
+            filler = {c: "" for c in ("duplicates", "explained_by",
+                                      "explained_by_weights") if c in v.columns}
+            v = pd.concat([v, pd.DataFrame([{"column": d, **filler,
+                                             "vif_note": NOTE_DEAD}
+                                            for d in dead])],
+                          ignore_index=True)
         v.insert(0, "region", rname)
         vifs.append(v)
         p = correlation_pairs(M, names, acfg.pair_warn)
@@ -265,12 +333,25 @@ def collinearity(pdata, model_cfg, acfg: "AssumptionConfig" = None) -> dict:
             p.insert(0, "region", rname)
             pairs.append(p)
         cond, _ = condition_index(M)
-        mx = float(v["vif"].max()) if len(v) and v["vif"].notna().any() else 0.0
+        # NaN, not 0, when no VIF could be computed: 0 reads as "no
+        # collinearity" when the truth is that it could not be measured
+        mx = (float(v["vif"].max()) if len(v) and v["vif"].notna().any()
+              else np.nan)
         mxu = (float(v["vif_uncentred"].max())
-               if len(v) and v["vif_uncentred"].notna().any() else 0.0)
+               if len(v) and v["vif_uncentred"].notna().any() else np.nan)
         worst = v.loc[v["vif"].idxmax()] if v["vif"].notna().any() else None
+        notes = []
+        if under:
+            notes.append(f"VIF not computable: {n_cols} design columns vs "
+                         f"{n_obs} training periods - more columns than "
+                         "periods, so the region's design is singular. Its "
+                         "coefficients are identified only by the priors and "
+                         "by pooling across regions")
+        if dead:
+            notes.append(f"{len(dead)} feature(s) with no activity in this "
+                         "region excluded from its design")
         summary.append({
-            "region": rname, "n_obs": int(M.shape[0]), "n_columns": len(names),
+            "region": rname, "n_obs": int(n_obs), "n_columns": int(n_cols),
             "condition_number": cond,
             "max_vif": mx, "max_vif_uncentred": mxu,
             "worst_column": (str(worst["column"]) if worst is not None else ""),
@@ -280,7 +361,10 @@ def collinearity(pdata, model_cfg, acfg: "AssumptionConfig" = None) -> dict:
             "n_duplicating_intercept": int(
                 (v["duplicates"] == "the intercept/level").sum()),
             "n_pairs_flagged": int(len(p)),
-            "verdict": _collin_verdict(cond, max(mx, mxu), acfg),
+            "verdict": _collin_verdict(
+                cond, max(np.nan_to_num(mx), np.nan_to_num(mxu)), acfg),
+            "n_dead_columns": len(dead),
+            "note": "; ".join(notes),
         })
     return {
         "summary": pd.DataFrame(summary),
@@ -768,13 +852,28 @@ def write_collinearity(pdata, model_cfg, outdir: str,
             os.path.join(outdir, "collinearity_vif.csv"), index=False)
     res["pairs"].to_csv(os.path.join(outdir, "collinearity_pairs.csv"),
                         index=False)
-    bad = res["summary"][res["summary"]["verdict"] != "ok"] \
-        if len(res["summary"]) else res["summary"]
+    s = res["summary"]
+    bad = s[s["verdict"] != "ok"] if len(s) else s
     if len(bad):
-        print(f"[assumptions] collinearity: {len(bad)} of "
-              f"{len(res['summary'])} regions flagged "
-              f"(max VIF {res['summary']['max_vif'].max():.1f}) "
-              f"-> 01_data/collinearity_summary.csv")
+        mv = s["max_vif"].max()
+        print(f"[assumptions] collinearity: {len(bad)} of {len(s)} regions "
+              "flagged " + (f"(max VIF {mv:.1f}) " if np.isfinite(mv) else "")
+              + "-> 01_data/collinearity_summary.csv")
+    under = (s[s["note"].astype(str).str.startswith("VIF not computable")]
+             if len(s) and "note" in s.columns else s.iloc[0:0])
+    if len(under):
+        ex = ", ".join(f"{r.region}: {r.n_columns} columns / {r.n_obs} periods"
+                       for r in under.head(4).itertuples(index=False))
+        warnings.warn(
+            f"collinearity: VIF not computable in {len(under)} of {len(s)} "
+            f"regions - more design columns than training periods ({ex}). "
+            "Every VIF there is blank BY CONSTRUCTION: with more columns than "
+            "periods each column is an exact combination of the others, so "
+            "the region's design is singular (condition number = inf). The "
+            "coefficients are identified only by the priors and by pooling "
+            "across regions - read contraction in 02_convergence. Fewer "
+            "variables, a lower fourier_order, or a longer panel make it "
+            "computable again; the pairs file and heatmap are still valid.")
     return res
 
 
@@ -843,11 +942,21 @@ def _write_readout(tbl, post, collin, outdir, likelihood,
         s = collin["summary"]
         L += ["| region | n obs | columns | condition number | max VIF | max VIF uncentred | worst column | verdict |",
               "|---|---|---|---|---|---|---|---|"]
+        def _num(x):
+            x = float(x)
+            return f"{x:.1f}" if np.isfinite(x) else (
+                "inf" if np.isinf(x) else "not computable")
+
         for _, r in s.iterrows():
             L.append(f"| {r['region']} | {r['n_obs']} | {r['n_columns']} | "
-                     f"{r['condition_number']:.1f} | {r['max_vif']:.1f} | "
-                     f"{r.get('max_vif_uncentred', float('nan')):.1f} | "
+                     f"{_num(r['condition_number'])} | {_num(r['max_vif'])} | "
+                     f"{_num(r.get('max_vif_uncentred', float('nan')))} | "
                      f"`{r['worst_column']}` | **{r['verdict']}** |")
+        noted = s[s["note"].astype(str) != ""] if "note" in s.columns else s.iloc[0:0]
+        if len(noted):
+            L.append("")
+            for _, r in noted.iterrows():
+                L.append(f"- **{r['region']}**: {r['note']}.")
         L += ["", "**The two VIF columns answer different questions.** The "
               "textbook (centred) VIF is blind to a column that duplicates the "
               "INTERCEPT: an always-on feature scaled to ~1.0 every period has "

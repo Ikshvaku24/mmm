@@ -723,6 +723,119 @@ Full comparison, with source pointers and what NOT to copy:
 
 ---
 
+## 3c. Short panels — more variables than periods (monthly models)
+
+A monthly model on two years has about 21 training periods per region. With
+30, 50 or 80 variables the per-region collinearity check cannot be computed,
+and every region reads "severe". The worked case is
+[`cases/001`](cases/001_blank_vif_more_columns_than_periods.md); the blank
+cells are explained in CHECKS_GUIDE §3.8. This section is the approach.
+
+It starts from one fact: **no method creates information the data does not
+contain.** A contribution is isolated by the data only where its variable moves
+in a way nothing else in the model reproduces. Everywhere else it is set by a
+prior or by an allocation rule. The job is to make the first group as large as
+the data allows, and to label the second.
+
+### What 21 periods can and cannot separate
+
+A region × period panel has two kinds of variation, and pooling regions helps
+only one of them:
+
+| Kind | Examples | What more regions buy |
+|---|---|---|
+| **Time-only** — moves the same way in every region, or in every region of a brand | National media; a brand's media across its channels; national event dummies; Fourier; trend; a national category series | **No new patterns.** Twelve regions show the same tangle twelve times. They average away region-specific noise (not common national shocks), but they cannot separate two time-only variables that move together |
+| **Cross-region** — differs between regions in the same period | Distribution / TDP / price by channel; regional media weights | **Real separation** — but only where the co-movement *differs* between regions. Two variables that rise together in every region stay tangled however many regions there are |
+
+**Computed example** (simulated: 12 regions × 21 months, TV and digital
+correlated r = 0.9 over time; VIF of TV):
+
+| Setup | VIF in each region | VIF pooled (12 × 21 rows, region intercepts) |
+|---|---|---|
+| Both national — identical in every region | 5.33 | **5.33** — pooling changes nothing |
+| Digital regional, but follows TV the same way everywhere | 4.87 on average | **4.26** — a little noise averaged |
+| Digital follows TV in 6 regions and runs independently in the other 6 | 4.32 / 1.07 | **1.12** — separated |
+
+The last row works only under a **shared coefficient** — `global` or
+`hierarchical` pooling. The regions where TV and digital move independently
+identify the effect, and the model applies it to the regions where they are
+tangled. That is the pooling assumption, and it is worth stating.
+
+Two hard limits follow:
+
+1. **The rank limit.** Columns that move identically in every region —
+   national dummies, Fourier terms, the trend, national media — can never give
+   more than (periods − 1) separable effects: **20 on 21 months, however many
+   regions you add.** A brand's own media behaves the same way within its
+   brand: only the other brands' rows, where it is zero, add anything. That is
+   cross-region variation, and a pooled coefficient is what lets it count.
+2. **The precision limit.** A common guideline for regressions is 10–20
+   observations per freely estimated coefficient. On 21 months that is one or
+   two time-only coefficients estimated by the data alone. A Bayesian model can
+   carry more, but the extra ones lean on their priors — `contraction` says how
+   much.
+
+**Pinned coefficients don't count.** A coefficient fixed by its prior (the
+LOCKED rows of §2c) is not estimated; it acts as a known offset. The design the
+data must separate is the **free** columns only. For a secondary model that is
+the honest column count, not the full feature list.
+
+### Measure it on the design the model actually estimates
+
+| Question | Metric | Where | Status |
+|---|---|---|---|
+| Is each reported coefficient isolated by the data? | `contraction` on the `use_for_delta` row: > 0.5 data, < 0.2 prior | `02_convergence/prior_posterior_contraction.csv` | **Available.** Works at any rows-to-columns ratio — the primary metric in this regime |
+| Which coefficients trade off? | Posterior correlation | `04_fit/posterior_correlation.csv` | Available |
+| Which columns tangle? | Pairs; heatmap | `01_data/collinearity_pairs.csv`, heatmaps | Available — valid at any ratio |
+| How much is the prior deciding? | Rerun with every free prior sd doubled; contributions that move are prior-set | two runs | Available (manual) |
+| Collinearity under pooling | VIF on the **stacked** design: all regions' rows, region intercepts, free columns only | — | **Proposed** |
+| Time-only columns vs periods | The time-only budget, per brand | — | **Proposed** |
+| Which variables form each tangle | Belsley variance-decomposition proportions: the columns sharing one near-zero dimension of the design | — | **Proposed** |
+| Is the pillar total identified even when the split is not? | Pillar totals computed draw by draw, with an interval, next to their members' | `contribution_by_pillar.csv` sums member medians — no interval yet | **Proposed** |
+
+The per-region VIF stays the right check for `pooling: independent`, and for
+weekly panels where the rows comfortably exceed the columns.
+
+### Modelling options, best first
+
+| Option | What it does | What it buys | What it costs | Available |
+|---|---|---|---|---|
+| **1. Shrink the time-only block** | Merge same-kind dummies; `fourier_order` 0–1 on less than two years; decide `include_trend` on the holdout | Frees periods for the variables that matter | Fewer named events in the decomposition | Now |
+| **2. Pool across regions** | `global` / `hierarchical` instead of `independent` | Uses all regions' rows for cross-region variables; averages noise for the rest | Regional differences are shrunk | Now |
+| **3. Lock what the data cannot separate** | The §2c register: LOCKED from the vendor or other evidence, CANDIDATE only for what you are testing | A free part sized to what the data can carry | The locked numbers are inputs, and must be reported as such | Now |
+| **4. Pillars with a stated split** (two-level attribution) | Model a tangled group as one column, built upstream in a common unit; split its contribution by spend / GRP share or the vendor's split | The pillar total is estimated; the split is honest about being an allocation | The split is a rule, not an estimate | Now (column built in the datacube; split by hand) |
+| **5. Region + period effects** (two-way fixed effects) | One shared effect per period replaces Fourier, trend and the national dummies — Meridian's default in a geo model (`knots` = number of periods: "each time period having its own regression coefficient") | Absorbs every national shock — seasonality, events, category demand, competitor activity. The time-only block disappears, and omitted national confounders stop biasing the cross-region drivers. Simulated: a national variable has **zero** variation left; a regional one keeps all of it | National and brand-wide variables are no longer identified by the data at all; their contributions must come from priors or experiments | **Proposed** (new model term) |
+| **6. Partial pooling across channels** | The channels of a pillar share a hyper-prior on their effectiveness | Keeps a coefficient per channel. Where the data cannot split them, the split shrinks towards "equal effectiveness" instead of an arbitrary one | One more assumption, to be stated | **Proposed** |
+| **7. External evidence for national channels** | Geo experiments, holdout regions → priors | The only thing that genuinely separates national channels that move together | An experiment | Now (as priors) |
+| **8. More rows** | Weekly data (× 4.3 rows), a longer history; weekly media into a monthly KPI (mixed frequency) | Everything above gets easier | Data work; mixed frequency belongs to Phase 2 | Data |
+
+**Not recommended for attribution:**
+
+- **Principal components / PLS.** Components are not channels; mapping them
+  back is an allocation in disguise.
+- **Selection or shrinkage towards zero** (horseshoe, ridge, lasso). Credit
+  moves into the baseline, and a "dropped" channel gets zero.
+- **Time-varying coefficients.** More parameters, not fewer.
+
+### Report the basis of every number
+
+On a short panel the decomposition mixes three kinds of number. Label each one
+in the deliverable:
+
+| Label | Rule | How to say it |
+|---|---|---|
+| **Estimated** | `contraction` > 0.5 | "estimated from the data" |
+| **Assumed** | `contraction` < 0.2, including LOCKED rows | "assumed from <source>" |
+| **Allocated** | Inside a pillar split | "pillar estimated; split by <rule>" |
+
+> **Meridian, for comparison.** Meridian's answer to this problem is
+> structural, not statistical: geo-level weekly data, one shared effect per
+> period in geo models (option 5 above), and ROI priors calibrated by
+> experiments (option 7). It has no device that lets 21 monthly observations
+> identify 77 effects either.
+
+---
+
 ## 4. The other assumptions
 
 `04_fit/assumption_checks.csv` and `assumptions_report.md`. Bayesian regression
@@ -841,8 +954,12 @@ Stability          06_cross_validation/cv_stability_ranking.csv
 Model choice       06_cross_validation/cv_scorecard.csv + compare_cv_runs()
 Benchmark gap      05_contributions/benchmark_comparison.xlsx
                    (paste into `benchmark`; delta clusters = structural)
+Short panel        n_columns > n_obs in collinearity_summary.csv -> section 3c:
+                   count the FREE columns, shrink the time-only block, pool,
+                   lock, pillar; read contraction, not the per-region VIF
+Seen it before?    cases/README.md
 ```
 
-**Related:** `MERIDIAN_ASSUMPTIONS.md` (how Meridian handles all of this) · `TUNING_GUIDE.md` (which lever does what) · `OUTPUTS_GUIDE.md`
+**Related:** `CHECKS_GUIDE.md` (what each check means and what to change) · `cases/` (problems already met) · `MERIDIAN_ASSUMPTIONS.md` (how Meridian handles all of this) · `TUNING_GUIDE.md` (which lever does what) · `OUTPUTS_GUIDE.md`
 (every file and column) · `../CLAUDE.md` (run history and decisions already
 made).

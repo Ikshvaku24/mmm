@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
 
 import dataclasses
 import difflib

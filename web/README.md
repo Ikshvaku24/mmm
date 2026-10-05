@@ -292,8 +292,9 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
    - on failure: the notebook's actual error, its **full** traceback, and the
      job log opened;
    - on success: which codebase version ran;
-   - then **Prepare run zip** (the run folder: the inputs, `Outputs/` and
-     `run_request.json`; `trace.nc` only if you tick it), the complete **Job
+   - then **Download run (zip)** (the run folder: the inputs, `Outputs/` and
+     `run_request.json` - built on click, on Streamlit's download thread, and
+     cached on the app's disk; `trace.nc` is its own download), the complete **Job
      log** (`job_log.txt`, everything the run printed - never the copy read
      while it ran), **Results** and **Reuse inputs**. **↻ Re-read files**
      reads the run's files from ADLS again (rarely needed: a missing file is
@@ -360,6 +361,45 @@ widget's value cannot change after it has been drawn. CSS in `src/styles.py`
 turns off Streamlit's grey "stale" fade and hides the Running/Stop badge.
 Downloads use `on_click="ignore"`, so they don't rerun anything.
 
+### Speed: worker processes, shared caches, zips
+
+The app is ONE Python process; Streamlit runs each user's session as a
+thread in it. Three things keep users from waiting on each other
+(`changes.md`, Update 7):
+
+- **Worker processes** (`src/codebase.py`). Codebase 1 captures printing and
+  warnings for the whole process, so in-process calls into it share one lock.
+  The heavy ones (`_HEAVY`: reading/checking the datacube, checking the prior,
+  mapping and share files, generating priors) run instead in a
+  `ProcessPoolExecutor` of `BRIDGE_WORKERS` (2) "spawn" processes, which load
+  codebase 1 from the same folder and never take the lock. A spawned worker
+  re-imports the program's entry script; that is safe for `streamlit run
+  app.py` and `python -c`, so the pool is only used from those
+  (`_spawn_safe`) - a test script would run again in every worker, so tests
+  run in-process. A dead worker: that call runs in-process and the pool
+  restarts; 3 failures in 10 min switch the workers off. The 5-minute check
+  for a re-uploaded codebase 1 runs on a background thread
+  (`start_background_refresh`, called from `app.py`), which also warms the
+  workers.
+- **Shared caches** (`src/perf.py :: SharedCache`): a thread-safe TTL + LRU
+  cache with a byte budget, a per-key "single flight" (simultaneous askers
+  share one computation) and deep copies on the way out (no session can
+  change another's value). Used for the cluster state and run status (5 s),
+  job parameters (1 min), run lists (30 s), BMC folders (1 min), recent runs
+  (20 s), run files and parsed tables (until "Re-read files"), and every
+  codebase 1 result, keyed by `perf.content_key(name, backend fingerprint,
+  arguments)`. `BRIDGE_CACHE_TTL_SCALE=0` turns them off (the UI tests do).
+- **Zips** (`src/runs.py`): `st.download_button(data=callable)` - Streamlit
+  1.54 runs the callable when the button is clicked, on its download thread.
+  `build_run_zip` lists the run (`files.list_tree_meta`: names, sizes, dates;
+  cached 1 min), fetches the files in parallel and writes the zip to
+  `BRIDGE_ZIP_CACHE_DIR` under a key made of that listing, so an unchanged
+  run's next download is read from disk. `build_trace` does the same for
+  `trace.nc`. The cache is kept under `BRIDGE_ZIP_CACHE_MB`.
+
+`perf.timed` / `perf.log_timing` print `[timing] <call> <seconds> <where>` for
+every call slower than `BRIDGE_TIMING_MIN` (0.3 s) - the app's Logs tab.
+
 ---
 
 ## Testing locally
@@ -367,11 +407,14 @@ Downloads use `on_click="ignore"`, so they don't rerun anything.
 ```bash
 python tests/run_all.py        # from "updating production code/" - includes:
 #   test_v19_config_schema.py  codebase 1's schema, YAML writer, app_job (run folders, demo.ipynb)
-#   test_v20_web_app.py        src/codebase.py (live loading from a fake workspace) and
-#                              src/projects.py (run folders, run lists, reuse, change detection)
+#   test_v20_web_app.py        src/codebase.py (live loading from a fake workspace), src/projects.py
+#                              (run folders, run lists, reuse, change detection), and the speed parts:
+#                              perf.SharedCache, the background refresh, the worker pool (in a child
+#                              `python -c` process - the same safe entry point as Streamlit's launcher)
 #   test_v21_web_ui_smoke.py   the whole app.py flow against a scripted streamlit stand-in:
 #                              BMC/run, paste from Excel, run, live log, results, zip, reuse,
-#                              "nothing changed", app_access roles, every ✕, the chart data
+#                              "nothing changed", app_access roles, every ✕, the chart data,
+#                              and (step 19) the shared caches and the zip disk cache
 #   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest) - the charts too,
 #                              with plotly; SKIPs without streamlit
 #   fixture_run_outputs.py     (not a suite) a synthetic Outputs/ tree in codebase 1's formats
@@ -410,7 +453,8 @@ web/
 ├── requirements.txt
 ├── assest/aommm.png       the logo (copy it in)
 ├── src/
-│   ├── codebase.py        the ONLY module that imports codebase 1 (no Streamlit)
+│   ├── codebase.py        the ONLY module that imports codebase 1 (no Streamlit): cache, worker pool
+│   ├── perf.py            shared caches (one copy for every session) and the timing log (no Streamlit)
 │   ├── projects.py        run folders: paths, names, run lists, a run's inputs, what changed (no Streamlit)
 │   ├── config_editor.py   Model settings
 │   ├── app_functions.py   prior editor dialog, paste from Excel

@@ -23,13 +23,13 @@ When you ship a change, bump `__version__` here and `__codebase__` in each
 module listed in `_STAMPED`. The test suite fails if they disagree.
 """
 
-__version__ = "2026.10.01.1"
+__version__ = "2026.10.06.1"
 
 # the modules whose logic the pre-model step and the config front end depend
 # on; each carries `__codebase__` equal to `__version__`
 _STAMPED = ("mmm.core.config", "mmm.core.settings", "mmm.data.mapping",
             "mmm.data.prior_builder", "mmm.checks.warnings_report",
-            "mmm.app_job")
+            "mmm.app_job", "mmm.checks.assumptions")
 
 
 def check_sync() -> list:

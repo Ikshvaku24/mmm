@@ -14,18 +14,29 @@ order:
   4. ../codebase1_hierarchical_mmm next to this app (the repository layout)
 
 A workspace copy is downloaded through the Workspace API and re-checked every
-REFRESH_SECONDS. When anything in it changed it is downloaded again and every
-later call uses the new code - re-uploading codebase 1 to the workspace is all
-it takes; the app does not need redeploying. The config editor and the prior
-table are built from the backend's own schema, so a key added to codebase 1
-appears in the app by itself.
+REFRESH_SECONDS - on a background thread once the app has started it
+(`start_background_refresh`), so no user's click waits for the Workspace API.
+When anything in the copy changed it is downloaded again and every later call
+uses the new code - re-uploading codebase 1 to the workspace is all it takes;
+the app does not need redeploying. The config editor and the prior table are
+built from the backend's own schema, so a key added to codebase 1 appears in
+the app by itself.
 
 Every call here
-  * runs under ONE lock. Codebase 1 captures warnings and printing for the
-    whole process, and Streamlit runs each browser session as a thread;
-  * returns an Outcome(ok, value, errors, warnings, log);
-  * catches SystemExit as well as exceptions. The mapping and share readers
-    stop with SystemExit, which would otherwise end the Streamlit script run.
+  * returns an Outcome(ok, value, errors, warnings, log), and catches
+    SystemExit as well as exceptions (the mapping and share readers stop with
+    SystemExit, which would otherwise end the Streamlit script run);
+  * is cached for EVERY user by its content and the backend copy (perf.py):
+    the same datacube, prior table or config is checked once, not once per
+    session or per refresh;
+  * runs either in a WORKER PROCESS - the heavy ones (_HEAVY: reading and
+    checking the datacube, checking the prior/mapping/share files, generating
+    priors) - or in this process under ONE lock (the quick ones). Codebase 1
+    captures warnings and printing for the whole process and Streamlit runs
+    each session as a thread, so in-process calls must queue; a worker is its
+    own process, so heavy calls run side by side and never hold the lock that
+    everyone else's clicks wait on. Workers are Python's standard
+    ProcessPoolExecutor ("spawn"), BRIDGE_WORKERS of them (2); 0 turns them off.
 
 Nothing here imports Streamlit, so the tests can import it.
 """
@@ -55,6 +66,8 @@ import pandas as pd
 import requests
 import yaml
 
+from src import perf
+
 # the first version with settings.app_access (app_access.yaml - who may do what)
 # and partial run configs laid over the team's config.yaml; 2026.09.29.2
 # brought the per-run folders
@@ -63,6 +76,23 @@ REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
 
+
+def _env_int(name, default):
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return int(default)
+
+
+# worker processes for the heavy calls (0 = everything in this process)
+WORKERS = _env_int("BRIDGE_WORKERS", 2)
+WORKER_TIMEOUT = _env_int("BRIDGE_WORKER_TIMEOUT", 600)
+_HEAVY = frozenset({"read_datacube", "check_datacube", "validate_prior_table",
+                    "validate_mapping", "validate_share", "generate_priors"})
+# results that depend only on the backend copy (kept longer)
+_STATIC = frozenset({"schema", "layout", "base_config", "default_config",
+                     "prior_columns", "sample_file"})
+
 # what the app needs from the backend folder (app_access.yaml: who may do what -
 # optional, and part of the fingerprint, so editing it reaches the app like any
 # other re-upload)
@@ -70,9 +100,16 @@ _NEEDED_FILES = ("config.yaml", "app_access.yaml")
 _NEEDED_DIRS = ("mmm", "samples")
 _NEEDED_DOCS = ("CONFIG_GUIDE.md", "FEATURE_PRIOR_GUIDE.md")
 
+# _LOCK guards in-process calls into codebase 1 (and the swap to a new copy);
+# _REFRESH_LOCK guards checking/downloading the source. Order: _REFRESH_LOCK
+# before _LOCK, never the other way - nothing holds _LOCK while it checks.
 _LOCK = threading.RLock()
+_REFRESH_LOCK = threading.Lock()
+_BG_LOCK = threading.Lock()
 _STATE = {"dir": None, "source": "", "where": "", "fingerprint": None,
           "checked": 0.0}
+_REFRESHER = {"thread": None}
+_CACHE = perf.SharedCache("codebase", ttl=1800, maxsize=256, max_bytes=256 * 2 ** 20)
 
 
 @dataclass
@@ -259,12 +296,26 @@ def _activate(folder: str) -> None:
     _STATE["dir"] = folder
 
 
-def _ensure_loaded(force: bool = False) -> None:
-    with _LOCK:
-        now = time.time()
-        if (_STATE["dir"] and not force
-                and now - _STATE["checked"] < REFRESH_SECONDS):
+def _refresher_alive() -> bool:
+    t = _REFRESHER.get("thread")
+    return REFRESH_SECONDS > 0 and t is not None and t.is_alive()
+
+
+def _ensure_loaded(force: bool = False, from_refresher: bool = False) -> None:
+    """Load codebase 1 the first time; afterwards re-check its source every
+    REFRESH_SECONDS - on the background thread when it runs, so no user waits
+    for the Workspace API, otherwise on the next call that finds it stale.
+    Never called while holding _LOCK (see the lock order above)."""
+    if not force and _STATE["dir"]:
+        if time.time() - _STATE["checked"] < REFRESH_SECONDS:
             return
+        if not from_refresher and _refresher_alive():
+            return
+    with _REFRESH_LOCK:
+        now = time.time()
+        if not force and _STATE["dir"] and now - _STATE["checked"] < REFRESH_SECONDS:
+            return                          # another thread has just checked
+        t0 = time.perf_counter()
         kind, where = _resolve_source()
         if kind == "local":
             folder, fp = where, _local_fingerprint(where)
@@ -276,12 +327,44 @@ def _ensure_loaded(force: bool = False) -> None:
                 fp = f"{fp}-{int(now)}"
             folder = os.path.join(tempfile.gettempdir(), "bridge_codebase1", fp[:16])
             if not os.path.exists(os.path.join(folder, ".complete")):
-                _download_all(listing, folder)
-        _STATE["checked"] = now
-        if fp != _STATE["fingerprint"] or folder != _STATE["dir"] or force:
-            _STATE.update(source=kind, where=where)
-            _activate(folder)
-            _STATE["fingerprint"] = fp
+                _download_all(listing, folder)     # slow - but no call is blocked
+        perf.log_timing("codebase.check_source", t0, kind)
+        with _LOCK:                                # swap only between calls
+            _STATE["checked"] = now
+            if fp != _STATE["fingerprint"] or folder != _STATE["dir"] or force:
+                _STATE.update(source=kind, where=where)
+                _activate(folder)
+                _STATE["fingerprint"] = fp
+
+
+def start_background_refresh(warm_workers: bool = True) -> bool:
+    """Keep codebase 1 fresh on a daemon thread (every REFRESH_SECONDS) and
+    start the worker processes ahead of the first heavy click. Safe to call
+    on every script run - only the first call starts anything."""
+    with _BG_LOCK:
+        t = _REFRESHER.get("thread")
+        if t is not None and t.is_alive():
+            return False
+        t = threading.Thread(target=_refresh_loop, args=(warm_workers,),
+                             name="bridge-codebase-refresh", daemon=True)
+        _REFRESHER["thread"] = t
+        t.start()
+        return True
+
+
+def _refresh_loop(warm_workers: bool) -> None:
+    try:
+        _ensure_loaded(from_refresher=True)
+        if warm_workers:
+            warm_workers_now()
+    except Exception as e:  # noqa: BLE001 - the calls report it themselves
+        print(f"[codebase] loading codebase 1 failed: {e}", flush=True)
+    while True:
+        time.sleep(max(5.0, float(REFRESH_SECONDS)))
+        try:
+            _ensure_loaded(from_refresher=True)
+        except Exception as e:  # noqa: BLE001
+            print(f"[codebase] background re-check of codebase 1 failed: {e}", flush=True)
 
 
 def _m(name: str):
@@ -310,28 +393,33 @@ def _classify(texts) -> list:
     return sorted(out, key=lambda x: order.get(x[0], 3))
 
 
-def _guarded(fn, *args, **kwargs) -> Outcome:
+@dataclass
+class _Checked:
+    value: object = None
+    errors: list = field(default_factory=list)
+    warnings: list = field(default_factory=list)
+
+
+def _capture(fn, *args, **kwargs) -> Outcome:
+    """Run one codebase call, catching what it prints, warns and raises.
+    No lock: in this process the caller holds _LOCK; a worker process runs
+    one call at a time anyway."""
     out, buf = Outcome(), io.StringIO()
-    with _LOCK:
+    with warnings.catch_warnings(record=True) as caught, \
+            contextlib.redirect_stdout(buf):
+        warnings.simplefilter("always")
         try:
-            _ensure_loaded()
+            out.value = fn(*args, **kwargs)
+        except SystemExit as e:
+            out.ok = False
+            out.errors.append(str(e.code if e.code is not None else e))
+        except ValueError as e:
+            out.ok = False
+            out.errors.append(str(e))
         except Exception as e:  # noqa: BLE001
-            return Outcome(ok=False, errors=[f"codebase 1 could not be loaded: {e}"])
-        with warnings.catch_warnings(record=True) as caught, \
-                contextlib.redirect_stdout(buf):
-            warnings.simplefilter("always")
-            try:
-                out.value = fn(*args, **kwargs)
-            except SystemExit as e:
-                out.ok = False
-                out.errors.append(str(e.code if e.code is not None else e))
-            except ValueError as e:
-                out.ok = False
-                out.errors.append(str(e))
-            except Exception as e:  # noqa: BLE001
-                out.ok = False
-                out.errors.append(f"{type(e).__name__}: {e}")
-        out.warnings = _classify(w.message for w in caught)
+            out.ok = False
+            out.errors.append(f"{type(e).__name__}: {e}")
+    out.warnings = _classify(w.message for w in caught)
     out.log = buf.getvalue()
     if isinstance(out.value, _Checked):             # checks with many findings
         out.errors += out.value.errors
@@ -341,11 +429,192 @@ def _guarded(fn, *args, **kwargs) -> Outcome:
     return out
 
 
-@dataclass
-class _Checked:
-    value: object = None
-    errors: list = field(default_factory=list)
-    warnings: list = field(default_factory=list)
+def _load_error(e) -> Outcome:
+    return Outcome(ok=False, errors=[f"codebase 1 could not be loaded: {e}"])
+
+
+def _guarded(fn, *args, **kwargs) -> Outcome:
+    """One codebase call in THIS process, under the lock."""
+    try:
+        _ensure_loaded()
+    except Exception as e:  # noqa: BLE001
+        return _load_error(e)
+    with _LOCK:
+        if not _STATE["dir"]:
+            return _load_error("no backend folder is active")
+        return _capture(fn, *args, **kwargs)
+
+
+# --------------------------------------------------------------------------- #
+# worker processes
+# --------------------------------------------------------------------------- #
+_POOL = {"executor": None, "disabled": "", "crashes": []}
+CRASH_LIMIT = 3              # this many worker crashes in CRASH_WINDOW s: workers off
+CRASH_WINDOW = 600
+_POOL_LOCK = threading.Lock()
+_IN_WORKER = False
+
+
+class _NoPool(Exception):
+    """No worker could take the call - run it in this process instead."""
+
+
+def _spawn_safe() -> bool:
+    """A "spawn" worker re-imports the program's entry script. That is safe
+    for Streamlit's launcher (`streamlit run app.py`) and for `python -c`; a
+    plain script with top-level code (a test file) would run again in every
+    worker - so the pool is only used when the entry point is one of those."""
+    main = sys.modules.get("__main__")
+    if getattr(main, "__spec__", None) is not None:
+        return "streamlit" in str(getattr(main.__spec__, "name", "")).lower()
+    path = getattr(main, "__file__", None)
+    return path is None or "streamlit" in str(path).lower()
+
+
+def workers_active() -> bool:
+    return (WORKERS > 0 and not _IN_WORKER and not _POOL["disabled"]
+            and _spawn_safe())
+
+
+def _executor():
+    if not workers_active():
+        return None
+    with _POOL_LOCK:
+        if _POOL["disabled"]:
+            return None
+        if _POOL["executor"] is None:
+            import multiprocessing
+            from concurrent.futures import ProcessPoolExecutor
+            _POOL["executor"] = ProcessPoolExecutor(
+                max_workers=WORKERS, mp_context=multiprocessing.get_context("spawn"),
+                initializer=_worker_init)
+            print(f"[codebase] {WORKERS} worker processes for the heavy codebase 1 "
+                  "calls", flush=True)
+        return _POOL["executor"]
+
+
+def _reset_pool(reason: str, disable: bool = False) -> None:
+    with _POOL_LOCK:
+        ex, _POOL["executor"] = _POOL["executor"], None
+        now = time.time()
+        _POOL["crashes"] = [t for t in _POOL["crashes"] if now - t < CRASH_WINDOW] + [now]
+        if len(_POOL["crashes"]) >= CRASH_LIMIT and not disable:
+            disable = True
+            reason = (f"{reason} - {CRASH_LIMIT} failures in {CRASH_WINDOW // 60} min, "
+                      "so the heavy calls run in the app process from now on")
+        if disable:
+            _POOL["disabled"] = reason
+    if ex is not None:
+        with contextlib.suppress(Exception):
+            ex.shutdown(wait=False, cancel_futures=True)
+    print(f"[codebase] worker pool {'switched off' if disable else 'restarted'}: "
+          f"{reason}", flush=True)
+
+
+def _worker_init() -> None:
+    global _IN_WORKER
+    _IN_WORKER = True
+
+
+def _worker_activate(folder: str) -> None:
+    if _STATE["dir"] != folder:
+        _STATE.update(source="worker", where=folder)
+        _activate(folder)
+
+
+def _worker_task(folder: str, name: str, args, kwargs) -> Outcome:
+    """Runs INSIDE a worker process: codebase 1 from `folder`, one call."""
+    try:
+        _worker_activate(folder)
+    except Exception as e:  # noqa: BLE001
+        return _load_error(e)
+    return _capture(_IMPLS[name], *args, **kwargs)
+
+
+def _worker_ping(folder: str) -> int:
+    _worker_activate(folder)
+    time.sleep(0.3)          # keep this worker busy so the next ping reaches another
+    return os.getpid()
+
+
+def warm_workers_now() -> int:
+    """Start the workers and load codebase 1 into them (the first heavy click
+    would otherwise wait for that). Returns how many answered."""
+    ex = _executor()
+    folder = _STATE["dir"]
+    if ex is None or not folder:
+        return 0
+    try:
+        futures = [ex.submit(_worker_ping, folder) for _ in range(WORKERS)]
+        return len({f.result(timeout=120) for f in futures})
+    except Exception as e:  # noqa: BLE001
+        print(f"[codebase] warming the workers failed: {e}", flush=True)
+        return 0
+
+
+def _in_worker(name: str, args, kwargs) -> Outcome:
+    from concurrent.futures import TimeoutError as FuturesTimeout
+    from concurrent.futures.process import BrokenProcessPool
+    try:
+        ex = _executor()
+    except Exception as e:  # noqa: BLE001 - e.g. processes cannot be started here
+        _reset_pool(f"the worker processes could not start: {e}", disable=True)
+        raise _NoPool() from e
+    folder = _STATE["dir"]
+    if ex is None or not folder:
+        raise _NoPool()
+    try:
+        future = ex.submit(_worker_task, folder, name, args, kwargs)
+    except Exception as e:  # noqa: BLE001 - shut down or broken
+        _reset_pool(f"could not hand over {name}: {e}")
+        raise _NoPool() from e
+    try:
+        return future.result(timeout=WORKER_TIMEOUT)
+    except FuturesTimeout:
+        return Outcome(ok=False, errors=[
+            f"This step ({name}) took longer than {WORKER_TIMEOUT} s - try again. If "
+            "it keeps happening the file may be too large for the app."])
+    except BrokenProcessPool as e:
+        _reset_pool(f"a worker process stopped during {name} ({e})")
+        raise _NoPool() from e
+    except Exception as e:  # noqa: BLE001 - e.g. arguments a process cannot take
+        _reset_pool(f"{name}: {type(e).__name__}: {e}", disable=True)
+        raise _NoPool() from e
+
+
+# --------------------------------------------------------------------------- #
+# the one entry point of every public call
+# --------------------------------------------------------------------------- #
+def _call(name: str, *args, **kwargs) -> Outcome:
+    """Shared cache -> worker process (heavy calls) -> this process."""
+    t0 = time.perf_counter()
+    try:
+        _ensure_loaded()
+    except Exception as e:  # noqa: BLE001
+        return _load_error(e)
+    fp = _STATE["fingerprint"]
+    ran = ["cache"]
+
+    def compute():
+        if name in _HEAVY:
+            try:
+                out = _in_worker(name, args, kwargs)
+                ran[0] = "worker"
+                return out
+            except _NoPool:
+                pass
+        ran[0] = "in-process"
+        return _guarded(_IMPLS[name], *args, **kwargs)
+
+    def worth_keeping(out):
+        return fp is not None and not (
+            out.errors and str(out.errors[0]).startswith("codebase 1 could not be loaded"))
+
+    out, _hit = _CACHE.get_or_compute(perf.content_key(name, fp, args, kwargs), compute,
+                                      ttl=3600 if name in _STATIC else 1800,
+                                      cache_if=worth_keeping)
+    perf.log_timing(f"codebase.{name}", t0, ran[0])
+    return out
 
 
 # --------------------------------------------------------------------------- #
@@ -354,8 +623,8 @@ class _Checked:
 def status(force: bool = False) -> dict:
     """Which backend the app is using. Never raises."""
     try:
+        _ensure_loaded(force=force)
         with _LOCK:
-            _ensure_loaded(force=force)
             mmm = _m("mmm")
             return {"ok": True, "version": mmm.__version__,
                     "source": _STATE["source"], "where": _STATE["where"],
@@ -372,36 +641,40 @@ def backend_dir() -> str | None:
 # --------------------------------------------------------------------------- #
 # config.yaml
 # --------------------------------------------------------------------------- #
+def _impl_schema():
+    st_, aj = _m("mmm.core.settings"), _m("mmm.app_job")
+    access_file = os.path.join(_STATE["dir"], st_.ACCESS_FILE)
+    try:
+        access = dict(st_.app_access(access_file), error="")
+    except ValueError as e:
+        # a file that cannot be read fixes every setting and grants nobody
+        # full access - it never opens anything
+        access = {"full_access": [], "config_full_access": [], "editable": [],
+                  "show_fixed": True, "unknown": [], "source": access_file,
+                  "error": str(e)}
+    return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
+            "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
+            "sections": ["data"] + list(st_.SECTIONS),
+            "blurbs": dict(st_.SECTION_BLURB), "access": access}
+
+
 def schema() -> Outcome:
     """The backend's config schema, which keys/folders the job owns, and who
     may do what in the app (`access`, from app_access.yaml)."""
-    def impl():
-        st_, aj = _m("mmm.core.settings"), _m("mmm.app_job")
-        access_file = os.path.join(_STATE["dir"], st_.ACCESS_FILE)
-        try:
-            access = dict(st_.app_access(access_file), error="")
-        except ValueError as e:
-            # a file that cannot be read fixes every setting and grants nobody
-            # full access - it never opens anything
-            access = {"full_access": [], "config_full_access": [], "editable": [],
-                      "show_fixed": True, "unknown": [], "source": access_file,
-                      "error": str(e)}
-        return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
-                "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
-                "sections": ["data"] + list(st_.SECTIONS),
-                "blurbs": dict(st_.SECTION_BLURB), "access": access}
-    return _guarded(impl)
+    return _call("schema")
+
+
+def _impl_layout():
+    aj = _m("mmm.app_job")
+    return {"folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
+            "shared_folders": list(aj.SHARED_FOLDERS),
+            "run_request": aj.RUN_REQUEST, "name_pattern": aj.NAME_PATTERN}
 
 
 def layout() -> Outcome:
     """Where a run's files live - the job's own folder names and name rule,
     so the app and the job can never disagree about a path."""
-    def impl():
-        aj = _m("mmm.app_job")
-        return {"folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
-                "shared_folders": list(aj.SHARED_FOLDERS),
-                "run_request": aj.RUN_REQUEST, "name_pattern": aj.NAME_PATTERN}
-    return _guarded(impl)
+    return _call("layout")
 
 
 def _full_config(raw: dict) -> dict:
@@ -416,65 +689,78 @@ def _full_config(raw: dict) -> dict:
     return full
 
 
+def _impl_base_config():
+    with open(os.path.join(_STATE["dir"], "config.yaml"), encoding="utf-8") as fh:
+        raw = yaml.safe_load(fh) or {}
+    return _full_config(raw)
+
+
 def base_config() -> Outcome:
     """The backend folder's config.yaml, every key filled."""
-    def impl():
-        with open(os.path.join(_STATE["dir"], "config.yaml"), encoding="utf-8") as fh:
-            raw = yaml.safe_load(fh) or {}
-        return _full_config(raw)
-    return _guarded(impl)
+    return _call("base_config")
+
+
+def _impl_default_config():
+    st_ = _m("mmm.core.settings")
+    return {sec: st_.section_defaults(sec) for sec in ["data"] + list(st_.SECTIONS)}
 
 
 def default_config() -> Outcome:
     """The codebase defaults, every key filled (the fallback base)."""
-    def impl():
-        st_ = _m("mmm.core.settings")
-        return {sec: st_.section_defaults(sec) for sec in ["data"] + list(st_.SECTIONS)}
-    return _guarded(impl)
+    return _call("default_config")
+
+
+def _impl_validate_config(cfg):
+    st_ = _m("mmm.core.settings")
+    return st_.settings_from_dict(copy.deepcopy(cfg), base_dir=tempfile.gettempdir(),
+                                  features=[]).as_dict()
 
 
 def validate_config(cfg: dict) -> Outcome:
     """Load `cfg` exactly as the job will; errors stop a run, warnings inform."""
-    def impl():
-        st_ = _m("mmm.core.settings")
-        return st_.settings_from_dict(copy.deepcopy(cfg), base_dir=tempfile.gettempdir(),
-                                      features=[]).as_dict()
-    return _guarded(impl)
+    return _call("validate_config", cfg)
+
+
+def _impl_units_problems(cfg):
+    st_, pb = _m("mmm.core.settings"), _m("mmm.data.prior_builder")
+    s = st_.settings_from_dict(copy.deepcopy(cfg), base_dir=tempfile.gettempdir(),
+                               features=[])
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        return pb.check_units(s.run, s.data.get("dv_aggregation") or "mean")
 
 
 def units_problems(cfg: dict) -> Outcome:
     """Why generated priors would be in the wrong units under `cfg` ([] = fine)."""
-    def impl():
-        st_, pb = _m("mmm.core.settings"), _m("mmm.data.prior_builder")
-        s = st_.settings_from_dict(copy.deepcopy(cfg), base_dir=tempfile.gettempdir(),
-                                   features=[])
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore")
-            return pb.check_units(s.run, s.data.get("dv_aggregation") or "mean")
-    return _guarded(impl)
+    return _call("units_problems", cfg)
+
+
+def _impl_config_yaml(cfg, only=None):
+    return _m("mmm.core.settings").settings_text(copy.deepcopy(cfg), only=only)
 
 
 def config_yaml(cfg: dict, only=None) -> Outcome:
     """The annotated YAML the job will run: every key (deviations marked) - or,
     with `only` ("section.key" names), just those; the job lays such a file
     over the team's config.yaml."""
-    return _guarded(lambda: _m("mmm.core.settings").settings_text(
-        copy.deepcopy(cfg), only=only))
+    return _call("config_yaml", cfg, only=only)
+
+
+def _impl_parse_config_yaml(text, base=None):
+    raw = yaml.safe_load(text) or {}
+    if not isinstance(raw, dict):
+        raise ValueError("the file must be a mapping of sections "
+                         "(data:, model:, run:, ...)")
+    if base:
+        raw = _m("mmm.app_job").merge_config(base, raw)
+    return _full_config(raw)
 
 
 def parse_config_yaml(text: str, base: dict | None = None) -> Outcome:
     """An uploaded config.yaml -> the full config dict, validated. With `base`
     (the team's config) the file is laid over it, the way the job does, so a
     file holding only some settings keeps the team's values for the rest."""
-    def impl():
-        raw = yaml.safe_load(text) or {}
-        if not isinstance(raw, dict):
-            raise ValueError("the file must be a mapping of sections "
-                             "(data:, model:, run:, ...)")
-        if base:
-            raw = _m("mmm.app_job").merge_config(base, raw)
-        return _full_config(raw)
-    return _guarded(impl)
+    return _call("parse_config_yaml", text, base=base)
 
 
 # --------------------------------------------------------------------------- #
@@ -499,19 +785,25 @@ def _cols(cfg: dict) -> tuple[str, str, str]:
             run.get("dv_col") or "dv")
 
 
-def read_datacube(file_bytes: bytes, file_name: str, cfg: dict) -> Outcome:
-    """The panel exactly as the job reads it (settings.load_panel)."""
-    def impl():
-        st_ = _m("mmm.core.settings")
-        path = _write_tmp(file_bytes, file_name)
+def _impl_read_datacube(file_bytes, file_name, cfg):
+    st_ = _m("mmm.core.settings")
+    folder = tempfile.mkdtemp(prefix="bridge_")
+    try:
+        path = _write_tmp(file_bytes, file_name, folder)
         c = copy.deepcopy(cfg or {})
         data = dict(c.get("data") or {})
         data.update(input_path=path, feature_priors=None, mapping_file=None,
                     share_file=None, pre_model_dir=None)
         c["data"] = data
-        s = st_.settings_from_dict(c, base_dir=os.path.dirname(path), features=[])
+        s = st_.settings_from_dict(c, base_dir=folder, features=[])
         return st_.load_panel(s)
-    return _guarded(impl)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+
+
+def read_datacube(file_bytes: bytes, file_name: str, cfg: dict) -> Outcome:
+    """The panel exactly as the job reads it (settings.load_panel)."""
+    return _call("read_datacube", file_bytes, file_name, cfg)
 
 
 def datacube_features(df: pd.DataFrame, cfg: dict) -> list:
@@ -524,6 +816,65 @@ def datacube_regions(df: pd.DataFrame, cfg: dict) -> list:
     return sorted(df[rc].astype(str).unique()) if rc in df.columns else []
 
 
+def _impl_check_datacube(df, cfg):
+    dc, rc, yc = _cols(cfg)
+    errors, warns = [], []
+    cols = [str(c) for c in df.columns]
+    lower = {c.lower(): c for c in cols}
+    for label, key, name in (("date", "date_col", dc), ("region", "region_col", rc),
+                             ("KPI", "dv_col", yc)):
+        if name not in cols:
+            hint = lower.get(str(name).lower())
+            if hint:
+                errors.append(
+                    f"The {label} column is set to '{name}' but the file has "
+                    f"'{hint}'. Rename it in the file, or set run.{key} to "
+                    f"'{hint}' in Model settings.")
+            else:
+                errors.append(
+                    f"No '{name}' column (the {label} column, run.{key}). "
+                    f"Columns in the file: {cols[:15]}"
+                    f"{' ...' if len(cols) > 15 else ''}")
+    if errors:
+        return _Checked(None, errors, warns)
+
+    feats = datacube_features(df, cfg)
+    non_num = [c for c in feats if not pd.api.types.is_numeric_dtype(df[c])]
+    if non_num:
+        errors.append(f"Non-numeric feature columns (the model needs numbers): "
+                      f"{non_num[:10]}")
+    if not pd.api.types.is_numeric_dtype(df[yc]):
+        errors.append(f"The KPI column '{yc}' is not numeric.")
+    nan_cols = [c for c in [yc] + feats if df[c].isna().any()]
+    if nan_cols:
+        errors.append(f"Missing values in: {nan_cols[:10]}"
+                      f"{' ...' if len(nan_cols) > 10 else ''}")
+    dates = pd.to_datetime(df[dc], errors="coerce")
+    if dates.isna().any():
+        errors.append(f"{int(dates.isna().sum())} rows have a date that cannot "
+                      f"be read in '{dc}' (set data.date_format if the format "
+                      "is unusual).")
+    dups = int(df.assign(_d=dates).duplicated([rc, "_d"]).sum())
+    if dups:
+        errors.append(f"{dups} duplicate region x date rows.")
+
+    summary = {"rows": int(len(df)), "regions": datacube_regions(df, cfg),
+               "features": feats, "n_periods": int(dates.nunique()),
+               "date_min": str(dates.min().date()) if dates.notna().any() else "",
+               "date_max": str(dates.max().date()) if dates.notna().any() else ""}
+    if not errors:
+        try:
+            st_, dp = _m("mmm.core.settings"), _m("mmm.data.data_prep")
+            s = st_.settings_from_dict(copy.deepcopy(cfg),
+                                       base_dir=tempfile.gettempdir(), features=[])
+            _mask, holdout, plan = dp.split_train(dates, s.run)
+            summary["plan"] = plan.describe()
+            summary["holdout"] = int(holdout)
+        except Exception:  # noqa: BLE001 - the summary is a courtesy; the
+            pass           # settings block reports a bad config itself
+    return _Checked(summary, errors, warns)
+
+
 def check_datacube(df: pd.DataFrame, cfg: dict) -> Outcome:
     """What would STOP the run, found before upload - errors only.
 
@@ -533,64 +884,7 @@ def check_datacube(df: pd.DataFrame, cfg: dict) -> Outcome:
     Nothing is renamed or changed: the file that is uploaded is the file that
     was checked (the old check lower-cased the first three columns in place).
     """
-    def impl():
-        dc, rc, yc = _cols(cfg)
-        errors, warns = [], []
-        cols = [str(c) for c in df.columns]
-        lower = {c.lower(): c for c in cols}
-        for label, key, name in (("date", "date_col", dc), ("region", "region_col", rc),
-                                 ("KPI", "dv_col", yc)):
-            if name not in cols:
-                hint = lower.get(str(name).lower())
-                if hint:
-                    errors.append(
-                        f"The {label} column is set to '{name}' but the file has "
-                        f"'{hint}'. Rename it in the file, or set run.{key} to "
-                        f"'{hint}' in Model settings.")
-                else:
-                    errors.append(
-                        f"No '{name}' column (the {label} column, run.{key}). "
-                        f"Columns in the file: {cols[:15]}"
-                        f"{' ...' if len(cols) > 15 else ''}")
-        if errors:
-            return _Checked(None, errors, warns)
-
-        feats = datacube_features(df, cfg)
-        non_num = [c for c in feats if not pd.api.types.is_numeric_dtype(df[c])]
-        if non_num:
-            errors.append(f"Non-numeric feature columns (the model needs numbers): "
-                          f"{non_num[:10]}")
-        if not pd.api.types.is_numeric_dtype(df[yc]):
-            errors.append(f"The KPI column '{yc}' is not numeric.")
-        nan_cols = [c for c in [yc] + feats if df[c].isna().any()]
-        if nan_cols:
-            errors.append(f"Missing values in: {nan_cols[:10]}"
-                          f"{' ...' if len(nan_cols) > 10 else ''}")
-        dates = pd.to_datetime(df[dc], errors="coerce")
-        if dates.isna().any():
-            errors.append(f"{int(dates.isna().sum())} rows have a date that cannot "
-                          f"be read in '{dc}' (set data.date_format if the format "
-                          "is unusual).")
-        dups = int(df.assign(_d=dates).duplicated([rc, "_d"]).sum())
-        if dups:
-            errors.append(f"{dups} duplicate region x date rows.")
-
-        summary = {"rows": int(len(df)), "regions": datacube_regions(df, cfg),
-                   "features": feats, "n_periods": int(dates.nunique()),
-                   "date_min": str(dates.min().date()) if dates.notna().any() else "",
-                   "date_max": str(dates.max().date()) if dates.notna().any() else ""}
-        if not errors:
-            try:
-                st_, dp = _m("mmm.core.settings"), _m("mmm.data.data_prep")
-                s = st_.settings_from_dict(copy.deepcopy(cfg),
-                                           base_dir=tempfile.gettempdir(), features=[])
-                _mask, holdout, plan = dp.split_train(dates, s.run)
-                summary["plan"] = plan.describe()
-                summary["holdout"] = int(holdout)
-            except Exception:  # noqa: BLE001 - the summary is a courtesy; the
-                pass           # settings block reports a bad config itself
-        return _Checked(summary, errors, warns)
-    return _guarded(impl)
+    return _call("check_datacube", df, cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -620,48 +914,52 @@ PRIOR_HELP = {
 }
 
 
+def _impl_prior_columns():
+    c1, pb = _m("mmm.core.config"), _m("mmm.data.prior_builder")
+    options = {"pooling": list(c1.VALID_POOLING),
+               "sign_constraint": list(c1.VALID_SIGNS),
+               "center_mode": list(c1.VALID_CENTER),
+               "scale_mode": list(c1.VALID_SCALE),
+               "prior_sd_basis": list(c1.VALID_SD_BASIS),
+               "prior_mean_basis": list(c1.VALID_MEAN_BASIS)}
+    numbers = ("global_prior_mean", "global_prior_sd", "regional_sd_prior")
+    kinds = {}
+    for col in pb.PRIOR_COLUMNS:
+        kinds[col] = ("choice" if col in options else "number" if col in numbers
+                      else "flag" if col == "baseline"
+                      else "region" if col == "region" else "text")
+    return {"columns": list(pb.PRIOR_COLUMNS), "kinds": kinds,
+            "options": options, "help": dict(PRIOR_HELP)}
+
+
 def prior_columns() -> Outcome:
     """Column order, kind, allowed values and help for the prior editor."""
-    def impl():
-        c1, pb = _m("mmm.core.config"), _m("mmm.data.prior_builder")
-        options = {"pooling": list(c1.VALID_POOLING),
-                   "sign_constraint": list(c1.VALID_SIGNS),
-                   "center_mode": list(c1.VALID_CENTER),
-                   "scale_mode": list(c1.VALID_SCALE),
-                   "prior_sd_basis": list(c1.VALID_SD_BASIS),
-                   "prior_mean_basis": list(c1.VALID_MEAN_BASIS)}
-        numbers = ("global_prior_mean", "global_prior_sd", "regional_sd_prior")
-        kinds = {}
-        for col in pb.PRIOR_COLUMNS:
-            kinds[col] = ("choice" if col in options else "number" if col in numbers
-                          else "flag" if col == "baseline"
-                          else "region" if col == "region" else "text")
-        return {"columns": list(pb.PRIOR_COLUMNS), "kinds": kinds,
-                "options": options, "help": dict(PRIOR_HELP)}
-    return _guarded(impl)
+    return _call("prior_columns")
+
+
+def _impl_read_prior_file(file_bytes, file_name):
+    name = str(file_name).lower()
+    if name.endswith((".xlsx", ".xls", ".xlsm")):
+        df = pd.read_excel(io.BytesIO(file_bytes))
+    else:
+        text = file_bytes.decode("utf-8-sig", errors="replace")
+        first = text.splitlines()[0] if text.strip() else ""
+        try:
+            sep = csv.Sniffer().sniff(first, delimiters=",;\t").delimiter
+        except csv.Error:
+            sep = ","
+        df = pd.read_csv(io.StringIO(text), sep=sep)
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(how="all")
+    if "variable" not in df.columns:
+        raise ValueError(f"{file_name}: no 'variable' column - found "
+                         f"{list(df.columns)[:12]}")
+    return df.reset_index(drop=True)
 
 
 def read_prior_file(file_bytes: bytes, file_name: str) -> Outcome:
     """A prior file as a table: CSV (any common delimiter, BOM-safe) or xlsx."""
-    def impl():
-        name = str(file_name).lower()
-        if name.endswith((".xlsx", ".xls", ".xlsm")):
-            df = pd.read_excel(io.BytesIO(file_bytes))
-        else:
-            text = file_bytes.decode("utf-8-sig", errors="replace")
-            first = text.splitlines()[0] if text.strip() else ""
-            try:
-                sep = csv.Sniffer().sniff(first, delimiters=",;\t").delimiter
-            except csv.Error:
-                sep = ","
-            df = pd.read_csv(io.StringIO(text), sep=sep)
-        df.columns = [str(c).strip() for c in df.columns]
-        df = df.dropna(how="all")
-        if "variable" not in df.columns:
-            raise ValueError(f"{file_name}: no 'variable' column - found "
-                             f"{list(df.columns)[:12]}")
-        return df.reset_index(drop=True)
-    return _guarded(impl)
+    return _call("read_prior_file", file_bytes, file_name)
 
 
 def clean_prior_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -688,43 +986,49 @@ def prior_csv_bytes(df: pd.DataFrame) -> bytes:
     return clean_prior_table(df).to_csv(index=False).encode("utf-8")
 
 
+def _impl_validate_prior_table(df, datacube_df, cfg):
+    c1, pb = _m("mmm.core.config"), _m("mmm.data.prior_builder")
+    table = clean_prior_table(df)
+    errors, warns = [], []
+    extra = [c for c in table.columns
+             if c not in pb.PRIOR_COLUMNS and c not in ("hierarchical", "center")]
+    if extra:
+        warns.append(f"Columns the model ignores: {extra}")
+    folder = tempfile.mkdtemp(prefix="bridge_prior_")
+    try:
+        path = os.path.join(folder, "priors.csv")
+        table.to_csv(path, index=False)
+        specs = c1.load_feature_config(path)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    names = [s.name for s in specs]
+    if datacube_df is not None:
+        feats = datacube_features(datacube_df, cfg)
+        missing = [n for n in names if n not in feats]
+        if missing:
+            lines = []
+            for m in missing[:20]:
+                near = difflib.get_close_matches(m, feats, n=2, cutoff=0.6)
+                lines.append(m + (f"  (did you mean {' / '.join(near)}?)" if near else ""))
+            errors.append(f"{len(missing)} variable(s) are not columns of the "
+                          "datacube:\n  " + "\n  ".join(lines))
+        unused = [f for f in feats if f not in names]
+        if unused:
+            warns.append(f"{len(unused)} datacube column(s) are not in the prior "
+                         f"file and will not be modelled: {unused[:12]}"
+                         f"{' ...' if len(unused) > 12 else ''}")
+        c1.validate_region_priors(specs, datacube_regions(datacube_df, cfg))
+    n_region = int(table["region"].notna().sum()) if "region" in table else 0
+    return _Checked({"features": len(specs), "region_rows": n_region,
+                     "csv": table.to_csv(index=False).encode("utf-8")},
+                    errors, warns)
+
+
 def validate_prior_table(df: pd.DataFrame, datacube_df: pd.DataFrame | None,
                          cfg: dict) -> Outcome:
     """The loader's verdict on the table, plus the name and region checks the
     run would make - so a bad prior never reaches the cluster."""
-    def impl():
-        c1, pb = _m("mmm.core.config"), _m("mmm.data.prior_builder")
-        table = clean_prior_table(df)
-        errors, warns = [], []
-        extra = [c for c in table.columns
-                 if c not in pb.PRIOR_COLUMNS and c not in ("hierarchical", "center")]
-        if extra:
-            warns.append(f"Columns the model ignores: {extra}")
-        path = os.path.join(tempfile.mkdtemp(prefix="bridge_prior_"), "priors.csv")
-        table.to_csv(path, index=False)
-        specs = c1.load_feature_config(path)
-        names = [s.name for s in specs]
-        if datacube_df is not None:
-            feats = datacube_features(datacube_df, cfg)
-            missing = [n for n in names if n not in feats]
-            if missing:
-                lines = []
-                for m in missing[:20]:
-                    near = difflib.get_close_matches(m, feats, n=2, cutoff=0.6)
-                    lines.append(m + (f"  (did you mean {' / '.join(near)}?)" if near else ""))
-                errors.append(f"{len(missing)} variable(s) are not columns of the "
-                              "datacube:\n  " + "\n  ".join(lines))
-            unused = [f for f in feats if f not in names]
-            if unused:
-                warns.append(f"{len(unused)} datacube column(s) are not in the prior "
-                             f"file and will not be modelled: {unused[:12]}"
-                             f"{' ...' if len(unused) > 12 else ''}")
-            c1.validate_region_priors(specs, datacube_regions(datacube_df, cfg))
-        n_region = int(table["region"].notna().sum()) if "region" in table else 0
-        return _Checked({"features": len(specs), "region_rows": n_region,
-                         "csv": table.to_csv(index=False).encode("utf-8")},
-                        errors, warns)
-    return _guarded(impl)
+    return _call("validate_prior_table", df, datacube_df, cfg)
 
 
 # --------------------------------------------------------------------------- #
@@ -738,45 +1042,71 @@ def _known(datacube_df, cfg, prior_variables):
             mp.DATACUBE)
 
 
+def _impl_validate_mapping(file_bytes, file_name, datacube_df, cfg, prior_variables=None):
+    mp = _m("mmm.data.mapping")
+    folder = tempfile.mkdtemp(prefix="bridge_")
+    try:
+        path = _write_tmp(file_bytes, file_name, folder)
+        known, against = _known(datacube_df, cfg, prior_variables)
+        table = mp.load_mapping_table(path, known, against)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    if datacube_df is not None:
+        table = mp.align_regions(table, datacube_regions(datacube_df, cfg),
+                                 _safe_name(file_name))
+    return {"table": table, "has_contribution": bool(mp.has_contribution(table)),
+            "links": int(len(table)),
+            "vendor_variables": int(table["vendor_variable"].nunique())}
+
+
 def validate_mapping(file_bytes: bytes, file_name: str, datacube_df, cfg: dict,
                      prior_variables=None) -> Outcome:
     """The codebase's own reader: names, regions, one contribution per cell.
 
     Names are checked against the datacube - or, once a prior file is chosen,
     against its variables, which is the rule the run itself applies."""
-    def impl():
-        mp = _m("mmm.data.mapping")
-        path = _write_tmp(file_bytes, file_name)
+    return _call("validate_mapping", file_bytes, file_name, datacube_df, cfg,
+                 prior_variables=prior_variables)
+
+
+def _impl_validate_share(file_bytes, file_name, datacube_df, cfg, prior_variables=None):
+    pb = _m("mmm.data.prior_builder")
+    folder = tempfile.mkdtemp(prefix="bridge_")
+    try:
+        path = _write_tmp(file_bytes, file_name, folder)
         known, against = _known(datacube_df, cfg, prior_variables)
-        table = mp.load_mapping_table(path, known, against)
-        if datacube_df is not None:
-            table = mp.align_regions(table, datacube_regions(datacube_df, cfg),
-                                     _safe_name(file_name))
-        return {"table": table, "has_contribution": bool(mp.has_contribution(table)),
-                "links": int(len(table)),
-                "vendor_variables": int(table["vendor_variable"].nunique())}
-    return _guarded(impl)
+        table = pb.load_share_file(path, known, against)
+    finally:
+        shutil.rmtree(folder, ignore_errors=True)
+    sections = sorted(table["section"].dropna().unique()) if "section" in table else []
+    return {"table": table, "rows": int(len(table)), "sections": sections}
 
 
 def validate_share(file_bytes: bytes, file_name: str, datacube_df, cfg: dict,
                    prior_variables=None) -> Outcome:
-    def impl():
-        pb = _m("mmm.data.prior_builder")
-        path = _write_tmp(file_bytes, file_name)
-        known, against = _known(datacube_df, cfg, prior_variables)
-        table = pb.load_share_file(path, known, against)
-        sections = sorted(table["section"].dropna().unique()) if "section" in table else []
-        return {"table": table, "rows": int(len(table)), "sections": sections}
-    return _guarded(impl)
+    return _call("validate_share", file_bytes, file_name, datacube_df, cfg,
+                 prior_variables=prior_variables)
+
+
+def _impl_sample_file(kind):
+    name = {"mapping": "mapping_sample.csv", "share": "share_sample.csv"}[kind]
+    with open(os.path.join(_STATE["dir"], "samples", name), "rb") as fh:
+        return fh.read()
 
 
 def sample_file(kind: str) -> Outcome:
     """The backend's own sample: kind = 'mapping' | 'share'."""
-    def impl():
-        name = {"mapping": "mapping_sample.csv", "share": "share_sample.csv"}[kind]
-        with open(os.path.join(_STATE["dir"], "samples", name), "rb") as fh:
-            return fh.read()
-    return _guarded(impl)
+    return _call("sample_file", kind)
+
+
+def _impl_template_file(kind, datacube_df, cfg):
+    name = {"mapping": "mapping_sample.csv", "share": "share_sample.csv"}[kind]
+    cols = list(pd.read_csv(os.path.join(_STATE["dir"], "samples", name),
+                            nrows=0).columns)
+    feats = datacube_features(datacube_df, cfg)
+    key = "our_variable" if kind == "mapping" else "variable"
+    t = pd.DataFrame({c: ([*feats] if c == key else [""] * len(feats)) for c in cols})
+    return t.to_csv(index=False).encode("utf-8")
 
 
 def template_file(kind: str, datacube_df: pd.DataFrame, cfg: dict) -> Outcome:
@@ -785,33 +1115,16 @@ def template_file(kind: str, datacube_df: pd.DataFrame, cfg: dict) -> Outcome:
     Mapping: fill vendor_variable (and contribution) for the rows you have and
     leave the others - rows with a blank vendor_variable are skipped. Share:
     fill section/pillar/shares for what you cover and DELETE the other rows."""
-    def impl():
-        name = {"mapping": "mapping_sample.csv", "share": "share_sample.csv"}[kind]
-        cols = list(pd.read_csv(os.path.join(_STATE["dir"], "samples", name),
-                                nrows=0).columns)
-        feats = datacube_features(datacube_df, cfg)
-        key = "our_variable" if kind == "mapping" else "variable"
-        t = pd.DataFrame({c: ([*feats] if c == key else [""] * len(feats)) for c in cols})
-        return t.to_csv(index=False).encode("utf-8")
-    return _guarded(impl)
+    return _call("template_file", kind, datacube_df, cfg)
 
 
 # --------------------------------------------------------------------------- #
 # generating the prior file - codebase 1's pre-model step, nothing of our own
 # --------------------------------------------------------------------------- #
-def generate_priors(datacube: tuple, cfg: dict, mapping: tuple | None = None,
-                    share: tuple | None = None,
-                    restrict_to: pd.DataFrame | None = None) -> Outcome:
-    """Run `prior_builder.build_priors` on the uploaded files.
-
-    `datacube`, `mapping`, `share` are (bytes, file_name). `restrict_to` is a
-    prior table whose variables become the list (the rule "the prior file may
-    carry more variables than the mapping/share files, never fewer"); without
-    it the datacube's columns are the list. Returns the case, every file it
-    wrote as bytes, the warnings index and the printed log."""
-    def impl():
-        pb = _m("mmm.data.prior_builder")
-        tmp = tempfile.mkdtemp(prefix="bridge_gen_")
+def _impl_generate_priors(datacube, cfg, mapping=None, share=None, restrict_to=None):
+    pb = _m("mmm.data.prior_builder")
+    tmp = tempfile.mkdtemp(prefix="bridge_gen_")
+    try:
         out = os.path.join(tmp, "pre_model_outputs")
         c = copy.deepcopy(cfg or {})
         data = dict(c.get("data") or {})
@@ -841,37 +1154,55 @@ def generate_priors(datacube: tuple, cfg: dict, mapping: tuple | None = None,
         if os.path.isdir(wdir):
             idx = os.path.join(wdir, "00_INDEX.md")
             if os.path.exists(idx):
-                index_md = open(idx, encoding="utf-8").read()
+                with open(idx, encoding="utf-8") as fh:
+                    index_md = fh.read()
             table = os.path.join(wdir, "all_warnings.csv")
             if os.path.exists(table):
                 rows = pd.read_csv(table).fillna("").to_dict("records")
             for f in sorted(os.listdir(wdir)):
                 if f.endswith(".md") and f != "00_INDEX.md":
-                    docs[f[:-3]] = open(os.path.join(wdir, f), encoding="utf-8").read()
+                    with open(os.path.join(wdir, f), encoding="utf-8") as fh:
+                        docs[f[:-3]] = fh.read()
             buf = io.BytesIO()
             with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
                 for f in sorted(os.listdir(wdir)):
                     z.write(os.path.join(wdir, f), f"00_warnings/{f}")
             files["00_warnings.zip"] = buf.getvalue()
-        shutil.rmtree(tmp, ignore_errors=True)
         return {"case": res.get("case"), "basis": res.get("basis"),
                 "case_text": pb.CASE_TEXT.get(res.get("case"), ""),
                 "files": files, "index_md": index_md,
                 "warnings": rows, "warning_docs": docs}
-    return _guarded(impl)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def generate_priors(datacube: tuple, cfg: dict, mapping: tuple | None = None,
+                    share: tuple | None = None,
+                    restrict_to: pd.DataFrame | None = None) -> Outcome:
+    """Run `prior_builder.build_priors` on the uploaded files.
+
+    `datacube`, `mapping`, `share` are (bytes, file_name). `restrict_to` is a
+    prior table whose variables become the list (the rule "the prior file may
+    carry more variables than the mapping/share files, never fewer"); without
+    it the datacube's columns are the list. Returns the case, every file it
+    wrote as bytes, the warnings index and the printed log."""
+    return _call("generate_priors", datacube, cfg, mapping=mapping, share=share,
+                 restrict_to=restrict_to)
+
+
+def _impl_expected_case(mapping_table=None, share_table=None):
+    pb, mp = _m("mmm.data.prior_builder"), _m("mmm.data.mapping")
+    mapping = mapping_table if mapping_table is not None \
+        else mp.load_mapping_table(None)
+    shares = share_table if share_table is not None else pd.DataFrame()
+    case = pb.decide_case(mapping, shares)
+    return {"case": case, "text": pb.CASE_TEXT[case]}
 
 
 def expected_case(mapping_table=None, share_table=None) -> Outcome:
     """Which of codebase 1's four cases (a-d) the uploaded files lead to - its
     own `decide_case`, so the preview can never disagree with the builder."""
-    def impl():
-        pb, mp = _m("mmm.data.prior_builder"), _m("mmm.data.mapping")
-        mapping = mapping_table if mapping_table is not None \
-            else mp.load_mapping_table(None)
-        shares = share_table if share_table is not None else pd.DataFrame()
-        case = pb.decide_case(mapping, shares)
-        return {"case": case, "text": pb.CASE_TEXT[case]}
-    return _guarded(impl)
+    return _call("expected_case", mapping_table, share_table)
 
 
 def doc_text(name: str) -> str:
@@ -881,5 +1212,21 @@ def doc_text(name: str) -> str:
         return ""
     for p in (os.path.join(folder, "docs", name), os.path.join(folder, name)):
         if os.path.exists(p):
-            return open(p, encoding="utf-8").read()
+            with open(p, encoding="utf-8") as fh:
+                return fh.read()
     return ""
+
+
+# every call a worker process (or _call) can run, by name
+_IMPLS = {
+    "schema": _impl_schema, "layout": _impl_layout, "base_config": _impl_base_config,
+    "default_config": _impl_default_config, "validate_config": _impl_validate_config,
+    "units_problems": _impl_units_problems, "config_yaml": _impl_config_yaml,
+    "parse_config_yaml": _impl_parse_config_yaml, "read_datacube": _impl_read_datacube,
+    "check_datacube": _impl_check_datacube, "prior_columns": _impl_prior_columns,
+    "read_prior_file": _impl_read_prior_file,
+    "validate_prior_table": _impl_validate_prior_table,
+    "validate_mapping": _impl_validate_mapping, "validate_share": _impl_validate_share,
+    "sample_file": _impl_sample_file, "template_file": _impl_template_file,
+    "generate_priors": _impl_generate_priors, "expected_case": _impl_expected_case,
+}

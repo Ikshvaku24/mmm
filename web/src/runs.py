@@ -18,25 +18,42 @@ app_access.yaml; everyone else reads the log here.
 "All recent runs" lists the job's runs from the Jobs API - every BMC, and runs
 from before the run folders existed.
 
+Shared by every user (perf.SharedCache): a run's status (asked at most every
+5 s while it runs, kept once it finished), the notebook's output, the files
+read from Outputs/ and the tables parsed from them - ten people watching the
+same run cost one set of API and ADLS calls, and one copy in memory.
+
+The run's zip is built only when "Download run (zip)" is clicked - on a
+separate thread, so the page never waits for it - and kept on disk, so the
+next download of an unchanged run (by anyone) is instant. trace.nc, the
+large raw posterior, is its own download. Nothing is held in a session.
+
 Output files are read from the run folder's Outputs/ (an older run:
 Secondary Modelling/Outputs/<run_id>/). A file that is not there yet is NOT
 remembered as missing (the old viewer cached "not found" for a run opened
 before it finished, and kept saying so after it had). A storage error other
 than "not found" - e.g. a permission error - is shown as it is.
 """
+import contextlib
+import hashlib
 import io
 import json
 import os
+import posixpath
 import shutil
+import tempfile
+import threading
 import time
+import zipfile
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
 
-from src import charts, projects
+from src import charts, perf, projects
 from src.config_editor import has_full_access
-from src.files import download_folder, download_from_adls, is_not_found, zip_folder
+from src.files import download_from_adls, is_not_found, list_tree_meta
 from src.jobs import cancel_run, get_run_output, get_run_status, list_runs
 
 try:
@@ -52,6 +69,25 @@ DONE_RESULTS = {"SUCCESS", "FAILED", "CANCELED", "TIMEDOUT", "UPSTREAM_FAILED",
 MISS_RETRY_SECONDS = 20
 LIVE_LOG_SECONDS = 15        # re-read the log this often while the run runs
 LOG_FILE = "job_log.txt"
+TRACE_FILE = "trace.nc"
+RUN_STATUS_SECONDS = 5       # a running run's status: at most once per 5 s, for everyone
+
+# shared by every session (see the module docstring)
+_RUN_STATUS = perf.SharedCache(
+    "run_status", ttl=lambda run: 3600 if is_done(run) else RUN_STATUS_SECONDS, maxsize=512)
+_RUN_OUTPUT = perf.SharedCache("run_output", ttl=3600, maxsize=256)
+_FILES = perf.SharedCache("run_files", ttl=6 * 3600, maxsize=400,
+                          max_bytes=300 * 2 ** 20, copy_values=False)
+_FRAMES = perf.SharedCache("run_frames", ttl=6 * 3600, maxsize=200, max_bytes=300 * 2 ** 20)
+_RECENT = perf.SharedCache("recent_runs", ttl=20, maxsize=4)
+_LISTINGS = perf.SharedCache("run_listing", ttl=60, maxsize=256)
+
+# the zips (and trace.nc) built on click, kept on the app's disk
+ZIP_DIR = (os.environ.get("BRIDGE_ZIP_CACHE_DIR")
+           or os.path.join(tempfile.gettempdir(), "bridge_zips"))
+ZIP_CACHE_BYTES = int(float(os.environ.get("BRIDGE_ZIP_CACHE_MB", "2048")) * 2 ** 20)
+_BUILD_LOCKS = {}
+_BUILD_GUARD = threading.Lock()
 
 RESULT_VIEWS = ("Fit", "Contributions", "Decomposition", "Prior vs posterior",
                 "Convergence", "Warnings")
@@ -148,40 +184,41 @@ def ref_from_job_run(run):
 
 
 def fetch_run(job_run_id):
-    """The run from the Jobs API; a finished run is remembered (it cannot change)."""
+    """The run from the Jobs API, shared by every session: a running run is
+    asked at most every RUN_STATUS_SECONDS, a finished one is kept (it cannot
+    change)."""
     if not job_run_id:
         return {}
-    key = f"run_meta_{job_run_id}"
-    cached = st.session_state.get(key)
-    if cached and is_done(cached):
-        return cached
     try:
-        run = get_run_status(job_run_id)
+        run, _hit = _RUN_STATUS.get_or_compute(
+            str(job_run_id), lambda: get_run_status(job_run_id),
+            cache_if=lambda r: isinstance(r, dict) and bool(r.get("state")))
     except Exception as e:
         return {"_error": f"Could not read the run's status: {e}"}
-    if isinstance(run, dict) and is_done(run):
-        st.session_state[key] = run
     return run if isinstance(run, dict) else {}
+
+
+def forget_run_status(job_run_id):
+    _RUN_STATUS.invalidate(str(job_run_id))
 
 
 def job_state_label(job_run_id):
     """The Jobs API's state as a label, or None (for the BMC's run list)."""
-    try:
-        run = get_run_status(job_run_id)
-    except Exception:
+    run = fetch_run(job_run_id)
+    if run.get("_error"):
         return None
     return _status_label(run) if _known(run) else None
 
 
 def _run_output(job_run_id):
-    """runs/get-output for the run's task: the notebook's exit JSON, or its error."""
-    key = f"run_output_{job_run_id}"
-    if key not in st.session_state:
-        try:
-            st.session_state[key] = get_run_output(job_run_id) or {}
-        except Exception as e:
-            return {"error": f"Could not read the run output: {e}"}
-    return st.session_state[key]
+    """runs/get-output for the run's task: the notebook's exit JSON, or its
+    error. Asked only for a finished run, so it is kept for everyone."""
+    try:
+        out, _hit = _RUN_OUTPUT.get_or_compute(str(job_run_id),
+                                               lambda: get_run_output(job_run_id) or {})
+        return out
+    except Exception as e:
+        return {"error": f"Could not read the run output: {e}"}
 
 
 def read_run_file(ref, rel, max_age=None):
@@ -193,8 +230,8 @@ def read_run_file(ref, rel, max_age=None):
     Anything cached by a live read (a half-written log, or "not there yet")
     is read again by the first read without `max_age`, so a finished run
     shows its complete log at once."""
-    key = f"run_file::{projects.ref_key(ref)}::{rel}"
-    cached = st.session_state.get(key)
+    key = f"{projects.ref_key(ref)}::{rel}"
+    _hit, cached = _FILES.peek(key)
     now = time.time()
     live = max_age is not None
     if cached is not None and not (len(cached) > 3 and cached[3] and not live):
@@ -206,7 +243,7 @@ def read_run_file(ref, rel, max_age=None):
     folder = projects.outputs_dir(ref)
     try:
         data = download_from_adls(f"{folder}/{rel}")
-        st.session_state[key] = ("ok", data, now, live)
+        _FILES.put(key, ("ok", data, now, live))
         return data, None
     except Exception as e:
         if is_not_found(e):
@@ -215,25 +252,21 @@ def read_run_file(ref, rel, max_age=None):
             message = (f"Could not read `{rel}`: {e}. If this is a permission error, the "
                        "app's storage identity cannot read folders the job creates - "
                        "see changes.md, Step 1 (ADLS).")
-        st.session_state[key] = ("miss", message, now, live)
+        _FILES.put(key, ("miss", message, now, live))
         return None, message
 
 
 def read_run_frame(ref, rel):
-    """(DataFrame, None) or (None, message) - a CSV of a finished run, parsed
-    once per session (forgotten with its bytes by "Re-read files")."""
-    key = f"run_file::{projects.ref_key(ref)}::{rel}::frame"
-    cached = st.session_state.get(key)
-    if cached is not None:
-        return cached, None
+    """(DataFrame, None) or (None, message) - a CSV of a run, parsed once for
+    every session (by its content; "Re-read files" forgets it)."""
     data, problem = read_run_file(ref, rel)
     if data is None:
         return None, problem
+    key = f"{projects.ref_key(ref)}::{rel}::{hashlib.sha1(data).hexdigest()}"
     try:
-        frame = pd.read_csv(io.BytesIO(data))
+        frame, _hit = _FRAMES.get_or_compute(key, lambda: pd.read_csv(io.BytesIO(data)))
     except Exception as e:  # noqa: BLE001 - a bad file is a message, not a crash
         return None, f"Could not read `{rel}`: {e}"
-    st.session_state[key] = frame
     return frame, None
 
 
@@ -248,11 +281,11 @@ def _run_info(ref):
 
 
 def _forget_files(ref):
+    """Read this run's files (and its file list) from ADLS again - for everyone."""
     key = projects.ref_key(ref)
-    for k in [k for k in st.session_state if str(k).startswith(f"run_file::{key}::")]:
-        del st.session_state[k]
-    for tag in ("trace", "notrace"):
-        st.session_state.pop(f"run_zip_{key}_{tag}", None)
+    _FILES.invalidate(prefix=f"{key}::")
+    _FRAMES.invalidate(prefix=f"{key}::")
+    _LISTINGS.invalidate(key)
 
 
 # --------------------------------------------------------------------------- #
@@ -308,6 +341,7 @@ def _panel_body(ref, where, run, on_reuse):
             if running and st.button("Cancel run", key=f"cancel_{where}_{key}", type="secondary"):
                 try:
                     response = cancel_run(ref["job_run_id"])
+                    forget_run_status(ref["job_run_id"])
                     if response.ok:
                         st.toast("Cancel requested - the status updates shortly.")
                     else:
@@ -389,63 +423,163 @@ def _render_result(ref, run, info):
                    "stopped.")
 
 
-def _collect_run(ref, local, with_trace):
-    """Download the run's inputs and outputs into `local`; returns the count."""
-    exclude = () if with_trace else ("trace.nc",)
-    if projects.has_folder(ref):
-        # the run folder holds both: Config/ Data/ Prior/ [Mapping/ Share/] Outputs/
-        return download_folder(projects.run_dir(ref["bmc"], ref["run"]), local,
-                               exclude=exclude)
-    # a run from before the run folders: its outputs, plus the inputs its job
-    # parameters name in the shared folders
-    lay = projects.layout()
-    n = download_folder(projects.outputs_dir(ref), os.path.join(local, lay["output_folder"]),
-                        exclude=exclude)
-    params = job_params(fetch_run(ref.get("job_run_id")))
-    got, _errors = projects.fetch_files(projects.run_inputs(ref, job_params=params))
-    for kind, (name, data) in got.items():
-        target = os.path.join(local, lay["folders"][kind], name)
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as fh:
-            fh.write(data)
-        n += 1
-    return n
+def run_contents(ref):
+    """What the run's downloads hold: [(path in the zip, ADLS path, bytes,
+    modified)] - the run folder (inputs, run_request.json, Outputs/), or for
+    a run from before the run folders its Outputs plus the input files its
+    job parameters name. Listed at most once a minute, for everyone."""
+    def build():
+        lay = projects.layout()
+        if projects.has_folder(ref):
+            root = projects.run_dir(ref["bmc"], ref["run"])
+            return [(rel, f"{root}/{rel}", size, mod)
+                    for rel, size, mod in list_tree_meta(root)]
+        out_dir = projects.outputs_dir(ref)
+        items = [(f"{lay['output_folder']}/{rel}", f"{out_dir}/{rel}", size, mod)
+                 for rel, size, mod in list_tree_meta(out_dir)]
+        params = job_params(fetch_run(ref.get("job_run_id")))
+        for kind, path in projects.run_inputs(ref, job_params=params).items():
+            items.append((f"{lay['folders'][kind]}/{posixpath.basename(path)}", path, 0, ""))
+        return items
+    items, _hit = _LISTINGS.get_or_compute(projects.ref_key(ref), build)
+    return items
+
+
+def _split_trace(items):
+    trace = [i for i in items if posixpath.basename(i[0]) == TRACE_FILE]
+    return ([i for i in items if posixpath.basename(i[0]) != TRACE_FILE],
+            trace[0] if trace else None)
+
+
+def _build_lock(name):
+    with _BUILD_GUARD:
+        return _BUILD_LOCKS.setdefault(name, threading.Lock())
+
+
+def _prune_zip_cache(keep=None):
+    """Keep the disk cache under ZIP_CACHE_BYTES, newest-used first."""
+    try:
+        entries = [os.path.join(ZIP_DIR, f) for f in os.listdir(ZIP_DIR)]
+    except FileNotFoundError:
+        return
+    files = sorted((p for p in entries if os.path.isfile(p) and not p.endswith(".partial")),
+                   key=os.path.getmtime, reverse=True)
+    total = 0
+    for path in files:
+        total += os.path.getsize(path)
+        if total > ZIP_CACHE_BYTES and path != keep:
+            with contextlib.suppress(OSError):
+                os.remove(path)
+
+
+def _cached_build(stamp, suffix, make):
+    """The file ZIP_DIR/<stamp><suffix>, made once by `make(path)` (one build
+    at a time per stamp - a second click waits for the first), as bytes."""
+    os.makedirs(ZIP_DIR, exist_ok=True)
+    path = os.path.join(ZIP_DIR, f"{stamp}{suffix}")
+    with _build_lock(stamp):
+        if not os.path.exists(path):
+            make(path)
+        os.utime(path)                     # newest-used survives the pruning
+    _prune_zip_cache(keep=path)
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _write_zip(items, path):
+    tmp = tempfile.mkdtemp(prefix="bridge_zip_")
+    try:
+        def fetch(item):
+            arc, src = item[0], item[1]
+            try:
+                data = download_from_adls(src)
+            except Exception as e:  # noqa: BLE001
+                if is_not_found(e):        # an old run's input that is gone
+                    return None
+                raise
+            dst = os.path.join(tmp, *arc.split("/"))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            with open(dst, "wb") as fh:
+                fh.write(data)
+            return arc
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            got = [a for a in pool.map(fetch, items) if a]
+        part = path + ".partial"
+        with zipfile.ZipFile(part, "w", zipfile.ZIP_DEFLATED) as z:
+            for arc in sorted(got):
+                z.write(os.path.join(tmp, *arc.split("/")), arc)
+        os.replace(part, path)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def build_run_zip(ref) -> bytes:
+    """The run's zip - every file but trace.nc - built when the button is
+    clicked (on Streamlit's download thread, not the page's) and kept on
+    disk: the next download of the unchanged run, by anyone, is instant."""
+    items, _trace = _split_trace(run_contents(ref))
+    if not items:
+        raise FileNotFoundError("the run has no files yet")
+    stamp = perf.content_key("zip", projects.ref_key(ref),
+                             [(i[0], i[2], i[3]) for i in items])
+
+    def make(path):
+        t0 = time.perf_counter()
+        _write_zip(items, path)
+        perf.log_timing("runs.build_zip", t0, f"{projects.ref_label(ref)} ({len(items)} files)")
+    return _cached_build(stamp, ".zip", make)
+
+
+def build_trace(ref) -> bytes:
+    """trace.nc on its own (it is large and rarely wanted), cached on disk too."""
+    _items, trace = _split_trace(run_contents(ref))
+    if trace is None:
+        raise FileNotFoundError("this run has no trace.nc")
+    stamp = perf.content_key("trace", projects.ref_key(ref), trace[2], trace[3])
+
+    def make(path):
+        t0 = time.perf_counter()
+        with open(path + ".partial", "wb") as fh:
+            fh.write(download_from_adls(trace[1]))
+        os.replace(path + ".partial", path)
+        perf.log_timing("runs.fetch_trace", t0, projects.ref_label(ref))
+    return _cached_build(stamp, ".nc", make)
+
+
+def _mb(n):
+    return f"{n / 2 ** 20:.1f} MB" if n >= 2 ** 20 else f"{max(n, 0) / 1024:.0f} KB"
 
 
 def _render_run_zip(ref, where):
     key = projects.ref_key(ref)
+    try:
+        items, problem = run_contents(ref), None
+    except Exception as e:  # noqa: BLE001 - shown, never fatal
+        items, problem = [], f"Could not list the run's files: {e}"
+    files, trace = _split_trace(items)
+    name = projects.safe_file_name(projects.ref_label(ref).replace(" / ", "__"), "run")
     cols = st.columns([2, 2, 1], vertical_alignment="center")
     with cols[0]:
-        with_trace = st.checkbox("Include trace.nc", key=f"trace_{where}_{key}",
-                                 help="The raw posterior (all draws) - large.")
-    tag = "trace" if with_trace else "notrace"
-    zip_key = f"run_zip_{key}_{tag}"
+        st.download_button(
+            "Download run (zip)", data=lambda: build_run_zip(ref), file_name=f"{name}.zip",
+            mime="application/zip", key=f"dl_{where}_{key}_zip", on_click="ignore",
+            disabled=not files,
+            help="Built when you click, from the run's files in ADLS: the settings, "
+                 "datacube and prior file it used (and its mapping/share files), "
+                 "run_request.json and the whole Outputs folder - all but trace.nc. "
+                 "Downloading the same run again is instant.")
+        if files:
+            st.caption(f"{len(files)} files · {_mb(sum(i[2] for i in files))}")
     with cols[1]:
-        if st.session_state.get(zip_key) is None:
-            if st.button("Prepare run zip", key=f"prep_{where}_{key}_{tag}",
-                         help="The settings, datacube and prior file the run used (and "
-                              "its mapping/share files), with the whole Outputs folder."):
-                with st.spinner("Collecting the run's inputs and outputs from ADLS ..."):
-                    local = os.path.join(".", "local", f"{key}_{tag}")
-                    zip_path = local + ".zip"
-                    try:
-                        shutil.rmtree(local, ignore_errors=True)
-                        n = _collect_run(ref, local, with_trace)
-                        zip_folder(local, zip_path)
-                        with open(zip_path, "rb") as f:
-                            st.session_state[zip_key] = f.read()
-                        st.toast(f"{n} files collected.")
-                    except Exception as e:
-                        st.error(f"Could not collect the run's files: {e}")
-                    finally:
-                        shutil.rmtree(local, ignore_errors=True)
-                        if os.path.exists(zip_path):
-                            os.remove(zip_path)
-        if st.session_state.get(zip_key) is not None:
-            name = projects.safe_file_name(projects.ref_label(ref).replace(" / ", "__"), "run")
-            st.download_button("Download run (zip)", data=st.session_state[zip_key],
-                               file_name=f"{name}.zip", mime="application/zip",
-                               key=f"dl_{where}_{key}_{tag}", on_click="ignore")
+        if trace is not None:
+            st.download_button(
+                "Download trace.nc", data=lambda: build_trace(ref),
+                file_name=f"{name}__trace.nc", mime="application/x-netcdf",
+                key=f"dl_{where}_{key}_trace", on_click="ignore",
+                help="The raw posterior - every draw of every parameter. Large, so "
+                     "it is not in the zip.")
+            st.caption(_mb(trace[2]))
     with cols[2]:
         if st.button("↻ Re-read files", key=f"refresh_{where}_{key}",
                      help="Read this run's files (results, job log, zip) from ADLS again - "
@@ -453,6 +587,8 @@ def _render_run_zip(ref, where):
                           "that was missing is looked up again by itself after 20 s."):
             _forget_files(ref)
             _rerun_fragment()
+    if problem:
+        st.caption(problem)
 
 
 def _render_job_log(ref, where, live=False, expanded=False):
@@ -755,14 +891,11 @@ def render_warnings_table(table, read_doc, key):
 # All recent runs: the job's runs from the Jobs API
 # --------------------------------------------------------------------------- #
 def _recent_runs(job_id):
-    cached = st.session_state.get("recent_runs")
-    if cached and time.time() - cached[0] < 20:
-        return cached[1], None
+    """The job's 20 latest runs, asked at most every 20 s for everyone."""
     try:
-        runs = list_runs(job_id, limit=20)
+        runs, _hit = _RECENT.get_or_compute(str(job_id), lambda: list_runs(job_id, limit=20))
     except Exception as e:
         return [], f"Could not list the job's runs: {e}"
-    st.session_state["recent_runs"] = (time.time(), runs)
     return runs, None
 
 
@@ -778,7 +911,7 @@ def render_runs_section(on_reuse=None):
             if st.button("↻ Refresh list", key="runs_refresh",
                          help="Ask the Jobs API for the job's runs again (otherwise at "
                               "most every 20 s)."):
-                st.session_state.pop("recent_runs", None)
+                _RECENT.invalidate()
                 _rerun_fragment()
         job_id = os.environ.get("MDR_JOB_ID", "")
         runs, problem = _recent_runs(job_id) if job_id else ([], "MDR_JOB_ID is not set.")

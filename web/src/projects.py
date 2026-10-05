@@ -30,7 +30,7 @@ from datetime import datetime, timezone
 
 import pandas as pd
 
-from src import codebase
+from src import codebase, perf
 from src.files import (ADLS_ROOT, download_from_adls, is_not_found, list_dir,
                        path_exists, read_json, upload_to_adls, write_json)
 
@@ -51,6 +51,16 @@ _FALLBACK = {
 }
 _LAYOUT = {"value": None, "at": 0.0}
 _LAYOUT_SECONDS = 300
+
+# Shared by every user (perf.SharedCache): the BMC folders (a minute), each
+# BMC's run list (30 s; "Refresh list" and a new run clear it for everyone)
+# and the files of FINISHED runs, which never change again.
+BMC_LIST_SECONDS = 60
+RUN_LIST_SECONDS = 30
+_BMCS = perf.SharedCache("bmc_list", ttl=BMC_LIST_SECONDS, maxsize=4)
+_RUN_LISTS = perf.SharedCache("bmc_runs", ttl=RUN_LIST_SECONDS, maxsize=64)
+_FINISHED = {}            # "<bmc>/<run>" -> {"request", "info"} of a finished run
+_FINISHED_MAX = 5000
 
 STATUS_LABELS = {"success": "✅ Success", "failed": "❌ Failed",
                  "not started": "❌ Not started", "submitted": "🔄 Submitted",
@@ -244,7 +254,7 @@ def list_runs(bmc, cache=None, job_state=None, workers=8) -> tuple[list, list]:
     parallel. `cache` (a dict the caller keeps) holds finished runs, whose
     files no longer change. `job_state(job_run_id)`, when given, turns
     "submitted" into the live Jobs API state (a label, or None)."""
-    cache = cache if cache is not None else {}
+    cache = cache if cache is not None else _FINISHED
     names = [n for n, is_dir in list_dir(bmc_dir(bmc)) if is_dir]
     errors = []
     out_folder = layout()["output_folder"]
@@ -257,7 +267,10 @@ def list_runs(bmc, cache=None, job_state=None, workers=8) -> tuple[list, list]:
         request, e1 = _read(request_path(bmc, name))
         info, e2 = _read(f"{run_dir(bmc, name)}/{out_folder}/{RUN_INFO}")
         errors.extend(e for e in (e1, e2) if e)
-        cache[key] = {"request": request, "info": info}
+        if info or cache is not _FINISHED:      # the shared store keeps finished runs only
+            if cache is _FINISHED and len(cache) >= _FINISHED_MAX:
+                cache.clear()
+            cache[key] = {"request": request, "info": info}
         return name, request, info
 
     with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -272,6 +285,32 @@ def list_runs(bmc, cache=None, job_state=None, workers=8) -> tuple[list, list]:
                 row["status"] = label
     rows.sort(key=lambda r: (r["submitted_ms"] or 0, r["run"]), reverse=True)
     return rows, errors
+
+
+def list_bmcs_shared() -> list:
+    """list_bmcs(), listed at most once a minute for everyone."""
+    names, _hit = _BMCS.get_or_compute("bmcs", list_bmcs)
+    return names
+
+
+def list_runs_shared(bmc, job_state=None, force=False) -> tuple[list, list]:
+    """list_runs(bmc), read at most every RUN_LIST_SECONDS for everyone.
+    `force` (Refresh list) reads it again now - for everyone."""
+    if force:
+        _RUN_LISTS.invalidate(str(bmc))
+    value, _hit = _RUN_LISTS.get_or_compute(
+        str(bmc), lambda: list_runs(bmc, job_state=job_state),
+        cache_if=lambda v: not v[1])            # a read error is tried again
+    return value
+
+
+def forget_runs(bmc=None):
+    """Make the next run list (one BMC, or all and the BMC folders) fresh."""
+    if bmc is None:
+        _RUN_LISTS.invalidate()
+        _BMCS.invalidate()
+    else:
+        _RUN_LISTS.invalidate(str(bmc))
 
 
 def run_exists(bmc, run) -> bool:

@@ -439,13 +439,21 @@ during a growth phase.
 
 | Column | Meaning |
 |---|---|
-| `n_obs`, `n_columns` | size of the design |
-| `condition_number` | Belsley condition number of the unit-length design. **10 warn, 30 severe** |
-| `max_vif` | worst textbook (centred) VIF. 5 warn, 10 severe |
+| `n_obs`, `n_columns` | size of the design: training periods, and columns (intercept + Fourier + trend + features active in this region). **`n_columns` > `n_obs` → no VIF can be computed** |
+| `condition_number` | Belsley condition number of the unit-length design. **10 warn, 30 severe**; `inf` = singular |
+| `max_vif` | worst textbook (centred) VIF. 5 warn, 10 severe. **Blank, not 0, when no VIF could be computed** |
 | `max_vif_uncentred` | worst VIF with the mean kept in |
-| `worst_column` | which feature that was |
-| `n_vif_over_10`, `n_duplicating_intercept`, `n_pairs_over_0.8` | counts |
+| `worst_column`, `worst_explained_by` | which feature that was, and what explains it |
+| `n_vif_over_10`, `n_duplicating_intercept`, `n_pairs_flagged` | counts |
 | `verdict` | `ok` / `moderate` / `severe` |
+| 🆕 `n_dead_columns` | features with no activity in this region — excluded from its design |
+| 🆕 `note` | why anything in the row is blank or excluded |
+
+**`collinearity_vif.csv`** — one row per region × design column: `vif`,
+`vif_uncentred`, `duplicates`, `explained_by` / `explained_by_weights` (how
+those are computed: `CHECKS_GUIDE.md` §3.2), and 🆕 **`vif_note`** — why a cell
+is blank. A file whose VIFs are all blank is almost always a region with more
+design columns than training periods (`CHECKS_GUIDE.md` §3.8).
 
 **Why two VIF columns.** The textbook centred VIF is **structurally blind to
 collinearity with the intercept**. On the exact `real_data_v1` case — an
@@ -1283,7 +1291,7 @@ O...  one block per region (7 columns each):
 | `members` | the run | on a `group` row, the variables it sums |
 | `our` | the run / formula | this run's contribution, KPI units. `group` rows: `=SUM` of the member rows below; TOTAL: `=SUM` of the region blocks |
 | **`benchmark`** | **the mapping file, or YOU** | yellow on `feature`/`group` rows, grey (not used) on `member` rows. See "where to paste" |
-| `pct_diff` | formula | `(ours − theirs) / |theirs| × 100`. `feature`/`group` rows only |
+| `pct_diff` | formula | `(ours − theirs) / \|theirs\| × 100`. `feature`/`group` rows only |
 | `ratio` | formula | **R** `= theirs / ours`. A `member` row shows its **group's** R |
 | `contraction` | the run | this variable's `use_for_delta` contraction. A pooled feature has one value (repeated in each region); an `independent` one has its own per region, and TOTAL shows their mean |
 | `current_prior` | the run | the implied median coefficient your prior file produces (`prior_summary.csv`): the `__population__` row in TOTAL, the region's row in a region block |

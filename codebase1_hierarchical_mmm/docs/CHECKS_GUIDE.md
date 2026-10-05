@@ -59,6 +59,9 @@ Every threshold quoted is the shipped default. §16 lists each one with its
 | 8 | `05_contributions/contribution_reconciliation.csv`, `contribution_math.csv`, `benchmark_comparison.xlsx` | Do the numbers add up, and to what the benchmark says? | §12–§13 |
 | 9 | `06_cross_validation/cv_scorecard.csv` | Does it hold up when the window moves? | §14 |
 
+**Seen something odd?** Check `cases/README.md` first: problems we have
+already met are written up there, start to finish.
+
 **Steps 1–3 are gates.** Stop at any of these:
 
 - a high-severity warning;
@@ -326,15 +329,7 @@ shows up later as low `contraction` or high posterior correlation (§5, §9).
   the coefficient's variance. VIF 10 means the coefficient sd is √10 ≈ 3.2× what
   it would be with an orthogonal column.
 - **Thresholds.** 5 is moderate (`vif_warn`); 10 is severe (`vif_bad`).
-- **`explained_by`** names the top 3 culprits for any column with VIF ≥ 5.
-  **`explained_by_weights`** gives each culprit's standardised coefficient in the
-  auxiliary regression, i.e. how much of the column it accounts for. Three
-  pairwise-innocent columns can jointly explain a fourth; this column shows
-  which ones.
-- **Example (illustrative).** `tdp_base` VIF 12, `explained_by =
-  category_vol_base + __trend__`, weights `0.81 + 0.22`. TDP is mostly the
-  category series plus growth. Expect the two coefficients to trade off, and
-  expect low contraction on both.
+- **`explained_by`** names the columns that explain this one — computed below.
 - **Reading it.** A culprit that is `__fourier__…` or `__trend__` means the
   feature is confounded with seasonality or growth. That is a different fix
   from feature-on-feature collinearity.
@@ -344,6 +339,82 @@ shows up later as low `contraction` or high posterior correlation (§5, §9).
     `__fourier__`, question `fourier_order` or the dummy.
   - *Priors:* last resort, as an assumption — it decides the split, it does not
     remove the collinearity.
+
+#### How `explained_by` is computed
+
+A VIF says *how much* of a column the others explain. `explained_by` says
+*which* others, and how much each one carries. It is filled only for a column
+with centred VIF ≥ `assumptions.vif_warn` (5); for every other column it is
+blank on purpose. Every column has *some* largest neighbour, and naming one for
+an independent feature would read as an accusation.
+
+**Step 1 — the auxiliary regression.** Regress column j on every other column
+of the region's design, by least squares on the training window:
+
+> x_j = b₀·intercept + b₁·x₁ + b₂·x₂ + … + error
+
+The "others" are the intercept (when the model has one), the Fourier columns,
+the trend and every other feature active in that region. This is the same
+regression whose R² gives the VIF.
+
+**Step 2 — a standardised weight for each regressor.** For each other column k:
+
+> weight_k = |b_k| × sd(x_k) ÷ sd(x_j)
+
+This is the **standardised (beta) coefficient**: how many standard deviations
+x_j moves when x_k moves by one standard deviation, **holding the other columns
+fixed**. Raw b's cannot be compared — a GRP and a distribution point have
+different units — so they are rescaled by the sds.
+
+The intercept has sd 0, so its weight is always 0 and it is **never named**.
+Collinearity with the intercept is what `vif_uncentred` and `duplicates` are
+for (§3.3).
+
+**Step 3 — rank and keep the top ones.**
+
+- Sort by weight and keep the top `assumptions.vif_top_k` (3).
+- Drop any with weight ≤ 0.01.
+- Names are written as `a + b + c`; weights in the same order in
+  `explained_by_weights` (`1.48 + 1.45 + 0.02`).
+- `vif_top_k: 0` turns both columns off.
+
+**Worked example** (made-up data, computed with the real function). On 91
+weeks, `tdp` = 0.9 × `category_vol` + 25 × trend + noise, and `tv` is
+unrelated. The auxiliary regression of `tdp` on the other columns gives:
+
+| Regressor | b | sd(x) | weight = \|b\| × sd(x) ÷ sd(tdp) |
+|---|---|---|---|
+| intercept | −0.49 | 0 | 0 — never named |
+| `__trend__` | 25.01 | 0.292 | 25.01 × 0.292 ÷ 5.036 = **1.45** |
+| `category_vol` | 0.906 | 8.227 | 0.906 × 8.227 ÷ 5.036 = **1.48** |
+| `tv` | −0.0019 | 57.93 | **0.02** |
+
+The centred R² is 0.9696, so VIF = 1 ÷ (1 − 0.9696) = **32.9**. The row reads:
+
+> `vif` 32.9 · `explained_by` = `category_vol + __trend__ + tv` ·
+> `explained_by_weights` = `1.48 + 1.45 + 0.02`
+
+**Three things the example shows:**
+
+1. **The pairwise check missed it.** r(tdp, category) = 0.36 and r(tdp, trend) =
+   0.30 — nowhere near the 0.8 bar in `collinearity_pairs.csv`. Jointly they
+   explain 97% of TDP. This is why `explained_by` uses the joint regression,
+   not pairwise correlations.
+2. **Weights are not shares.** They do not add to 1 or to R², and they can each
+   exceed 1. Here category and trend are themselves correlated (r = −0.78) and
+   partly *offset* each other inside TDP, so both carry large weights. When two
+   culprits have weights well above 1, they are collinear with each other as
+   well: expect them in each other's `explained_by` too (they are, in this
+   example).
+3. **Read the weight, not just the name.** `tv` is listed third at 0.02 — above
+   the 0.01 cut-off, but noise. A culprit with a weight under ~0.1 is not a
+   reason to act.
+
+**What to do with it.** The names are the candidates for the §3.7 fix: merge
+them, drop one, or pool them into a pillar. In the example: keep TDP and the
+category series only if the business needs both coefficients, and expect them
+to trade off (§9). If the trend is a culprit, test `include_trend` on and off
+with CV.
 
 ### 3.3 Uncentred VIF — `vif_uncentred`, `duplicates`
 
@@ -388,6 +459,8 @@ shows up later as low `contraction` or high posterior correlation (§5, §9).
   columns at once. It is the only one of the four statistics that sees a
   three-way dependence (A + B ≈ C).
 - **Thresholds.** 10 is moderate; 30 is severe (Belsley: 30+ is "strong").
+- **`inf`** means the design is exactly singular — usually more columns than
+  training periods in that region (§3.8).
 - **Example.** v1 read 23,000. After centring, v2 converged.
 - **Change.** If no single VIF is high, look for a group: the heatmap shows the
   block. Fix the block, by merging or pooling into a pillar.
@@ -402,7 +475,14 @@ shows up later as low `contraction` or high posterior correlation (§5, §9).
 
 The same row gives `worst_column`, `worst_explained_by`, `n_vif_over_10`,
 `n_duplicating_intercept` and `n_pairs_flagged`, so the summary names the culprit
-without opening the other files.
+without opening the other files. Three more columns explain the row itself:
+
+- `n_obs` / `n_columns` — training periods and design columns in this region.
+  **If `n_columns` > `n_obs`, no VIF can be computed** (§3.8).
+- `n_dead_columns` — features with no activity in this region, excluded from
+  its design.
+- `note` — why anything in the row is blank or excluded. `max_vif` is blank
+  (not 0) when no VIF could be computed.
 
 ### 3.6 Heatmap — `collinearity_heatmap_<region>.png`
 
@@ -435,6 +515,45 @@ block, a wrong-looking coefficient is a symptom.
 > the priors regularise. Our thresholds are the textbook ones, deliberately
 > tighter, because our coefficients are reported one by one. See
 > `MERIDIAN_ASSUMPTIONS.md`.
+
+### 3.8 When `collinearity_vif.csv` is blank — `vif_note`
+
+Every row now says why a blank cell is blank, in `vif_note`. There are three
+causes:
+
+| `vif_note` starts with | Cause | What it means | Change |
+|---|---|---|---|
+| `not computable: P design columns vs N training periods` | The region's design has **more columns than training periods**: intercept + Fourier + trend + every feature active there | Each column is then an *exact* combination of the others: the auxiliary regression fits perfectly, VIF is infinite by construction, and the condition number is `inf`. **Every VIF in the region is blank.** The region's data alone cannot separate the coefficients; the priors and pooling across regions do | Nothing breaks — read `contraction` (§5) to see which coefficients the data actually moved. To get the VIF back: fewer variables (merge, drop, pool into a pillar), a lower `fourier_order`, or a longer panel. `collinearity_pairs.csv` and the heatmap are still valid |
+| `no activity in this region's training window` | The feature is all zero in this region — e.g. one brand's media in another brand's regions | It multiplies nothing here, so it is **excluded from this region's design** and does not count towards the columns | None |
+| `constant in this region` | The column has no variation around its mean | The centred VIF is undefined; it duplicates the intercept. Read `vif_uncentred` and `duplicates` | `center_mode: mean`, or drop it |
+
+**Example (computed).** A monthly panel with 24 months and 27 features gives
+28 design columns (27 + intercept) against 24 periods. Every VIF is blank;
+`collinearity_summary.csv` shows `condition_number` = inf and the `note` gives
+the counts. The run also writes `00_warnings/collinearity_not_computable.md`.
+
+**Before 2026-10-06** the same panel wrote a VIF file with every number blank
+and no reason, and the summary reported `max_vif` = 0 — which reads as "no
+collinearity" when the truth is "too many columns to measure it". Features with
+no activity in a region also counted towards the columns, and pushed that
+region's condition number towards infinity.
+
+**The full case** — a 12-region monthly panel with 80 columns on 21 periods,
+what an external diagnosis got right and wrong, and what to do — is
+[`cases/001`](cases/001_blank_vif_more_columns_than_periods.md). The general
+approach for short panels (what pooling can and cannot separate, the metrics
+to use instead, modelling options) is METHODOLOGY §3c.
+
+**Close to the limit, VIF is inflated by the column count alone.** For a column
+unrelated to all the others, the auxiliary R² still averages about k ÷ (n − 1),
+where k is the number of other non-constant columns and n the periods. So on a
+short panel, a high VIF partly measures *how many columns you have*, not how
+related they are.
+
+**Example (computed).** 20 independent random features on 24 months: k = 19,
+so R² ≈ 19 ÷ 23 = 0.83 and VIF ≈ 6 from noise alone. The largest VIF in that run
+was 15.5 — "severe" for columns built to be unrelated. On a monthly panel,
+compare a VIF against that baseline before acting on it.
 
 ---
 
@@ -1388,6 +1507,7 @@ on/off, `fourier_order` 2 vs 4, a merged vs split pair — instead of one holdou
 | `degenerate_feature_column` | high | §2.2 |
 | `intercept_without_centering` | high | §2.2 |
 | `generated_prior_units` | high | §1.2 |
+| `collinearity_not_computable` | medium | §3.8 |
 | `pooling_collapsed` | medium | §1.3 |
 | `per_region_prior_sd_ignored` | medium | §1.3 |
 | `seasonality_overfit_risk` | medium | §2.2 |
@@ -1412,7 +1532,7 @@ built-in default whatever the YAML says; the note says which part.
 
 | Check | Default | YAML key | Reaches the check? |
 |---|---|---|---|
-| VIF warn / severe | 5 / 10 | `assumptions.vif_warn` / `vif_bad` | **Partly.** The verdict and `n_vif_over_10` follow the YAML. The `duplicates` label (10) and the `explained_by` trigger (5) use the built-in values |
+| VIF warn / severe | 5 / 10 | `assumptions.vif_warn` / `vif_bad` | Yes — the verdict, `n_vif_over_10`, the `duplicates` label and which columns get `explained_by` (since 2026-10-06) |
 | Condition number warn / severe | 10 / 30 | `assumptions.cond_warn` / `cond_bad` | Yes |
 | Pairwise \|r\| list / severe | 0.8 / 0.95 | `assumptions.pair_warn` / `pair_bad` | Yes. `pair_warn: 0` dumps every pair. `pair_bad` sets the heatmap annotations |
 | Culprits named per column | 3 | `assumptions.vif_top_k` | Yes |
@@ -1489,6 +1609,7 @@ built-in default whatever the YAML says; the note says which part.
 | Symptom | Confirm with | Most likely cause | Change |
 |---|---|---|---|
 | R-hat > 1.05, saturated tree depth, offsetting ± contributions | §3.3 `duplicates = the intercept/level`; §9 | Level variable collinear with the intercept | **Config:** `center_mode: mean` + `contribution_reference: zero` |
+| `collinearity_vif.csv` blank, condition number `inf` | §3.8 `vif_note`; `n_columns` > `n_obs` in the summary | More design columns than training periods in the region | **Variables:** merge / drop / pool. **Config:** lower `fourier_order`. Meanwhile read contraction |
 | Divergences, low BFMI | §4.3, §4.5; worst-R-hat on `tau_*` | Hierarchical funnel; over-wide log prior | **Priors:** tighten `regional_sd_prior` / `global_prior_sd`. **Config:** `target_accept` 0.95+ |
 | Contraction ≤ 0 | §4 first, then §5.4, then §3 | Non-convergence; natural-scale row; duplicate column | Fix convergence, read `use_for_delta`, then **variables:** merge/drop |
 | Two coefficients trade off (corr < −0.7) | §9 + §3.2 | Collinear pair | **Variables:** merge, or pool and report the sum |
@@ -1534,8 +1655,7 @@ built-in default whatever the YAML says; the note says which part.
 **Known gaps in the checks themselves.** These are documented, not yet fixed:
 
 - **Unwired thresholds.** `assumptions.ppp_fail` and `assumptions.post_corr_bad`
-  are accepted by config.yaml but not used. `vif_bad`/`vif_warn` reach the
-  verdict but not the `duplicates` label or the `explained_by` trigger.
+  are accepted by config.yaml but not used.
   `data_support`'s near-constant test ignores `run.near_constant_sd`. The
   assumptions report's prose prints the built-in thresholds (§16).
 - **The ROPE is in raw feature units** under the `none`/`none` default (§6.4).

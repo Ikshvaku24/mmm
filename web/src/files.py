@@ -4,8 +4,13 @@ import os
 import posixpath
 from azure.identity import ClientSecretCredential
 from azure.storage.filedatalake import DataLakeServiceClient
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 import zipfile
+
+from src import perf
+
+DOWNLOAD_THREADS = 8      # ADLS reads in parallel when a whole folder is fetched
 
 # Root folder inside the ADLS file system. The Databricks job reads the same
 # files at /dbfs/mnt/testuat/<ADLS_ROOT>/... (see codebase 1's mmm/app_job.py).
@@ -66,6 +71,7 @@ def is_not_found(exc):
             or "PathNotFound" in str(exc) or "BlobNotFound" in str(exc))
 
 
+@perf.timed("adls.upload", lambda data, name, folder: f"{folder}/{name}")
 def upload_to_adls(file_data, file_name, location_path):
     """Upload a file to ADLS Gen2 at {location_path}/{file_name}."""
     if LOCAL_STORAGE_DIR:
@@ -85,6 +91,7 @@ def upload_to_adls(file_data, file_name, location_path):
     return f"https://{account_name}.blob.core.windows.net/{file_system}/{location_path}/{file_name}"
 
 
+@perf.timed("adls.download", lambda path: path)
 def download_from_adls(file_path):
     if LOCAL_STORAGE_DIR:
         with open(_local_path(file_path), "rb") as f:
@@ -112,6 +119,7 @@ def write_json(obj, file_name, location_path):
                           file_name, location_path)
 
 
+@perf.timed("adls.list_dir", lambda path: path)
 def list_dir(folder_path):
     """The folder's direct children as (name, is_folder), sorted; [] when the
     folder does not exist."""
@@ -130,6 +138,7 @@ def list_dir(folder_path):
                   for p in paths)
 
 
+@perf.timed("adls.list_tree", lambda path: path)
 def list_tree(folder_path):
     """Every file below the folder, as paths relative to it (sorted); [] when
     the folder does not exist."""
@@ -151,6 +160,51 @@ def list_tree(folder_path):
                   for p in paths if not p.is_directory)
 
 
+@perf.timed("adls.list_tree_meta", lambda path: path)
+def list_tree_meta(folder_path):
+    """Every file below the folder as (path relative to it, size in bytes,
+    last modified as text), sorted - what tells a changed run from an
+    unchanged one. [] when the folder does not exist."""
+    if LOCAL_STORAGE_DIR:
+        src = _local_path(folder_path)
+        out = []
+        for root, _dirs, files in os.walk(src):
+            for f in files:
+                full = os.path.join(root, f)
+                st_ = os.stat(full)
+                out.append((os.path.relpath(full, src).replace(os.sep, "/"),
+                            int(st_.st_size), str(st_.st_mtime_ns)))
+        return sorted(out)
+    try:
+        paths = list(_file_system().get_paths(path=folder_path, recursive=True))
+    except Exception as e:
+        if is_not_found(e):
+            return []
+        raise
+    prefix = folder_path.rstrip("/") + "/"
+    return sorted((p.name[len(prefix):] if p.name.startswith(prefix) else p.name,
+                   int(getattr(p, "content_length", 0) or 0),
+                   str(getattr(p, "last_modified", "") or ""))
+                  for p in paths if not p.is_directory)
+
+
+def download_files(pairs, threads=DOWNLOAD_THREADS):
+    """Download [(ADLS path, local path), ...] in parallel; returns the count."""
+    def one(pair):
+        src, dst = pair
+        data = download_from_adls(src)
+        os.makedirs(os.path.dirname(dst) or ".", exist_ok=True)
+        with open(dst, "wb") as fh:
+            fh.write(data)
+        return 1
+    pairs = list(pairs)
+    if not pairs:
+        return 0
+    with ThreadPoolExecutor(max_workers=max(1, min(threads, len(pairs)))) as pool:
+        return sum(pool.map(one, pairs))
+
+
+@perf.timed("adls.exists", lambda path: path)
 def path_exists(path):
     """Does this file or folder exist?"""
     if LOCAL_STORAGE_DIR:
@@ -158,56 +212,21 @@ def path_exists(path):
     return bool(_file_system().get_directory_client(path).exists())
 
 
+@perf.timed("adls.download_folder", lambda path, *a, **k: path)
 def download_folder(folder_path, local_folder, exclude=()):
-    """Download every file under folder_path into local_folder.
+    """Download every file under folder_path into local_folder - in parallel.
 
     Returns the number of files. The old version returned after the FIRST
     file (the `return True` sat inside the loop), so a run's output zip held
     one file. `exclude` skips files by name (e.g. trace.nc, which is large).
     """
     os.makedirs(local_folder, exist_ok=True)
-    count = 0
-
-    if LOCAL_STORAGE_DIR:
-        src = _local_path(folder_path)
-        for root, _dirs, files in os.walk(src):
-            for file in files:
-                if file in exclude:
-                    continue
-                rel = os.path.relpath(os.path.join(root, file), src)
-                local_path = os.path.join(local_folder, rel)
-                os.makedirs(os.path.dirname(local_path), exist_ok=True)
-                with open(os.path.join(root, file), "rb") as fin, open(local_path, "wb") as fout:
-                    fout.write(fin.read())
-                count += 1
-        if count == 0:
-            raise FileNotFoundError(f"No files found under {folder_path}")
-        return count
-
-    fs_client = _file_system()
-
-    paths = fs_client.get_paths(path=folder_path)
-
-    for path in paths:
-        if not path.is_directory:
-            if os.path.basename(path.name) in exclude:
-                continue
-            relative_path = os.path.relpath(path.name, folder_path)
-            local_path = os.path.join(local_folder, relative_path)
-
-            os.makedirs(os.path.dirname(local_path), exist_ok=True)
-
-            file_client = fs_client.get_file_client(path.name)
-
-            with open(local_path, "wb") as f:
-                f.write(file_client.download_file().readall())
-
-            # st.write(f"Downloaded: {path.name}")
-            count += 1
-
-    if count == 0:
+    rels = [rel for rel in list_tree(folder_path)
+            if posixpath.basename(rel) not in exclude]
+    if not rels:
         raise FileNotFoundError(f"No files found under {folder_path}")
-    return count
+    return download_files((f"{folder_path.rstrip('/')}/{rel}",
+                           os.path.join(local_folder, *rel.split("/"))) for rel in rels)
 
 
 def zip_folder(folder_path, zip_path, exclude=()):

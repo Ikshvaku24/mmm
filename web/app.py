@@ -1,5 +1,6 @@
 
 import streamlit as st
+from src import codebase
 from src.components.app_header import render_app_header
 #from src.pages.feasibility_check_page import render_feasibility_check_page
 from src.pages.model_setup_page import (render_all_runs_section, render_input_upload_section,
@@ -13,6 +14,10 @@ username = email.split("@")[0]
 parts = username.split(".")
 name = "Hello " + f"{parts[0]} {parts[-1]}".title()
 st.set_page_config(page_title="Model App", page_icon="🧠", layout="wide")
+# once per app process (later calls do nothing): re-check codebase 1 in the
+# background instead of on someone's click, and start the worker processes
+# that run the heavy codebase 1 steps
+codebase.start_background_refresh()
 inject_global_styles()
 safe_email = html.escape(name) # Escape the email to prevent XSS attacks
 st.markdown(

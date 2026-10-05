@@ -25,7 +25,7 @@ console just stops being the place you are expected to read them.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.01.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
 
 import contextlib
 import os
@@ -233,6 +233,30 @@ _RULES = (
             "pair it with `contribution_reference=zero`. Centring is a "
             "reparameterisation: it fixes the geometry without changing the "
             "attribution. TUNING_GUIDE section 4.2."),
+    ),
+    dict(
+        slug="collinearity_not_computable",
+        severity="medium",
+        match=("VIF not computable",),
+        title="VIF cannot be computed: more design columns than periods",
+        means=(
+            "In these regions the design (intercept + Fourier + trend + every "
+            "feature active there) has more columns than training periods. "
+            "Each column is then an exact combination of the others, so every "
+            "VIF is infinite by construction and `collinearity_vif.csv` is "
+            "blank for the region (its `vif_note` column says why). The "
+            "condition number is reported as inf."),
+        why=(
+            "Many variables on a short panel - e.g. 27 features on 21 "
+            "training months. Features with no activity in a region are "
+            "already excluded from that region's count."),
+        fix=(
+            "Nothing breaks: the region's coefficients are identified by the "
+            "priors and by pooling across regions, so read `contraction` "
+            "(02_convergence) to see which ones the data actually moved. To "
+            "get the VIF back: fewer variables (merge, drop, pool into a "
+            "pillar), a lower `fourier_order`, or a longer panel. The pairs "
+            "file and the heatmap are still valid. CHECKS_GUIDE section 3."),
     ),
     dict(
         slug="degenerate_feature_column",

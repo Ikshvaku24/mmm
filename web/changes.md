@@ -19,6 +19,51 @@ needs no redeploy.
 
 ---
 
+## Update 7 - speed for about 10 people at once
+
+The speed plan from Update 4, steps 2-4, plus step 1's timing log. Before
+this, the app was one Python process in which every codebase 1 step took one
+shared lock, and every user's page fetched its own copy of everything. So one
+person's prior generation or large datacube froze everyone's clicks, and ten
+open pages made ten identical calls to Databricks every 5 seconds.
+
+| Plan step | Now |
+|---|---|
+| **Worker processes** | Reading and checking a datacube, checking prior, mapping and share files, and generating priors run in **2 separate Python processes** next to the app (Python's standard `ProcessPoolExecutor` - not Dask, no new library). They never hold the app's lock, so a heavy step for one person no longer holds up anyone else, and the second CPU core is used. The workers start with the app and load codebase 1 before the first click. If a worker dies, that call runs in the app as before and the pool restarts; after 3 failures in 10 minutes the app stops using workers. The 5-minute check for a re-uploaded codebase 1 now runs on a background thread instead of inside someone's click |
+| **Shared caching** | Kept once for **everyone** instead of once per page: the cluster's state and a run's status (asked at most every 5 s, however many pages are open; a finished run's status is kept), the job's parameters, a BMC's run list (30 s), the BMC folders (1 min), the job's recent runs (20 s), a run's output files and the tables parsed from them (one copy in memory, however many people view the run), and every codebase 1 result - schema, samples, settings validation, datacube, prior, mapping and share checks, generated priors - keyed by the file's content and the codebase 1 version. Two people asking for the same thing at the same moment cost one call. **↻ Refresh list** and **↻ Re-read files** clear the shared copy for everyone. No Redis: a Databricks App is one process, so these caches are already shared |
+| **Smarter zips** | **Download run (zip)** builds the zip when it is clicked, on a separate thread (no more **Prepare run zip** step, no waiting page), with the run's files fetched from ADLS in parallel. The zip is then kept on the app's disk, so downloading the same run again - by anyone - is instant until its files change. **trace.nc** is its own download, out of the zip. Nothing is held in anyone's session |
+| **Timing log** | Every backend, ADLS and Jobs call slower than 0.3 s is written to the app's log (Compute → Apps → the app → **Logs**): `[timing] codebase.generate_priors  3.42s  worker`. Use it with step 5 below to see what is still slow |
+
+Optional app settings (add under `env:` in `app.yml`; none is needed):
+
+| Setting | Default | What it does |
+|---|---|---|
+| `BRIDGE_WORKERS` | 2 | Worker processes. 0 runs everything in the app process, as before |
+| `BRIDGE_TIMING_MIN` | 0.3 | Log calls slower than this many seconds; 0 logs every call |
+| `BRIDGE_ZIP_CACHE_MB` | 2048 | Disk space for the cached zips (oldest dropped first) |
+| `BRIDGE_WORKER_TIMEOUT` | 600 | Seconds a heavy step may take before the app stops waiting |
+
+**To get these changes:** copy `web/` to the app's source folder again and
+press **Deploy**. Codebase 1 and the job are unchanged; no new library.
+
+**The Databricks settings from the plan** (not code - for you to set):
+1. **Queue the job:** the job's settings → Queue → on. Without it a second
+   Run Model while one runs is skipped.
+2. **Let 2-3 runs share the GPU:** add `XLA_PYTHON_CLIENT_PREALLOCATE=false`
+   to the cluster's environment variables (JAX otherwise takes ~75% of the
+   GPU memory per run) and set the job's maximum concurrent runs to 2-3.
+3. **Auto-terminate the cluster** after 30-60 idle minutes.
+4. **App size:** with 2 workers, move the app to **Large** (4 vCPU, 12 GB)
+   once more than a few people use it at once, so the app and both workers
+   each get a core. Watch the app's CPU and memory first.
+
+**Step 5 - try it with 10 people:** everyone uses the app at the same time
+(upload a datacube, generate priors, open a finished run, download a zip),
+then look at the `[timing]` lines in the Logs tab. Tell me what is slow and
+I will tune the worker count and the cache times.
+
+---
+
 ## Update 6 - codebase 1 checked under real PyMC (2026.10.01.1)
 
 Codebase 1 was run end to end with PyMC 6.3 / ArviZ 1.3 - the versions the
@@ -264,10 +309,10 @@ client instead of logging in again for every file.
 | Before | Now |
 |---|---|
 | **Bug:** `download_folder` stopped after the FIRST file, so the zip held one output | Downloads every file of the run |
-| Every run and every user shared one `./local` folder and `./local.zip` | One folder and one zip per run, deleted after use |
+| Every run and every user shared one `./local` folder and `./local.zip` | One zip per run, built on click and cached on the app's disk (Update 7) |
 | Only after a successful run | Also after a failed run - its warnings usually explain why it failed |
 | Zip held the outputs only | The run's zip also holds the inputs it used: `Config/`, `Data/`, `Prior/` (and `Mapping/`, `Share/`) next to `Outputs/` |
-| Zip included everything | `trace.nc` (large) only if you tick **Include trace.nc** |
+| Zip included everything | `trace.nc` (large) is its own download, out of the zip (Update 7) |
 | "Model File" popup read a fixed `Model/summary.csv` | Any run (in its BMC's list, or in **All recent runs**) shows its results (warnings, convergence, fit, contributions, coefficients), its job log and its zip |
 
 ---
@@ -618,7 +663,8 @@ Then open the app's URL.
    job. If nothing changed since the run you reused, it asks first. The run's
    panel stays on the page: **Cancel run** stops it, **Dismiss** hides it.
 7. When the run ends, the same panel shows the results and the job log, and
-   **Prepare run zip** gives the inputs and the outputs in one file. Every
+   **Download run (zip)** gives the inputs and the outputs in one file
+   (**Download trace.nc** gives the raw posterior on its own). Every
    run stays in its BMC's list; **All recent runs**, at the bottom of the
    page, also has runs from before the run folders.
 

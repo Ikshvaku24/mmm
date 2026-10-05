@@ -14,12 +14,12 @@ from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
                                read_uploaded_file_as_table, render_prior_editor,
                                show_prior_file_popup, show_prior_validation,
                                to_serial_index_table, validate_prior)
-from src.clusters import get_cluster_status, start_cluster
+from src.clusters import cluster_state, start_cluster
 from src.config_editor import (access, enforce_fixed, has_full_access, init_config_state,
                                job_owned_keys, live_config, load_config,
                                render_settings_section, role)
 from src.generate_prior import generate_prior
-from src.jobs import job_parameter_names, run_model_job
+from src.jobs import job_parameter_names_cached, run_model_job
 from src.runs import (fetch_run, job_params, job_state_label, local_time, render_run_panel,
                       render_runs_section, render_warnings_table)
 from src.validation import show_input_check, validate_input_data
@@ -89,17 +89,9 @@ def _sentence(text):
 # header: cluster and backend status
 # --------------------------------------------------------------------------- #
 def _cluster_state():
-    """The cluster's state, reused for a few seconds so a page refresh does not
-    wait on the Clusters API (the badge still polls every 5 s on its own)."""
-    cached = st.session_state.get("_cluster_state")
-    if cached and time.time() - cached[0] < 4:
-        return cached[1]
-    try:
-        state = str(get_cluster_status() or "UNKNOWN").upper()
-    except Exception:
-        state = "UNKNOWN"
-    st.session_state["_cluster_state"] = (time.time(), state)
-    return state
+    """The cluster's state - asked of the Clusters API at most once per 5 s
+    for EVERY open page together (src/clusters.py), not once per page."""
+    return cluster_state()
 
 
 @st.fragment(run_every="5s")
@@ -234,37 +226,24 @@ def render_backend_status():
 # 1. BMC and run - where the run is saved, and the BMC's earlier runs
 # --------------------------------------------------------------------------- #
 def _bmc_options():
-    """The BMC folders (re-listed every minute)."""
-    ss = st.session_state
-    cached = ss.get("bmc_list")
-    if cached and time.time() - cached[0] < 60:
-        return cached[1], None
+    """The BMC folders - listed at most once a minute for everyone."""
     try:
-        names = projects.list_bmcs()
+        return projects.list_bmcs_shared(), None
     except Exception as e:
-        return (cached[1] if cached else []), f"Could not list the BMC folders: {e}"
-    ss["bmc_list"] = (time.time(), names)
-    return names, None
+        return [], f"Could not list the BMC folders: {e}"
 
 
 def _bmc_runs(bmc, force=False):
-    """(runs, read errors) of a BMC, newest first (kept for 30 s)."""
-    ss = st.session_state
-    cached = ss.get("bmc_runs")
-    if not force and cached and cached[0] == bmc and time.time() - cached[1] < 30:
-        return cached[2], cached[3]
+    """(runs, read errors) of a BMC, newest first - read at most every 30 s
+    for everyone; `force` reads it again now."""
     try:
-        rows, errors = projects.list_runs(bmc, cache=ss.setdefault("run_json_cache", {}),
-                                          job_state=job_state_label)
+        return projects.list_runs_shared(bmc, job_state=job_state_label, force=force)
     except Exception as e:
         return [], [f"Could not list the runs of {bmc}: {e}"]
-    ss["bmc_runs"] = (bmc, time.time(), rows, errors)
-    return rows, errors
 
 
 def _forget_bmc_runs():
-    st.session_state.pop("bmc_runs", None)
-    st.session_state.pop("bmc_list", None)
+    projects.forget_runs()
 
 
 def _run_target():
@@ -1094,7 +1073,7 @@ def _job_parameters():
         return cached[1]
     job_id = os.environ.get("MDR_JOB_ID", "")
     try:
-        names = job_parameter_names(job_id) if job_id else None
+        names = job_parameter_names_cached(job_id) if job_id else None
     except Exception:
         names = None
     ss["_job_params"] = (time.time(), names)
