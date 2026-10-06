@@ -38,7 +38,7 @@ always the grouping used to CHECK it.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
 
 import difflib
 import os

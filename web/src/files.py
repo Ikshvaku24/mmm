@@ -212,6 +212,34 @@ def path_exists(path):
     return bool(_file_system().get_directory_client(path).exists())
 
 
+@perf.timed("adls.move", lambda src, dst: f"{src} -> {dst}")
+def move_dir(src_path, dst_path):
+    """Move a folder (with everything in it) to `dst_path` - one rename in
+    ADLS Gen2, so the files are never copied. The destination's parent folder
+    is created when missing; a destination that exists is an error (nothing
+    is ever overwritten), and so is a missing source."""
+    if LOCAL_STORAGE_DIR:
+        src, dst = _local_path(src_path), _local_path(dst_path)
+        if not os.path.isdir(src):
+            raise FileNotFoundError(f"{src_path} does not exist")
+        if os.path.exists(dst):
+            raise FileExistsError(f"{dst_path} already exists")
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        os.rename(src, dst)
+        return dst_path
+    fs = _file_system()
+    source = fs.get_directory_client(src_path)
+    if not source.exists():
+        raise FileNotFoundError(f"{src_path} does not exist")
+    if fs.get_directory_client(dst_path).exists():
+        raise FileExistsError(f"{dst_path} already exists")
+    parent = posixpath.dirname(dst_path.rstrip("/"))
+    if parent and not fs.get_directory_client(parent).exists():
+        fs.get_directory_client(parent).create_directory()
+    source.rename_directory(new_name=f"{fs.file_system_name}/{dst_path}")
+    return dst_path
+
+
 @perf.timed("adls.download_folder", lambda path, *a, **k: path)
 def download_folder(folder_path, local_folder, exclude=()):
     """Download every file under folder_path into local_folder - in parallel.

@@ -7,8 +7,8 @@ The app still works the same way:
 
 What changed:
 - it now runs **codebase 1**, not the old in-house model;
-- every run has its own folder, `Secondary Modelling/<BMC>/<run name>/`, and
-  any run's inputs can be reused;
+- every run has its own folder, `Secondary Modelling/<BMC>/<period> <modelling
+  type>/<run name>/`, and any run's inputs can be reused;
 - it has a few new sections;
 - several bugs are fixed.
 
@@ -16,6 +16,81 @@ What changed:
 workspace, from the same folder the job runs. Re-upload codebase 1 and the
 app, the job and anyone running it by hand all get the new version. The app
 needs no redeploy.
+
+---
+
+## Update 8 - period folders, the reported run, notes, four access levels (2026.10.07.1)
+
+Your 12 points, in order:
+
+| You asked | Now |
+|---|---|
+| 1. No radio buttons for the result views | The views (Fit, Contributions, Decomposition, Prior vs posterior, Convergence, Warnings) are a row of full-width **buttons**; the one shown is highlighted |
+| 2. Buttons that scrolled under the top bar could not be clicked | Streamlit's top bar is see-through but caught every click. Clicks now pass through it; only its own controls (the ⋮ menu) still take them |
+| 3. Contributions by pillar, a **+** to see a pillar's variables | The chart and the list show **one bar per pillar**. Each pillar is a row with a **+**: press it and its variables appear under it (in the list, and as lighter bars in the chart); **−** closes it; **Open all** / **Close all**. Variables the prior file gives no pillar are **one group, "Unassigned"** (codebase 1's own name for them in the output files), always last, in grey |
+| 4. The run name should be the moment Run Model is pressed | The run name box starts **empty**. Left empty, the run is named `run_<date>-<time>` **when you press Run Model** (`run_20261007-1430`; `_2` if two runs start in the same minute). Type a name to choose your own |
+| 5. A note per run, kept in ADLS | **📝 Add note** next to the run name opens a box: why this run, what you changed. It is saved in the run's folder - `note.txt`, and `note` in `run_request.json` - printed at the top of the job log, and shown in the run's panel and the BMC's run list. When you reuse a run, the box shows that run's note and starts empty for yours |
+| 6. Run time without the queue and the cluster start | Run time is the **notebook's own time** (the Jobs API's execution time) - in the panel, the BMC's run list and All recent runs. While a run waits, the panel says **Queued for 03:12** (another run holds the job; with the reason) or **Cluster pending for 01:05**, and then **Running for 12:30 (the notebook)**. All recent runs has a **waited** column (queue + cluster start) |
+| 7. Standard BMC names | `bmc_names.csv` in codebase 1 (one name per line, under the header `bmc_name`). The BMC box offers those names and the BMC folders that already have runs - nothing else can be typed |
+| 8. An advanced-options layer in the config editor | Below the editable settings, an **Advanced options** switch (not a radio) opens the settings listed under `advanced:` in `app_access.yaml` - for `config_advanced_access` people only. The same three layers apply to **Download config.yaml**, **Load a config.yaml** and the config saved with a run: each holds or takes only the settings that person may change |
+| 9. Four access levels | `app_access.yaml`: **full_access** (everything, the admin tools, and the only level that may type a NEW BMC name) · **config_full_access** (every setting) · **config_advanced_access** (editable + Advanced options) · everyone else (**editable only**, no Advanced options switch) |
+| 10. Storage: BMC → period and type → run | Block ① asks for the **From** quarter and year, the **To** quarter and year, and the **modelling type** (from `modelling_types.csv`: LTE, Primary, Secondary). A run is saved in `Secondary Modelling/<BMC>/<from>-<to> <type>/<run name>/`, e.g. `Retailer US/2025Q1-2025Q4 Secondary/run_20261007-1430/`. Once a datacube is loaded, block ① says which quarters it covers, with **Use the datacube's period** |
+| 11. Mark the run used for reporting | A finished run's panel has **⭐ Mark as reported**. After a confirm step, that run's folder moves into `<period type>/Results Reported/` and every other run of the same BMC, period and type into `<period type>/Archived/`. Every run list shows **⭐ Reported** / **Archived**; the panel of the reported run carries the badge. **Make this the reported run** on another run moves the mark (so it needs more than one run). `reporting.json` in the period folder records who marked which run, when. Marking waits while any run of that period and type is still running - the job would otherwise lose its folder. A run started after the mark goes into the period folder itself, unmarked, until someone marks again. Who may mark: `mark_reported` in `app_access.yaml` - by default everyone but the editable-only level, as you chose |
+| 12. Does a page reload pick up a re-uploaded codebase 1? | It did not - only the 5-minute check did. Now opening or reloading the page re-checks codebase 1 at once (at most every 15 s for everyone together). So after re-uploading `app_access.yaml` or a CSV, a reload applies it. A page left open still follows within 5 minutes |
+
+**The new folder layout:**
+
+```
+Secondary Modelling/<BMC>/
+    2025Q1-2025Q4 Secondary/            <period> <modelling type>
+        run_20261007-1430/              a run not marked (yet)
+        Results Reported/
+            baseline v3/                the run the results were reported from
+        Archived/
+            baseline v1/  baseline v2/  the other runs of the period
+        reporting.json                  who marked which run, when
+    run_20260930-1015/                  a run from before this update - stays where it is
+```
+
+Runs made before this update stay where they are, directly under their BMC.
+The run list shows them under **Before the period folders**; they can be
+opened and reused as before. They belong to no period, so they cannot be
+marked as reported - reuse one into a period if it should be.
+
+**Codebase 1 2026.10.07.1** (needed - the app refuses an older one):
+- `app_job.py`: the job parameter **`run_group`** (the period-and-type
+  folder), checked with the same name rules as the BMC and the run; "Results
+  Reported" and "Archived" can never be run names; the note is printed in the
+  job log and recorded in `run_info.json`. A blank `run_group` runs directly
+  under the BMC, as before.
+- `app_access.yaml`: `config_advanced_access`, `advanced` and `mark_reported`.
+- `bmc_names.csv` and `modelling_types.csv` - new, in the folder's root.
+
+**To get these changes - in this order:**
+1. **Fill in `bmc_names.csv`** with the team's BMC names, one per line under
+   `bmc_name` (it ships empty; until it has names, people pick from the BMC
+   folders that already exist, and full-access people can type new ones).
+   Check `modelling_types.csv` (LTE, Primary, Secondary) and the `advanced:`
+   list in `app_access.yaml`; put people under `config_advanced_access`.
+2. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3 below).
+3. **Add the job parameter `run_group`** to the model job: Jobs & Pipelines →
+   the job → Job parameters → Edit → add `run_group`, default **empty**.
+   Until it is there, the app's Run checklist says so and Run Model stays off.
+4. **Copy `web/` to the app's source folder and press Deploy.** No new
+   library.
+5. Open the app: block ① now reads *BMC name · From quarter / year · To
+   quarter / year · Modelling type · Run name (optional) · 📝 Add note*.
+
+**One permission to check:** marking moves run folders. The app's service
+principal renames folders the job wrote into (`Outputs/`). With the **Storage
+Blob Data Contributor** role (Step 1) that works. With ACLs only, the app's
+service principal needs **Write** and **Execute** on the period folders and
+the run folders the job writes into - the default ACL in Step 1 gives it. If a
+mark fails, the panel says why; runs already moved stay readable, and marking
+again finishes the job.
+
+Optional app setting: `BRIDGE_RECHECK_SECONDS` (default 15) - how often, at
+most, a page reload re-checks codebase 1.
 
 ---
 
@@ -29,7 +104,7 @@ open pages made ten identical calls to Databricks every 5 seconds.
 
 | Plan step | Now |
 |---|---|
-| **Worker processes** | Reading and checking a datacube, checking prior, mapping and share files, and generating priors run in **2 separate Python processes** next to the app (Python's standard `ProcessPoolExecutor` - not Dask, no new library). They never hold the app's lock, so a heavy step for one person no longer holds up anyone else, and the second CPU core is used. The workers start with the app and load codebase 1 before the first click. If a worker dies, that call runs in the app as before and the pool restarts; after 3 failures in 10 minutes the app stops using workers. The 5-minute check for a re-uploaded codebase 1 now runs on a background thread instead of inside someone's click |
+| **Worker processes** | Reading and checking a datacube, checking prior, mapping and share files, and generating priors run in **2 separate Python processes** next to the app (plain `python -m src.worker_main` processes fed over a pipe - not Dask, no new library). They never hold the app's lock, so a heavy step for one person no longer holds up anyone else, and the second CPU core is used. The workers start with the app and load codebase 1 before the first click. If a worker dies, that call runs in the app as before and the pool restarts; after 3 failures in 10 minutes the app stops using workers. The 5-minute check for a re-uploaded codebase 1 now runs on a background thread instead of inside someone's click. **Fixed the same day:** the first version used Python's `multiprocessing` pool, which starts a worker by re-running the program's `__main__` - and inside a Streamlit app that is the page script itself (Streamlit swaps it in on every run). A safety check then kept the workers off without saying so: the app worked, one process as before, and the log never showed the worker line. Full-access users now see *Worker processes: 2 of 2 running* (or why they are off) under the backend version, and the log says either way |
 | **Shared caching** | Kept once for **everyone** instead of once per page: the cluster's state and a run's status (asked at most every 5 s, however many pages are open; a finished run's status is kept), the job's parameters, a BMC's run list (30 s), the BMC folders (1 min), the job's recent runs (20 s), a run's output files and the tables parsed from them (one copy in memory, however many people view the run), and every codebase 1 result - schema, samples, settings validation, datacube, prior, mapping and share checks, generated priors - keyed by the file's content and the codebase 1 version. Two people asking for the same thing at the same moment cost one call. **↻ Refresh list** and **↻ Re-read files** clear the shared copy for everyone. No Redis: a Databricks App is one process, so these caches are already shared |
 | **Smarter zips** | **Download run (zip)** builds the zip when it is clicked, on a separate thread (no more **Prepare run zip** step, no waiting page), with the run's files fetched from ADLS in parallel. The zip is then kept on the app's disk, so downloading the same run again - by anyone - is instant until its files change. **trace.nc** is its own download, out of the zip. Nothing is held in anyone's session |
 | **Timing log** | Every backend, ADLS and Jobs call slower than 0.3 s is written to the app's log (Compute → Apps → the app → **Logs**): `[timing] codebase.generate_priors  3.42s  worker`. Use it with step 5 below to see what is still slow |
@@ -44,7 +119,15 @@ Optional app settings (add under `env:` in `app.yml`; none is needed):
 | `BRIDGE_WORKER_TIMEOUT` | 600 | Seconds a heavy step may take before the app stops waiting |
 
 **To get these changes:** copy `web/` to the app's source folder again and
-press **Deploy**. Codebase 1 and the job are unchanged; no new library.
+press **Deploy** (it now includes `src/worker_main.py`). Codebase 1 and the job
+are unchanged; no new library. After deploying, the Logs tab should show
+`[codebase] 2 worker processes for the heavy codebase 1 calls` and
+`[codebase] 2 of 2 worker processes ready` once the first person opens the app.
+
+**Model runs are not worker processes.** The workers only take the heavy
+steps inside the app (datacube checks, prior generation, file checks). A model
+run is always the Databricks job on the GPU cluster; two runs at once are two
+job runs - which is what the job queue and concurrent-runs settings below are for.
 
 **The Databricks settings from the plan** (not code - for you to set):
 1. **Queue the job:** the job's settings → Queue → on. Without it a second
@@ -408,7 +491,7 @@ overwrite each other.
 | Backend folder | `/Workspace/Modelling/Backend/mmm_v4/codebase1_hierarchical_mmm` | `/Workspace/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm` |
 | Job | the `HRM` task, runs `mmm_v4/.../demo` | a new job, runs `mmm_v5/.../demo` |
 | App | `model-app` (source `/Workspace/Users/<creator>/model-app`) | `model-app-v2` (source `/Workspace/Users/<you>/model-app-v2`) |
-| ADLS | `Secondary Modelling/Data`, `Prior`, `Outputs` | one folder per BMC and run: `Secondary Modelling/<BMC>/<run name>/`. The old shared folders are only read, for older runs |
+| ADLS | `Secondary Modelling/Data`, `Prior`, `Outputs` | one folder per run, under its BMC and its period and modelling type: `Secondary Modelling/<BMC>/<period> <type>/<run name>/` (Update 8). The old shared folders are only read, for older runs |
 
 `mmm_v5` and `model-app-v2` are only suggested names.
 
@@ -442,10 +525,12 @@ in `DATABRICKS_TOKEN`. That person needs:
 
   It already writes `Data` and `Prior` for the old app.
 - **The app and the job share each run folder.** The app creates
-  `Secondary Modelling/<BMC>/<run name>/` and saves the inputs in it. The job
-  reads those inputs and writes `Outputs/` into the same folder, through the
-  cluster's mount. The app then reads `Outputs/`. So each identity needs access
-  to folders the other one created:
+  `Secondary Modelling/<BMC>/<period> <type>/<run name>/` and saves the inputs
+  in it. The job reads those inputs and writes `Outputs/` into the same
+  folder, through the cluster's mount. The app then reads `Outputs/` - and,
+  when someone marks the reported run, moves run folders into `Results
+  Reported/` and `Archived/`. So each identity needs access to folders the
+  other one created:
   - with the **Storage Blob Data Contributor** role for both, there is nothing
     to do;
   - with ACLs, and a mount that uses a different identity, give **default**
@@ -515,9 +600,10 @@ permissions are the ones that count.
 
 Upload the **whole** `codebase1_hierarchical_mmm` folder to
 `/Workspace/Modelling/Backend/mmm_v5/`. Leave `mmm_v4` alone: the old job uses
-it. The app needs version **2026.09.30.1** or later: it refuses an older one
+it. The app needs version **2026.10.07.1** or later: it refuses an older one
 (2026.09.29.2 brought the run folders, 2026.09.30.1 `app_access.yaml` and the
-live job log).
+live job log, 2026.10.07.1 the period folders - the job's `run_group` - the
+four access levels and the standard-name CSVs).
 
 For a later update, upload the whole folder again the same way, while no run
 is in progress. If only some files get replaced, the app's header warns that
@@ -540,7 +626,7 @@ version.
 
    | Key | Default value |
    |---|---|
-   | `bmc_name`, `run_name` | empty (the app fills them: the run's folder) |
+   | `bmc_name`, `run_group`, `run_name` | empty (the app fills them: the run's folder - BMC, period and type, run) |
    | `config_file`, `data_file`, `prior_file`, `mapping_file`, `share_file` | empty |
    | `run_id` | `{{job.run_id}}` |
    | `base_path` | empty (see note 1) |
@@ -556,8 +642,8 @@ version.
 Use **Run now with different parameters**:
 - `data_file` = `sample_datacube_test.xlsx`
 - `prior_file` = `feature_priors_test.csv`
-- leave the rest blank - with `bmc_name` and `run_name` blank the job reads
-  the old shared folders, where these files are
+- leave the rest blank - with `bmc_name`, `run_group` and `run_name` blank the
+  job reads the old shared folders, where these files are
 
 These are the old test files. The run should finish and create
 `Secondary Modelling/Outputs/<run id>/`. If it fails, the notebook output says
@@ -625,7 +711,7 @@ On the app's page:
   do there.
 
 Then open the app's URL.
-- The header should say *Backend: codebase 1 2026.09.30.1* - and, for the
+- The header should say *Backend: codebase 1 2026.10.07.1* - and, for the
   people under `full_access` in `app_access.yaml`, *from the workspace
   `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
   codebase 1**. If it says codebase 1 could not be loaded, check two things:
@@ -637,17 +723,21 @@ Then open the app's URL.
   change that ID.
 
 ### Every run
-1. **① BMC and run** - pick the BMC (or type a new one) and name the run.
-   To start from an earlier run: select it in the BMC's run list and press
-   **Reuse inputs** - its datacube, settings and prior (and mapping/share)
-   files fill the blocks below, and a new run name is proposed.
+1. **① BMC, period and run** - pick the BMC (full access may type a new one),
+   the From and To quarter and year, and the modelling type. Leave the run
+   name empty to have it named when you press Run Model, or type one; add a
+   **📝 note** (why this run, what changed). To start from an earlier run:
+   select it in the BMC's run list and press **Reuse inputs** - its datacube,
+   settings and prior (and mapping/share) files fill the blocks below, with
+   its BMC, period and type.
 2. **② Input data** - choose the datacube (or keep the reused one). Only
    problems that would stop the run are listed.
 3. **③ Model settings** - switch on **Edit settings** and change what you
-   need, or **Load** a `config.yaml`. Only the settings codebase 1's
-   `app_access.yaml` opens for you can change - a loaded config.yaml gives
-   only those - and the rest keep the team's values. The ✕ next to a loaded
-   or reused config goes back to the team's.
+   need (**Advanced options** for more, if your level has them), or **Load** a
+   `config.yaml`. Only the settings codebase 1's `app_access.yaml` opens for
+   you can change - a loaded config.yaml gives only those - and the rest keep
+   the team's values. The ✕ next to a loaded or reused config goes back to the
+   team's.
 4. **④ Mapping / share file** *(optional)* - choose each; it is checked.
 5. **⑤ Prior file**:
    1. **Generate** - the block says beforehand which case (a-d) applies;
@@ -659,21 +749,25 @@ Then open the app's URL.
       to it shows and edits it. To paste from Excel, use **Paste cells from
       Excel** in the editor.
 6. **⑥ Run** - once every checklist line is ticked, press **Run Model**. It
-   saves the files in `Secondary Modelling/<BMC>/<run name>/` and starts the
-   job. If nothing changed since the run you reused, it asks first. The run's
-   panel stays on the page: **Cancel run** stops it, **Dismiss** hides it.
+   saves the files in `Secondary Modelling/<BMC>/<period> <type>/<run name>/`
+   and starts the job. If nothing changed since the run you reused, it asks
+   first. The run's panel stays on the page - queued / cluster pending /
+   running, with the time - **Cancel run** stops it, **Dismiss** hides it.
 7. When the run ends, the same panel shows the results and the job log, and
    **Download run (zip)** gives the inputs and the outputs in one file
    (**Download trace.nc** gives the raw posterior on its own). Every
    run stays in its BMC's list; **All recent runs**, at the bottom of the
    page, also has runs from before the run folders.
+8. When a period's results are reported, open the run they came from and
+   press **⭐ Mark as reported**: it moves to `Results Reported/`, the period's
+   other runs to `Archived/`.
 
 ### Or: update the old app and job instead
 
 This uses the same steps, applied to the existing objects:
 - upload codebase 1 into the folder the `HRM` task runs;
-- swap its task parameters for the job parameters (step 4, `bmc_name` and
-  `run_name` included);
+- swap its task parameters for the job parameters (step 4, `bmc_name`,
+  `run_group` and `run_name` included);
 - replace the files in `model-app`'s source folder with `web/` (keep `assest/`),
   then redeploy `model-app`. Its resources stay as they are, because
   `model-job-id` already points to that job.
@@ -681,7 +775,8 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests, including 4 that cover the app.
+- `python tests/run_all.py` runs all tests (1957 checks), including 4 suites
+  that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.
 - To click through the real UI, see "Testing locally" in `README.md`.

@@ -20,6 +20,23 @@ def inject_global_styles():
            [data-testid="stHeader"] {
                background: transparent;
            }
+           /* Streamlit's top bar is see-through but still caught every click,
+              so a button scrolled up under it could not be pressed. Clicks now
+              pass through the bar; only its own controls (the menu, the
+              toolbar buttons) still take them. */
+           [data-testid="stHeader"],
+           [data-testid="stHeader"] [data-testid="stToolbar"],
+           [data-testid="stHeader"] [data-testid="stDecoration"] {
+               pointer-events: none;
+           }
+           [data-testid="stHeader"] button,
+           [data-testid="stHeader"] a,
+           [data-testid="stHeader"] [role="button"],
+           [data-testid="stHeader"] [data-testid="stMainMenu"],
+           [data-testid="stHeader"] [data-testid="stToolbarActions"] > *,
+           [data-testid="stHeader"] [data-testid="stAppDeployButton"] {
+               pointer-events: auto;
+           }
            [data-testid="stAppViewContainer"] {
                background: transparent;
            }
@@ -100,6 +117,16 @@ def inject_global_styles():
             [data-baseweb="tab"] {
                 opacity: 1 !important;
                 transition: none !important;
+            }
+
+            /* The contribution tree: each pillar is a full-width button with
+               its + / - on the left - read like a list, not a button bar. */
+            [class*="st-key-ctree_"] button {
+                justify-content: flex-start;
+                text-align: left;
+            }
+            [class*="st-key-ctree_"] button p {
+                text-align: left;
             }
 
             /* No "Running... Stop" badge on every click - the slow steps

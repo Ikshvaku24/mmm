@@ -12,15 +12,19 @@ codebase1_hierarchical_mmm/
 │                             (widgets -> mmm/app_job.py); blank widgets = a
 │                             hand run of this folder's config.yaml
 ├── config.yaml               every setting at its default, with help text
-├── app_access.yaml           who may do what in the web app: full access, every
-│                             setting, or an analyst's allow-list (RBAC)
+├── app_access.yaml           who may do what in the web app: four levels (full
+│                             access, every setting, editable + advanced, editable
+│                             only) and who may mark a reported run (RBAC)
+├── bmc_names.csv             the standard BMC names the web app offers
+├── modelling_types.csv       the modelling types (LTE, Primary, Secondary ...)
 ├── feature_priors_*.csv      the prior table (one row per feature)
 │
 ├── mmm/                      the package
 │   ├── run_pipeline.py       run() - ties the stages together
 │   ├── app_job.py            what demo.ipynb does: the uploaded config with only
 │   │                         the job-owned keys replaced, run, publish to the
-│   │                         run folder's Outputs/ (<BMC>/<run name>/)
+│   │                         run folder's Outputs/ (<BMC>/<period type>/<run>/);
+│   │                         the name rules and the standard-name CSV reader
 │   ├── core/
 │   │   ├── config.py         every config dataclass + the prior-unit maths
 │   │   ├── settings.py       the config.yaml front end (run_from_yaml)
@@ -92,9 +96,11 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 | add a diagnostic | `mmm/checks/` |
 | change a diagnostic threshold | `config.yaml` under `assumptions:` — **not** code |
 | change what the web app's job does (paths, publishing) | `mmm/app_job.py` (+ `demo.ipynb`, which only reads widgets) |
-| add a setting to the web app's editor | the dataclass field + its `HELP` line (enums in `settings.CHOICES`), then list it under `editable:` in `app_access.yaml` so analysts may change it |
-| choose which settings analysts may change in the app | `app_access.yaml` → `editable:` (an allow-list; the rest stay at `config.yaml`'s values) |
-| give someone every setting / the admin tools | `app_access.yaml` → `config_full_access:` / `full_access:` |
+| add a setting to the web app's editor | the dataclass field + its `HELP` line (enums in `settings.CHOICES`), then list it under `editable:` (or `advanced:`) in `app_access.yaml` so people may change it |
+| choose which settings people may change in the app | `app_access.yaml` → `editable:` for everyone, `advanced:` for `config_advanced_access` (allow-lists; the rest stay at `config.yaml`'s values) |
+| give someone every setting / the admin tools / the Advanced options | `app_access.yaml` → `config_full_access:` / `full_access:` / `config_advanced_access:` |
+| add a BMC name or a modelling type the app offers | `bmc_names.csv` / `modelling_types.csv` (one per line) |
+| choose who may mark the reported run | `app_access.yaml` → `mark_reported:` |
 
 ## The web app is the frontend, this folder the backend
 
@@ -105,11 +111,19 @@ folder updates the app, the job and anyone running it by hand at once. The app
 needs `mmm.__version__` >= the version in `web/src/codebase.py :: MIN_CODEBASE`.
 Everything it calls: `web/src/codebase.py`; setup: `web/README.md`.
 
-Each run the app starts has its own folder, `Secondary Modelling/<BMC>/<run
-name>/`, with its inputs (`Config/ Data/ Prior/ [Mapping/ Share/]`),
-`run_request.json` and `Outputs/`. The job gets `bmc_name` and `run_name`;
-`app_job.run_folder` builds the path, and `app_job.NAME_PATTERN` is the name
-rule the app checks too. With both blank, the job uses the old shared folders.
+Each run the app starts has its own folder, `Secondary Modelling/<BMC>/<period>
+<modelling type>/<run name>/` (the middle level, e.g. `2025Q1-2025Q4
+Secondary`, is the RUN GROUP), with its inputs (`Config/ Data/ Prior/
+[Mapping/ Share/]`), `run_request.json`, the modeller's `note.txt` and
+`Outputs/`. The job gets `bmc_name`, `run_group` and `run_name`;
+`app_job.run_folder` builds the path, and `app_job.NAME_PATTERN`,
+`group_problem` and `run_name_problem` are the name rules the app checks too.
+A blank `run_group` runs directly under the BMC (runs from before the groups);
+with everything blank, the job uses the old shared folders. When someone marks
+the run a period's results were reported from, the APP moves it into
+`<run group>/Results Reported/` and the group's other runs into `<run
+group>/Archived/` (never while one of them runs); the job never moves
+anything.
 The saved `Config/config.yaml` holds only the settings the person may change
 (`app_access.yaml`); `app_job.merge_config` lays it over this folder's
 `config.yaml`. While the job runs, `app_job` copies `job_log.txt` into

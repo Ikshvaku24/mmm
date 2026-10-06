@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
 
 import dataclasses
 import difflib
@@ -499,7 +499,14 @@ def config_schema() -> list[dict]:
 # who may do what in the web app (app_access.yaml)
 # --------------------------------------------------------------------------- #
 ACCESS_FILE = "app_access.yaml"
-_ACCESS_KEYS = ("full_access", "config_full_access", "editable", "show_fixed")
+_ACCESS_KEYS = ("full_access", "config_full_access", "config_advanced_access",
+                "editable", "advanced", "show_fixed", "mark_reported")
+# the four levels, most rights first; everyone not named in the file is the last
+ACCESS_LEVELS = ("full_access", "config_full_access", "config_advanced_access",
+                 "editable_only")
+# who may mark (or change) the run a group's results were reported from, when
+# the file does not say
+DEFAULT_MARK_REPORTED = ("full_access", "config_full_access", "config_advanced_access")
 
 
 def _emails(raw: dict, key: str) -> list:
@@ -509,34 +516,75 @@ def _emails(raw: dict, key: str) -> list:
     return sorted({str(p).strip().lower() for p in people if str(p).strip()})
 
 
+def _setting_names(raw: dict, key: str, known: list, unknown: list):
+    """`editable:` / `advanced:` -> sorted ["section.key", ...], or None for
+    `all` (every setting). Names codebase 1 does not have go to `unknown`."""
+    wanted = raw.get(key, {})
+    if wanted == "all":
+        return None
+    if not (isinstance(wanted, dict) or wanted is None):
+        raise ValueError(f"{ACCESS_FILE}: `{key}` must map sections to lists of "
+                         f"settings, or be `all` - got {wanted!r}")
+    names = []
+    for section, keys in (wanted or {}).items():
+        if keys == "all":
+            keys = [k for s, k in known if s == section]
+            if not keys:
+                unknown.append(f"{section}.*")
+        elif keys is None:
+            keys = []
+        elif not isinstance(keys, list):
+            raise ValueError(f"{ACCESS_FILE}: {key}.{section} must be a list of "
+                             f"setting names or `all`, got {keys!r}")
+        for name in keys:
+            full = f"{section}.{name}"
+            (names if (section, str(name)) in known else unknown).append(full)
+    return sorted(set(names))
+
+
 def app_access(path: str | None = None) -> dict:
     """Read app_access.yaml - who may do what in the web app (role-based).
 
+    Four levels, by login e-mail:
+        full_access              every setting, plus the admin tools a UI hides
+                                 from everyone else - and the only level that
+                                 may name a BMC outside bmc_names.csv
+        config_full_access       every setting
+        config_advanced_access   the `editable` settings and the `advanced` ones
+        everyone else            `editable_only`: the `editable` settings
+
     Returns
-        full_access         lower-case e-mails that may do EVERYTHING: change
-                            every setting, and use the admin tools a UI hides
-                            from everyone else
-        config_full_access  lower-case e-mails that may change every setting
-        editable            what everyone else (an analyst) may change: sorted
-                            ["section.key", ...], or None = every setting
-        show_fixed          list the settings an analyst may not change,
-                            read-only
-        unknown             "section.key" the file names that are not settings
-                            (ignored)
-        source              the file read, "" when there is none
+        full_access             lower-case e-mails (level 1)
+        config_full_access      lower-case e-mails (level 2)
+        config_advanced_access  lower-case e-mails (level 3)
+        editable                what levels 3 and 4 may change: sorted
+                                ["section.key", ...], or None = every setting
+        advanced                what level 3 may change on top: sorted
+                                ["section.key", ...] (never one of `editable`;
+                                every setting not in `editable` for `all`)
+        show_fixed              list the settings a person may not change,
+                                read-only
+        mark_reported           the levels (ACCESS_LEVELS names) that may mark
+                                the run a group's results were reported from
+        unknown                 what the file names that does not exist (a
+                                setting, or a level under mark_reported) -
+                                ignored, for the UI to warn about
+        source                  the file read, "" when there is none
 
     Without the file every setting is editable and nobody has full access -
-    the behaviour before the file existed. `editable` is an ALLOW-list, so a
-    setting added to codebase 1 later stays fixed until someone lists it. A
-    file that cannot be understood raises ValueError; a UI should then fix
-    every setting and show no admin tool rather than guess.
+    the behaviour before the file existed. `editable` and `advanced` are
+    ALLOW-lists, so a setting added to codebase 1 later stays fixed until
+    someone lists it. A file that cannot be understood raises ValueError; a UI
+    should then fix every setting, grant no level and show no admin tool
+    rather than guess.
     """
     if path is None:
         root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
         path = os.path.join(root, ACCESS_FILE)
     if not os.path.exists(path):
-        return {"full_access": [], "config_full_access": [], "editable": None,
-                "show_fixed": False, "unknown": [], "source": ""}
+        return {"full_access": [], "config_full_access": [], "config_advanced_access": [],
+                "editable": None, "advanced": [], "show_fixed": False,
+                "mark_reported": list(DEFAULT_MARK_REPORTED), "unknown": [], "source": ""}
     with open(path, encoding="utf-8") as fh:
         try:
             raw = yaml.safe_load(fh) or {}
@@ -547,32 +595,31 @@ def app_access(path: str | None = None) -> dict:
                          f"level, got {type(raw).__name__}")
     _check_keys(raw, _ACCESS_KEYS, ACCESS_FILE)
     known = [(r["section"], r["key"]) for r in config_schema()]
-    wanted = raw.get("editable", {})
     unknown = []
-    if wanted == "all":
-        editable = None
-    elif isinstance(wanted, dict) or wanted is None:
-        editable = []
-        for section, keys in (wanted or {}).items():
-            if keys == "all":
-                keys = [k for s, k in known if s == section]
-                if not keys:
-                    unknown.append(f"{section}.*")
-            elif keys is None:
-                keys = []
-            elif not isinstance(keys, list):
-                raise ValueError(f"{ACCESS_FILE}: editable.{section} must be a list of "
-                                 f"setting names or `all`, got {keys!r}")
-            for key in keys:
-                name = f"{section}.{key}"
-                (editable if (section, str(key)) in known else unknown).append(name)
-        editable = sorted(set(editable))
-    else:
-        raise ValueError(f"{ACCESS_FILE}: `editable` must map sections to lists of "
-                         f"settings, or be `all` - got {wanted!r}")
+    editable = _setting_names(raw, "editable", known, unknown)
+    advanced = _setting_names(raw, "advanced", known, unknown)
+    if advanced is None:                       # `advanced: all` = everything else
+        advanced = sorted({f"{s}.{k}" for s, k in known})
+    advanced = [] if editable is None else sorted(set(advanced) - set(editable))
+    levels = raw.get("mark_reported", list(DEFAULT_MARK_REPORTED))
+    if levels is None:
+        levels = []
+    if not isinstance(levels, list):
+        raise ValueError(f"{ACCESS_FILE}: `mark_reported` must be a list of levels "
+                         f"({', '.join(ACCESS_LEVELS)}), got {levels!r}")
+    mark = []
+    for level in levels:
+        name = str(level).strip()
+        if name in ACCESS_LEVELS:
+            mark.append(name)
+        elif name:
+            unknown.append(f"mark_reported.{name}")
     return {"full_access": _emails(raw, "full_access"),
             "config_full_access": _emails(raw, "config_full_access"),
-            "editable": editable, "show_fixed": bool(raw.get("show_fixed", False)),
+            "config_advanced_access": _emails(raw, "config_advanced_access"),
+            "editable": editable, "advanced": advanced,
+            "show_fixed": bool(raw.get("show_fixed", False)),
+            "mark_reported": [lv for lv in ACCESS_LEVELS if lv in mark],
             "unknown": unknown, "source": path}
 
 

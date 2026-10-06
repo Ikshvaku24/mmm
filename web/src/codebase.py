@@ -15,10 +15,12 @@ order:
 
 A workspace copy is downloaded through the Workspace API and re-checked every
 REFRESH_SECONDS - on a background thread once the app has started it
-(`start_background_refresh`), so no user's click waits for the Workspace API.
-When anything in the copy changed it is downloaded again and every later call
-uses the new code - re-uploading codebase 1 to the workspace is all it takes;
-the app does not need redeploying. The config editor and the prior table are
+(`start_background_refresh`), so no user's click waits for the Workspace API -
+and whenever someone opens or reloads the page (`check_now`, at most once per
+RECHECK_SECONDS for everyone together). When anything in the copy changed it
+is downloaded again and every later call uses the new code - re-uploading
+codebase 1 to the workspace is all it takes; the app does not need
+redeploying. The config editor and the prior table are
 built from the backend's own schema, so a key added to codebase 1 appears in
 the app by itself.
 
@@ -35,8 +37,10 @@ Every call here
     captures warnings and printing for the whole process and Streamlit runs
     each session as a thread, so in-process calls must queue; a worker is its
     own process, so heavy calls run side by side and never hold the lock that
-    everyone else's clicks wait on. Workers are Python's standard
-    ProcessPoolExecutor ("spawn"), BRIDGE_WORKERS of them (2); 0 turns them off.
+    everyone else's clicks wait on. Workers are BRIDGE_WORKERS (2) plain
+    `python -m src.worker_main` processes fed over a pipe (0 turns them off) -
+    deliberately not multiprocessing, whose "spawn" re-runs __main__, which in
+    a Streamlit app is the page script itself.
 
 Nothing here imports Streamlit, so the tests can import it.
 """
@@ -68,10 +72,11 @@ import yaml
 
 from src import perf
 
-# the first version with settings.app_access (app_access.yaml - who may do what)
-# and partial run configs laid over the team's config.yaml; 2026.09.29.2
-# brought the per-run folders
-MIN_CODEBASE = "2026.09.30.1"
+# the first version whose job knows the run groups (the job parameter
+# run_group: <BMC>/<period> <modelling type>/<run>), the four access levels
+# and the standard BMC / modelling-type lists; 2026.09.30.1 brought
+# app_access.yaml and the partial run configs, 2026.09.29.2 the run folders
+MIN_CODEBASE = "2026.10.07.1"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
@@ -84,6 +89,8 @@ def _env_int(name, default):
         return int(default)
 
 
+# a page (re)load re-checks codebase 1 - at most this often for everyone together
+RECHECK_SECONDS = _env_int("BRIDGE_RECHECK_SECONDS", 15)
 # worker processes for the heavy calls (0 = everything in this process)
 WORKERS = _env_int("BRIDGE_WORKERS", 2)
 WORKER_TIMEOUT = _env_int("BRIDGE_WORKER_TIMEOUT", 600)
@@ -91,12 +98,13 @@ _HEAVY = frozenset({"read_datacube", "check_datacube", "validate_prior_table",
                     "validate_mapping", "validate_share", "generate_priors"})
 # results that depend only on the backend copy (kept longer)
 _STATIC = frozenset({"schema", "layout", "base_config", "default_config",
-                     "prior_columns", "sample_file"})
+                     "prior_columns", "sample_file", "standard_names"})
 
-# what the app needs from the backend folder (app_access.yaml: who may do what -
-# optional, and part of the fingerprint, so editing it reaches the app like any
-# other re-upload)
-_NEEDED_FILES = ("config.yaml", "app_access.yaml")
+# what the app needs from the backend folder (app_access.yaml: who may do what;
+# the two CSVs: the standard BMC names and modelling types - optional, and part
+# of the fingerprint, so editing one reaches the app like any other re-upload)
+_NEEDED_FILES = ("config.yaml", "app_access.yaml", "bmc_names.csv",
+                 "modelling_types.csv")
 _NEEDED_DIRS = ("mmm", "samples")
 _NEEDED_DOCS = ("CONFIG_GUIDE.md", "FEATURE_PRIOR_GUIDE.md")
 
@@ -301,19 +309,24 @@ def _refresher_alive() -> bool:
     return REFRESH_SECONDS > 0 and t is not None and t.is_alive()
 
 
-def _ensure_loaded(force: bool = False, from_refresher: bool = False) -> None:
+def _ensure_loaded(force: bool = False, from_refresher: bool = False,
+                   recheck_after: float | None = None) -> None:
     """Load codebase 1 the first time; afterwards re-check its source every
     REFRESH_SECONDS - on the background thread when it runs, so no user waits
     for the Workspace API, otherwise on the next call that finds it stale.
-    Never called while holding _LOCK (see the lock order above)."""
+    `recheck_after` (check_now): re-check if the last check is older than
+    that many seconds, whatever the refresher does. A re-check downloads and
+    loads the copy again only when it changed. Never called while holding
+    _LOCK (see the lock order above)."""
+    limit = REFRESH_SECONDS if recheck_after is None else recheck_after
     if not force and _STATE["dir"]:
-        if time.time() - _STATE["checked"] < REFRESH_SECONDS:
+        if time.time() - _STATE["checked"] < limit:
             return
-        if not from_refresher and _refresher_alive():
+        if recheck_after is None and not from_refresher and _refresher_alive():
             return
     with _REFRESH_LOCK:
         now = time.time()
-        if not force and _STATE["dir"] and now - _STATE["checked"] < REFRESH_SECONDS:
+        if not force and _STATE["dir"] and now - _STATE["checked"] < limit:
             return                          # another thread has just checked
         t0 = time.perf_counter()
         kind, where = _resolve_source()
@@ -335,6 +348,22 @@ def _ensure_loaded(force: bool = False, from_refresher: bool = False) -> None:
                 _STATE.update(source=kind, where=where)
                 _activate(folder)
                 _STATE["fingerprint"] = fp
+
+
+def check_now(min_seconds: float | None = None) -> bool:
+    """Re-check codebase 1's source NOW - someone opened or reloaded the page,
+    so an app_access.yaml or CSV just re-uploaded applies to them at once -
+    unless it was checked in the last `min_seconds` (RECHECK_SECONDS) by
+    anyone. Returns True when a different copy was loaded. Never raises: a
+    broken source is reported by the calls themselves."""
+    before = _STATE["fingerprint"]
+    try:
+        _ensure_loaded(recheck_after=RECHECK_SECONDS if min_seconds is None
+                       else min_seconds)
+    except Exception as e:  # noqa: BLE001
+        print(f"[codebase] re-checking codebase 1 for a page load failed: {e}", flush=True)
+        return False
+    return _STATE["fingerprint"] != before
 
 
 def start_background_refresh(warm_workers: bool = True) -> bool:
@@ -448,66 +477,187 @@ def _guarded(fn, *args, **kwargs) -> Outcome:
 # --------------------------------------------------------------------------- #
 # worker processes
 # --------------------------------------------------------------------------- #
-_POOL = {"executor": None, "disabled": "", "crashes": []}
-CRASH_LIMIT = 3              # this many worker crashes in CRASH_WINDOW s: workers off
+# Each worker is its own `python -m src.worker_main` process, fed requests over
+# a pipe (src/worker_main.py). NOT multiprocessing's "spawn" pool: that starts a
+# worker by re-running the program's __main__, and inside a Streamlit app
+# __main__ is the app script itself - Streamlit replaces sys.modules["__main__"]
+# with app.py on every run - so every worker would have run the whole page.
+_POOL = {"pool": None, "disabled": "", "crashes": []}
+CRASH_LIMIT = 3              # this many worker failures in CRASH_WINDOW s: workers off
 CRASH_WINDOW = 600
 _POOL_LOCK = threading.Lock()
-_IN_WORKER = False
+_IN_WORKER = os.environ.get("BRIDGE_WORKER_PROCESS") == "1"
+_RAN = {}                    # (call, "worker" | "in-process" | "cache") -> count
+_RAN_LOCK = threading.Lock()
 
 
 class _NoPool(Exception):
     """No worker could take the call - run it in this process instead."""
 
 
-def _spawn_safe() -> bool:
-    """A "spawn" worker re-imports the program's entry script. That is safe
-    for Streamlit's launcher (`streamlit run app.py`) and for `python -c`; a
-    plain script with top-level code (a test file) would run again in every
-    worker - so the pool is only used when the entry point is one of those."""
-    main = sys.modules.get("__main__")
-    if getattr(main, "__spec__", None) is not None:
-        return "streamlit" in str(getattr(main.__spec__, "name", "")).lower()
-    path = getattr(main, "__file__", None)
-    return path is None or "streamlit" in str(path).lower()
+class _WorkerBroken(Exception):
+    """The worker died or its reply was unreadable (it is replaced)."""
+
+
+class _WorkerTimeout(Exception):
+    """No answer (or no free worker) within WORKER_TIMEOUT."""
+
+
+def _read_exact(stream, n: int) -> bytes:
+    data = stream.read(n)
+    if data is None or len(data) < n:
+        raise EOFError("the worker process closed its pipe")
+    return data
+
+
+class _WorkerPool:
+    """`size` long-lived worker processes; a call borrows an idle one."""
+
+    def __init__(self, size: int):
+        import queue
+        self.size = size
+        self.closed = False
+        self._idle = queue.Queue()
+        self._all = set()
+        self._guard = threading.Lock()
+        for _ in range(size):
+            self._idle.put(self._spawn())
+
+    def _spawn(self):
+        import subprocess
+        env = dict(os.environ, BRIDGE_WORKER_PROCESS="1")
+        env["PYTHONPATH"] = os.pathsep.join(
+            [WEB_DIR] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p])
+        proc = subprocess.Popen([sys.executable, "-m", "src.worker_main"], cwd=WEB_DIR,
+                                env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+        with self._guard:
+            self._all.add(proc)
+        return proc
+
+    def _retire(self, proc) -> None:
+        """Kill a worker that misbehaved and start a fresh one in its place."""
+        with contextlib.suppress(Exception):
+            proc.kill()
+            proc.wait(timeout=5)
+        for pipe in (proc.stdin, proc.stdout):
+            with contextlib.suppress(Exception):
+                pipe.close()
+        with self._guard:
+            self._all.discard(proc)
+        if not self.closed:
+            try:
+                self._idle.put(self._spawn())
+            except Exception as e:  # noqa: BLE001 - the pool runs one short
+                print(f"[codebase] could not start a replacement worker: {e}", flush=True)
+
+    def alive(self) -> int:
+        with self._guard:
+            return sum(1 for p in self._all if p.poll() is None)
+
+    def call(self, request, timeout: float):
+        import pickle
+        import queue
+        import struct
+        payload = pickle.dumps(request, protocol=pickle.HIGHEST_PROTOCOL)  # may raise: caller falls back
+        try:
+            proc = self._idle.get(timeout=timeout)
+        except queue.Empty:
+            raise _WorkerTimeout("no worker became free") from None
+        box = {}
+
+        def talk():
+            try:
+                proc.stdin.write(struct.pack(">Q", len(payload)))
+                proc.stdin.write(payload)
+                proc.stdin.flush()
+                size = struct.unpack(">Q", _read_exact(proc.stdout, 8))[0]
+                box["reply"] = pickle.loads(_read_exact(proc.stdout, size))
+            except BaseException as e:  # noqa: BLE001
+                box["error"] = e
+
+        talker = threading.Thread(target=talk, daemon=True)
+        talker.start()
+        talker.join(timeout)
+        if talker.is_alive():
+            self._retire(proc)                    # killing it ends the read
+            raise _WorkerTimeout(f"no answer within {timeout:.0f} s")
+        if "error" in box:
+            self._retire(proc)
+            raise _WorkerBroken(f"{type(box['error']).__name__}: {box['error']}")
+        self._idle.put(proc)
+        status, value = box["reply"]
+        if status != "ok":                        # the worker is fine; the request was not
+            raise RuntimeError(value)
+        return value
+
+    def close(self) -> None:
+        self.closed = True
+        with self._guard:
+            procs = list(self._all)
+            self._all.clear()
+        for p in procs:
+            with contextlib.suppress(Exception):
+                p.stdin.close()
+            with contextlib.suppress(Exception):
+                p.wait(timeout=2)
+            with contextlib.suppress(Exception):
+                p.kill()
 
 
 def workers_active() -> bool:
-    return (WORKERS > 0 and not _IN_WORKER and not _POOL["disabled"]
-            and _spawn_safe())
+    return WORKERS > 0 and not _IN_WORKER and not _POOL["disabled"]
 
 
-def _executor():
+def worker_status() -> dict:
+    """For the app's backend line: are the workers running, and if not, why."""
+    if _IN_WORKER:
+        return {"on": False, "reason": "this is a worker", "size": 0, "alive": 0}
+    if WORKERS <= 0:
+        return {"on": False, "reason": "BRIDGE_WORKERS=0", "size": 0, "alive": 0}
+    if _POOL["disabled"]:
+        return {"on": False, "reason": _POOL["disabled"], "size": WORKERS, "alive": 0}
+    pool = _POOL["pool"]
+    if pool is None:
+        return {"on": False, "reason": "not started yet", "size": WORKERS, "alive": 0}
+    return {"on": True, "reason": "", "size": pool.size, "alive": pool.alive()}
+
+
+def ran_counts() -> dict:
+    """{(call, where): count} - where each codebase call was answered."""
+    with _RAN_LOCK:
+        return dict(_RAN)
+
+
+def _pool():
     if not workers_active():
         return None
     with _POOL_LOCK:
         if _POOL["disabled"]:
             return None
-        if _POOL["executor"] is None:
-            import multiprocessing
-            from concurrent.futures import ProcessPoolExecutor
-            _POOL["executor"] = ProcessPoolExecutor(
-                max_workers=WORKERS, mp_context=multiprocessing.get_context("spawn"),
-                initializer=_worker_init)
-            print(f"[codebase] {WORKERS} worker processes for the heavy codebase 1 "
-                  "calls", flush=True)
-        return _POOL["executor"]
+        if _POOL["pool"] is None:
+            _POOL["pool"] = _WorkerPool(WORKERS)
+            import atexit
+            atexit.register(_POOL["pool"].close)
+            print(f"[codebase] {WORKERS} worker processes for the heavy codebase 1 calls",
+                  flush=True)
+        return _POOL["pool"]
 
 
-def _reset_pool(reason: str, disable: bool = False) -> None:
+def _note_failure(reason: str, disable: bool = False) -> None:
     with _POOL_LOCK:
-        ex, _POOL["executor"] = _POOL["executor"], None
         now = time.time()
         _POOL["crashes"] = [t for t in _POOL["crashes"] if now - t < CRASH_WINDOW] + [now]
         if len(_POOL["crashes"]) >= CRASH_LIMIT and not disable:
             disable = True
             reason = (f"{reason} - {CRASH_LIMIT} failures in {CRASH_WINDOW // 60} min, "
                       "so the heavy calls run in the app process from now on")
+        pool = None
         if disable:
             _POOL["disabled"] = reason
-    if ex is not None:
-        with contextlib.suppress(Exception):
-            ex.shutdown(wait=False, cancel_futures=True)
-    print(f"[codebase] worker pool {'switched off' if disable else 'restarted'}: "
+            pool, _POOL["pool"] = _POOL["pool"], None
+    if pool is not None:
+        pool.close()
+    print(f"[codebase] worker {'processes switched off' if disable else 'replaced'}: "
           f"{reason}", flush=True)
 
 
@@ -531,54 +681,68 @@ def _worker_task(folder: str, name: str, args, kwargs) -> Outcome:
     return _capture(_IMPLS[name], *args, **kwargs)
 
 
-def _worker_ping(folder: str) -> int:
-    _worker_activate(folder)
-    time.sleep(0.3)          # keep this worker busy so the next ping reaches another
-    return os.getpid()
+def _worker_handle(request):
+    """A worker's answer to one request from the app (src/worker_main.py)."""
+    if request[0] == "ping":
+        _worker_activate(request[1])
+        time.sleep(0.3)      # keep this worker busy so the next ping reaches another
+        return os.getpid()
+    _kind, folder, name, args, kwargs = request
+    return _worker_task(folder, name, args, kwargs)
 
 
 def warm_workers_now() -> int:
     """Start the workers and load codebase 1 into them (the first heavy click
-    would otherwise wait for that). Returns how many answered."""
-    ex = _executor()
-    folder = _STATE["dir"]
-    if ex is None or not folder:
-        return 0
+    would otherwise wait for that). Returns how many answered; says in the
+    app's log why when the workers are off."""
     try:
-        futures = [ex.submit(_worker_ping, folder) for _ in range(WORKERS)]
-        return len({f.result(timeout=120) for f in futures})
-    except Exception as e:  # noqa: BLE001
-        print(f"[codebase] warming the workers failed: {e}", flush=True)
+        pool = _pool()
+    except Exception as e:  # noqa: BLE001 - e.g. processes cannot be started here
+        _note_failure(f"the worker processes could not start: {e}", disable=True)
         return 0
+    folder = _STATE["dir"]
+    if pool is None or not folder:
+        print(f"[codebase] worker processes are off: {worker_status()['reason']} - "
+              "the heavy codebase 1 calls run in the app process", flush=True)
+        return 0
+    pids, errors = set(), []
+
+    def ping():
+        try:
+            pids.add(pool.call(("ping", folder), 120))
+        except Exception as e:  # noqa: BLE001
+            errors.append(e)
+
+    threads = [threading.Thread(target=ping) for _ in range(pool.size)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    if errors:
+        print(f"[codebase] warming the workers: {errors[0]}", flush=True)
+    print(f"[codebase] {len(pids)} of {pool.size} worker processes ready", flush=True)
+    return len(pids)
 
 
 def _in_worker(name: str, args, kwargs) -> Outcome:
-    from concurrent.futures import TimeoutError as FuturesTimeout
-    from concurrent.futures.process import BrokenProcessPool
     try:
-        ex = _executor()
+        pool = _pool()
     except Exception as e:  # noqa: BLE001 - e.g. processes cannot be started here
-        _reset_pool(f"the worker processes could not start: {e}", disable=True)
+        _note_failure(f"the worker processes could not start: {e}", disable=True)
         raise _NoPool() from e
     folder = _STATE["dir"]
-    if ex is None or not folder:
+    if pool is None or not folder:
         raise _NoPool()
     try:
-        future = ex.submit(_worker_task, folder, name, args, kwargs)
-    except Exception as e:  # noqa: BLE001 - shut down or broken
-        _reset_pool(f"could not hand over {name}: {e}")
-        raise _NoPool() from e
-    try:
-        return future.result(timeout=WORKER_TIMEOUT)
-    except FuturesTimeout:
+        return pool.call(("call", folder, name, args, kwargs), WORKER_TIMEOUT)
+    except _WorkerTimeout:
         return Outcome(ok=False, errors=[
             f"This step ({name}) took longer than {WORKER_TIMEOUT} s - try again. If "
             "it keeps happening the file may be too large for the app."])
-    except BrokenProcessPool as e:
-        _reset_pool(f"a worker process stopped during {name} ({e})")
+    except _WorkerBroken as e:
+        _note_failure(f"a worker process stopped during {name} ({e})")
         raise _NoPool() from e
     except Exception as e:  # noqa: BLE001 - e.g. arguments a process cannot take
-        _reset_pool(f"{name}: {type(e).__name__}: {e}", disable=True)
+        print(f"[codebase] {name} could not go to a worker ({type(e).__name__}: {e}); "
+              "running it in the app process", flush=True)
         raise _NoPool() from e
 
 
@@ -613,6 +777,8 @@ def _call(name: str, *args, **kwargs) -> Outcome:
     out, _hit = _CACHE.get_or_compute(perf.content_key(name, fp, args, kwargs), compute,
                                       ttl=3600 if name in _STATIC else 1800,
                                       cache_if=worth_keeping)
+    with _RAN_LOCK:
+        _RAN[(name, ran[0])] = _RAN.get((name, ran[0]), 0) + 1
     perf.log_timing(f"codebase.{name}", t0, ran[0])
     return out
 
@@ -649,9 +815,10 @@ def _impl_schema():
     except ValueError as e:
         # a file that cannot be read fixes every setting and grants nobody
         # full access - it never opens anything
-        access = {"full_access": [], "config_full_access": [], "editable": [],
-                  "show_fixed": True, "unknown": [], "source": access_file,
-                  "error": str(e)}
+        access = {"full_access": [], "config_full_access": [],
+                  "config_advanced_access": [], "editable": [], "advanced": [],
+                  "show_fixed": True, "mark_reported": [], "unknown": [],
+                  "source": access_file, "error": str(e)}
     return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
             "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
             "sections": ["data"] + list(st_.SECTIONS),
@@ -668,13 +835,41 @@ def _impl_layout():
     aj = _m("mmm.app_job")
     return {"folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
             "shared_folders": list(aj.SHARED_FOLDERS),
-            "run_request": aj.RUN_REQUEST, "name_pattern": aj.NAME_PATTERN}
+            "run_request": aj.RUN_REQUEST, "name_pattern": aj.NAME_PATTERN,
+            "group_pattern": aj._GROUP_RE.pattern,
+            "reported_folder": aj.REPORTED_FOLDER, "archived_folder": aj.ARCHIVED_FOLDER}
 
 
 def layout() -> Outcome:
-    """Where a run's files live - the job's own folder names and name rule,
-    so the app and the job can never disagree about a path."""
+    """Where a run's files live - the job's own folder names and name rules
+    (BMC / run group / run), so the app and the job can never disagree about a
+    path."""
     return _call("layout")
+
+
+def _impl_standard_names():
+    aj = _m("mmm.app_job")
+    out, problems = {}, []
+    for key, file_name, column in (("bmc_names", aj.BMC_NAMES_FILE, "bmc_name"),
+                                   ("modelling_types", aj.MODELLING_TYPES_FILE,
+                                    "modelling_type")):
+        path = os.path.join(_STATE["dir"], file_name)
+        try:
+            out[key] = aj.read_names(path, column) if os.path.exists(path) else []
+            if not os.path.exists(path):
+                problems.append(f"{file_name} is not in codebase 1's folder")
+        except (OSError, ValueError) as e:
+            out[key] = []
+            problems.append(str(e))
+    out["problems"] = problems
+    return out
+
+
+def standard_names() -> Outcome:
+    """The standard BMC names and modelling types - codebase 1's
+    bmc_names.csv and modelling_types.csv: {bmc_names, modelling_types,
+    problems}."""
+    return _call("standard_names")
 
 
 def _full_config(raw: dict) -> dict:
@@ -1229,4 +1424,5 @@ _IMPLS = {
     "validate_mapping": _impl_validate_mapping, "validate_share": _impl_validate_share,
     "sample_file": _impl_sample_file, "template_file": _impl_template_file,
     "generate_priors": _impl_generate_priors, "expected_case": _impl_expected_case,
+    "standard_names": _impl_standard_names,
 }

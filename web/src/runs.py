@@ -1,19 +1,26 @@
 """Model runs: the panel for one run, and the job's recent runs.
 
-A run is found by its folder - Secondary Modelling/<BMC>/<run name>/, see
-projects.py - and, when the Jobs API knows it, by its job run. Its panel
-stays on the page until dismissed - it is no longer a popup that loses the
-run when closed. While the job runs, the panel refreshes itself every 5
-seconds (status, elapsed time, Cancel) and shows the job log as it grows
-(codebase 1's mmm/app_job.py copies job_log.txt to the run's Outputs/ every
-30 s). When it finishes it shows the notebook's real error with its full
-traceback, or the codebase version that ran; the run's zip (its inputs AND its
-outputs); the complete job log; and the results as charts (src/charts.py):
-fit, contributions, decomposition, prior vs posterior - plus the convergence
-report and the warnings. "Reuse inputs" hands the run to the page, which loads
-its datacube, settings and prior (and mapping/share) files to edit and run
-again. "Open in Databricks" is for the people with full access in
-app_access.yaml; everyone else reads the log here.
+A run is found by its folder - Secondary Modelling/<BMC>/<run group>/<run
+name>/, see projects.py - and, when the Jobs API knows it, by its job run. Its
+panel stays on the page until dismissed - it is no longer a popup that loses
+the run when closed. While the job runs, the panel refreshes itself every 5
+seconds - how long the run has been QUEUED (another run holds the job), how
+long the CLUSTER has been starting, or how long the notebook has been
+running; Cancel - and shows the job log as it grows (codebase 1's
+mmm/app_job.py copies job_log.txt to the run's Outputs/ every 30 s). A run's
+run time is the NOTEBOOK's time only (the Jobs API's execution time), never
+the queue or the cluster start. When it finishes it shows the notebook's real
+error with its full traceback, or the codebase version that ran; the run's
+zip (its inputs AND its outputs); the complete job log; and the results as
+charts (src/charts.py): fit, contributions (by pillar, each opened with its
++), decomposition, prior vs posterior - plus the convergence report and the
+warnings, picked with a row of buttons. The modeller's note is shown with the
+run, and a run the results were reported from carries its badge; "Mark as
+reported" (app_access.yaml `mark_reported`) makes a finished run that. "Reuse
+inputs" hands the run to the page, which loads its datacube, settings and
+prior (and mapping/share) files to edit and run again. "Open in Databricks" is
+for the people with full access in app_access.yaml; everyone else reads the
+log here.
 
 "All recent runs" lists the job's runs from the Jobs API - every BMC, and runs
 from before the run folders existed.
@@ -52,7 +59,7 @@ import pandas as pd
 import streamlit as st
 
 from src import charts, perf, projects
-from src.config_editor import has_full_access
+from src.config_editor import has_full_access, may_mark_reported, viewer_email
 from src.files import download_from_adls, is_not_found, list_tree_meta
 from src.jobs import cancel_run, get_run_output, get_run_status, list_runs
 
@@ -63,6 +70,9 @@ except ImportError:                  # a stand-in streamlit (the tests) has no e
         pass
 
 TERMINAL_STATES = {"TERMINATED", "INTERNAL_ERROR", "SKIPPED"}
+QUEUED_STATES = {"QUEUED"}
+PENDING_STATES = {"PENDING", "BLOCKED", "WAITING_FOR_RETRY", "WAITING"}
+RUNNING_STATES = {"RUNNING", "TERMINATING"}
 DONE_RESULTS = {"SUCCESS", "FAILED", "CANCELED", "TIMEDOUT", "UPSTREAM_FAILED",
                 "UPSTREAM_CANCELED", "EXCLUDED", "SUCCESS_WITH_FAILURES",
                 "MAXIMUM_CONCURRENT_RUNS_REACHED"}
@@ -140,15 +150,132 @@ def local_time(ms):
     return datetime.fromtimestamp(int(ms) / 1000, tz=tz).strftime("%Y-%m-%d %H:%M") + label
 
 
+def fmt_seconds(seconds):
+    """1:02:03 / 12:30 - a duration in seconds as a clock ('' when unknown)."""
+    if seconds is None:
+        return ""
+    try:
+        seconds = max(0, int(round(float(seconds))))
+    except (TypeError, ValueError):
+        return ""
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+
+
 def _duration(run):
+    """Start to end (or to now) - the whole wall time, queue and cluster
+    start included. The run time shown is run_timing's notebook time."""
     start, end = (run or {}).get("start_time"), (run or {}).get("end_time")
     if not start:
         return ""
     stop = end if end else time.time() * 1000
-    seconds = max(0, int((stop - start) / 1000))
-    h, rem = divmod(seconds, 3600)
-    m, s = divmod(rem, 60)
-    return f"{h}:{m:02d}:{s:02d}" if h else f"{m:02d}:{s:02d}"
+    return fmt_seconds((stop - start) / 1000)
+
+
+def _task(run):
+    """The run's only task (the job runs one notebook), or None."""
+    tasks = (run or {}).get("tasks") or []
+    return tasks[0] if len(tasks) == 1 else None
+
+
+def _phase_states(run):
+    """(the job run's states, the task's states) - life-cycle and status."""
+    def states(obj):
+        obj = obj or {}
+        return [s for s in ((obj.get("status") or {}).get("state"),
+                            (obj.get("state") or {}).get("life_cycle_state")) if s]
+    return states(run), states(_task(run))
+
+
+def _ms_total(run, field):
+    """A duration of the run in ms: the sum over its tasks (multi-task job
+    runs report 0 at the top), else the run's own field."""
+    tasks = (run or {}).get("tasks") or []
+    parts = [t.get(field) for t in tasks if t.get(field)]
+    return sum(parts) if parts else ((run or {}).get(field) or 0)
+
+
+def run_timing(run, now_ms=None):
+    """Where a job run's time went, from the Jobs API.
+
+    {"phase": "queued" | "pending" | "running" | "done" | "",
+     "since_ms": when the current phase began (waiting / running),
+     "queue_ms", "setup_ms": time in the job queue and starting the cluster,
+     "execution_ms": the NOTEBOOK's own time (finished: the API's execution
+                     time; running: so far), "queue_reason": the API's words}"""
+    run = run or {}
+    now = now_ms if now_ms is not None else time.time() * 1000
+    start = run.get("start_time") or 0
+    queue = run.get("queue_duration") or 0
+    setup = _ms_total(run, "setup_duration")
+    out = {"phase": "", "since_ms": None, "queue_ms": queue, "setup_ms": setup,
+           "execution_ms": None,
+           "queue_reason": (run.get("state") or {}).get("queue_reason") or
+           ((run.get("status") or {}).get("queue_details") or {}).get("message") or ""}
+    if not run.get("state"):
+        return out
+    if is_done(run):
+        execution = _ms_total(run, "execution_duration")
+        out.update(phase="done", execution_ms=execution or None)
+        return out
+    job_states, task_states = _phase_states(run)
+    task = _task(run) or {}
+    if QUEUED_STATES & set(job_states + task_states):
+        out.update(phase="queued", since_ms=start)
+        return out
+    current = (task_states or job_states or [""])[0]
+    task_start = task.get("start_time") or (start + queue)
+    if current in PENDING_STATES:
+        out.update(phase="pending", since_ms=task_start)
+        return out
+    if current in RUNNING_STATES:
+        begun = task_start + (task.get("setup_duration") or 0)
+        out.update(phase="running", since_ms=begun, execution_ms=max(0, now - begun))
+        return out
+    return out
+
+
+def _phase_label(timing):
+    """"⏳ Queued" / "⏳ Cluster starting" / "🔄 Running" for an active run."""
+    return {"queued": "⏳ Queued", "pending": "⏳ Cluster starting",
+            "running": "🔄 Running"}.get(timing.get("phase"), "")
+
+
+def timing_text(run, info=None, now_ms=None):
+    """The panel's line about time: what the run waits for and since when
+    while it waits, the notebook time so far while it runs, the notebook time
+    (and what was spent waiting) once it finished."""
+    now = now_ms if now_ms is not None else time.time() * 1000
+    t = run_timing(run, now)
+    waited = [f"queued {fmt_seconds(t['queue_ms'] / 1000)}" if t["queue_ms"] else "",
+              f"cluster start {fmt_seconds(t['setup_ms'] / 1000)}" if t["setup_ms"] else ""]
+    waited = " · ".join(w for w in waited if w)
+    if t["phase"] == "queued":
+        return (f"Queued for {fmt_seconds((now - t['since_ms']) / 1000)} - waiting for the "
+                "job to be free (another run holds it)"
+                + (f": {t['queue_reason']}" if t["queue_reason"] else ""))
+    if t["phase"] == "pending":
+        return (f"Cluster pending for {fmt_seconds((now - t['since_ms']) / 1000)} - the "
+                "cluster is starting; the notebook has not begun")
+    if t["phase"] == "running":
+        return (f"Running for {fmt_seconds(t['execution_ms'] / 1000)} (the notebook)"
+                + (f" · before that: {waited}" if waited else ""))
+    seconds = (t["execution_ms"] / 1000 if t["execution_ms"]
+               else (info or {}).get("seconds"))
+    if seconds is None:
+        return ""
+    return (f"Run time {fmt_seconds(seconds)} (the notebook)"
+            + (f" · waited: {waited}" if waited else ""))
+
+
+def run_seconds(run, info=None):
+    """The notebook's time in seconds - the Jobs API's execution time, else
+    the job's own run_info.json - or None."""
+    t = run_timing(run)
+    if t["phase"] == "done" and t["execution_ms"]:
+        return t["execution_ms"] / 1000
+    return (info or {}).get("seconds")
 
 
 def _status_label(run):
@@ -157,9 +284,12 @@ def _status_label(run):
         return "✅ Success"
     if result:
         return f"❌ {result.replace('_', ' ').title()}"
-    if life in {"PENDING", "QUEUED", "BLOCKED", "WAITING_FOR_RETRY"}:
+    phase = _phase_label(run_timing(run))
+    if phase:
+        return phase
+    if life in PENDING_STATES | QUEUED_STATES:
         return "⏳ Waiting to start"
-    if life in {"RUNNING", "TERMINATING"}:
+    if life in RUNNING_STATES:
         return f"🔄 {life.title()}"
     if life in TERMINAL_STATES:
         return f"❌ {life.replace('_', ' ').title()}"
@@ -180,7 +310,8 @@ def job_params(run):
 
 def ref_from_job_run(run):
     """The run as a reference: its folder when it has one, and its job run."""
-    return projects.make_ref(run.get("run_id"), _param(run, "bmc_name"), _param(run, "run_name"))
+    return projects.make_ref(run.get("run_id"), _param(run, "bmc_name"),
+                             _param(run, "run_name"), _param(run, "run_group"))
 
 
 def fetch_run(job_run_id):
@@ -203,11 +334,27 @@ def forget_run_status(job_run_id):
 
 
 def job_state_label(job_run_id):
-    """The Jobs API's state as a label, or None (for the BMC's run list)."""
+    """The Jobs API's state as a label, or None (for the BMC's run list) -
+    for a run that waits or runs, with the time its phase began."""
+    run = fetch_run(job_run_id)
+    if run.get("_error") or not _known(run):
+        return None
+    label = _status_label(run)
+    since = run_timing(run).get("since_ms")
+    if not since or is_done(run):
+        return label
+    clock = local_time(since).split(" ")       # "2026-10-07 14:02" (+ " UTC")
+    return f"{label} since {' '.join(clock[1:])}"
+
+
+def job_done(job_run_id):
+    """True when the Jobs API has the run finished - or no longer knows it
+    (it forgets runs after 60 days); False while it runs; None when the API
+    could not be asked."""
     run = fetch_run(job_run_id)
     if run.get("_error"):
         return None
-    return _status_label(run) if _known(run) else None
+    return is_done(run) if _known(run) else True
 
 
 def _run_output(job_run_id):
@@ -316,10 +463,22 @@ def _static_panel(ref, where, on_reuse):
     _panel_body(ref, where, fetch_run(ref.get("job_run_id")), on_reuse)
 
 
+def _is_reported(ref):
+    """Is this run the one its group's results were reported from?"""
+    group = projects.ref_group(ref)
+    if not (group and projects.has_folder(ref)):
+        return False
+    try:
+        return projects.run_place(ref["bmc"], group, ref["run"]) == projects.reported_folder()
+    except Exception:  # noqa: BLE001 - a badge is not worth an error
+        return False
+
+
 def _panel_body(ref, where, run, on_reuse):
     key = projects.ref_key(ref)
     running = _known(run) and not is_done(run)
     info = None if running else _run_info(ref)
+    reported = _is_reported(ref)
     with st.container(border=True):
         if run.get("_error") and not info:
             st.warning(run["_error"])
@@ -329,14 +488,22 @@ def _panel_body(ref, where, run, on_reuse):
             status = "✅ Success" if info.get("status") == "success" else "❌ Failed"
         else:
             status = "no outputs yet"
-        st.markdown(f"**{projects.ref_label(ref)}** · {status}")
+        st.markdown(f"**{projects.ref_label(ref)}** · {status}"
+                    + (f" · **{projects.REPORTED_BADGE}** - the results were reported "
+                       "from this run" if reported else ""))
         started = local_time(run.get("start_time"))
-        bits = [f"Started {started}" if started else "",
-                (f"took {_duration(run)}" if not running else
-                 f"running for {_duration(run)} · refreshes every 5 s") if started else "",
+        timing = timing_text(run, info) if _known(run) else (
+            f"Run time {fmt_seconds(info['seconds'])} (the notebook)"
+            if (info or {}).get("seconds") is not None else "")
+        bits = [f"Started {started}" if started else "", timing,
+                "refreshes every 5 s" if running else "",
                 f"job run {ref['job_run_id']}" if projects.has_folder(ref) and ref.get("job_run_id") else ""]
         if any(bits):
             st.caption(" · ".join(b for b in bits if b))
+        request = projects.request_of(ref)
+        if request.get("note"):
+            st.info(f"📝 **Note** ({request.get('submitted_by') or 'the modeller'}): "
+                    f"{request['note']}")
         with st.container(horizontal=True):
             if running and st.button("Cancel run", key=f"cancel_{where}_{key}", type="secondary"):
                 try:
@@ -362,6 +529,8 @@ def _panel_body(ref, where, run, on_reuse):
                                                      "its BMC's run list."):
                 st.session_state.pop("current_run", None)
                 st.rerun()
+        if not running and _succeeded(run, info):
+            _render_mark_reported(ref, where, reported)
 
         if running:
             st.caption("The results and the run's zip appear here when the run "
@@ -384,6 +553,73 @@ def _panel_body(ref, where, run, on_reuse):
 def _succeeded(run, info):
     _life, result = _state(run)
     return (result == "SUCCESS") if _known(run) else (info or {}).get("status") == "success"
+
+
+def _group_rows(ref):
+    """The runs of the ref's group (the BMC's shared run list)."""
+    try:
+        rows, _errors = projects.list_runs_shared(ref["bmc"], job_state=job_state_label)
+    except Exception:  # noqa: BLE001
+        return []
+    return [r for r in rows if r["group"] == projects.ref_group(ref)]
+
+
+def _render_mark_reported(ref, where, reported):
+    """"Mark as reported" for a finished run of a group - for the levels
+    app_access.yaml `mark_reported` names - with a confirm step, since it
+    moves folders."""
+    group = projects.ref_group(ref)
+    if not group or reported or not may_mark_reported():
+        return
+    key = projects.ref_key(ref)
+    rows = _group_rows(ref)
+    current = next((r["run"] for r in rows if r["reported"]), None)
+    others = [r for r in rows if r["run"] != ref["run"]]
+    busy = [r["run"] for r in rows if projects.is_running(r, job_done)]
+    confirm_key = f"confirm_mark_{where}_{key}"
+    label = ("Make this the reported run" if current else "Mark as reported")
+    text = (f"instead of **{current}**" if current else
+            "the run the results of this period and modelling type were reported from")
+    if not st.session_state.get(confirm_key):
+        if st.button(f"⭐ {label}", key=f"mark_{where}_{key}", disabled=bool(busy),
+                     help=(f"Wait until every run of {group} has finished - still running: "
+                           f"{', '.join(busy)}." if busy else
+                           f"Marks this run as {text.replace('**', '')}. Its folder moves to "
+                           f"{group}/{projects.reported_folder()}/ and the other runs of the "
+                           f"group to {group}/{projects.archived_folder()}/.")):
+            st.session_state[confirm_key] = True
+            _rerun_fragment()
+        if busy:
+            st.caption(f"Marking waits until every run of {group} has finished "
+                       f"(still running: {', '.join(busy)}).")
+        return
+    st.warning(f"Mark **{ref['run']}** as the reported run of **{group}** {text if current else ''}? "
+               f"Its folder moves to {group}/{projects.reported_folder()}/"
+               + (f" and the {len(others)} other run(s) of the group to "
+                  f"{group}/{projects.archived_folder()}/" if others else "")
+               + ". Everything stays readable and reusable here; the mark can be moved to "
+                 "another run later.")
+    yes, no = st.columns(2)
+    with yes:
+        if st.button("Yes, mark it", key=f"mark_yes_{where}_{key}", type="primary",
+                     use_container_width=True):
+            st.session_state.pop(confirm_key, None)
+            try:
+                with st.spinner("Moving the run folders ..."):
+                    done = projects.mark_reported(ref["bmc"], group, ref["run"],
+                                                  user=viewer_email(), running=busy)
+            except Exception as e:  # noqa: BLE001 - shown, the user can try again
+                st.error(f"Could not mark it: {e}")
+                return
+            _LISTINGS.invalidate()          # the moved runs' file lists point elsewhere now
+            st.toast(f"{ref['run']} is now the reported run of {group}"
+                     + (f" (was {done['previous']})" if done.get("previous") else "") + ".",
+                     icon="⭐")
+            st.rerun()
+    with no:
+        if st.button("Cancel", key=f"mark_no_{where}_{key}", use_container_width=True):
+            st.session_state.pop(confirm_key, None)
+            _rerun_fragment()
 
 
 def _render_result(ref, run, info):
@@ -431,7 +667,7 @@ def run_contents(ref):
     def build():
         lay = projects.layout()
         if projects.has_folder(ref):
-            root = projects.run_dir(ref["bmc"], ref["run"])
+            root = projects.ref_dir(ref)
             return [(rel, f"{root}/{rel}", size, mod)
                     for rel, size, mod in list_tree_meta(root)]
         out_dir = projects.outputs_dir(ref)
@@ -650,12 +886,30 @@ def _table(frame, ref, rel, tag, expanded=False):
                                key=f"dl_{tag}_{name}", on_click="ignore")
 
 
+def _set_state(key, value):
+    st.session_state[key] = value
+
+
+def _view_picker(tag):
+    """The result views as a row of buttons - the one shown is highlighted
+    (a click target the size of a button, not a radio dot)."""
+    key = f"view_{tag}"
+    if st.session_state.get(key) not in RESULT_VIEWS:
+        st.session_state[key] = RESULT_VIEWS[0]
+    current = st.session_state[key]
+    for col, view in zip(st.columns(len(RESULT_VIEWS)), RESULT_VIEWS):
+        with col:
+            st.button(view, key=f"{key}__{view.lower().replace(' ', '_')}",
+                      type="primary" if view == current else "secondary",
+                      use_container_width=True, on_click=_set_state, args=(key, view))
+    return st.session_state[key]
+
+
 def _render_results(ref, where):
     key = projects.ref_key(ref)
     tag = f"{where}_{key}"
     st.markdown("**Results**")
-    view = st.radio("View", list(RESULT_VIEWS), horizontal=True, key=f"view_{tag}",
-                    label_visibility="collapsed")
+    view = _view_picker(tag)
     if not view:
         return
     plotted = charts.available()
@@ -719,12 +973,10 @@ def _view_contributions(ref, tag, mode, plotted):
         st.info(problem)
         return
     regions, periods = charts.summary_choices(summary)
-    c1, c2, c3 = st.columns([2, 2, 2], vertical_alignment="bottom")
+    c1, c2 = st.columns(2, vertical_alignment="bottom")
     region = c1.selectbox("Region", regions, key=f"contrib_region_{tag}",
                           format_func=_region_label)
     period = c2.selectbox("Period", periods, key=f"contrib_period_{tag}")
-    level = c3.radio("Show", ["By variable", "By pillar"], horizontal=True,
-                     key=f"contrib_level_{tag}")
     bars, totals = charts.contribution_bars(summary, region, period)
     t1, t2, t3 = st.columns(3)
     t1.metric("Baseline core", f"{totals['core']:.1f}%",
@@ -738,15 +990,56 @@ def _view_contributions(ref, tag, mode, plotted):
     if bars.empty:
         st.info("No drivers in this region and period.")
         return
-    shown = charts.by_pillar(bars) if level == "By pillar" else bars
+    open_key = f"contrib_open_{tag}"
+    pillars = list(charts.pillar_rows(bars)["pillar"])
+    opened = [p for p in st.session_state.get(open_key) or [] if p in pillars]
+    tree = charts.contribution_tree(bars, opened)
     if plotted:
         colours = charts.colour_map(charts.pillar_order(summary), mode)
-        _plot(charts.contribution_figure(shown, colours, mode), key=f"contrib_chart_{tag}")
-        st.caption(f"Each driver's contribution as a share of actual sales - "
-                   f"{_region_label(region)}, {period}. The colours are the pillars; "
-                   "each keeps its colour in every region, period and chart.")
-    _table(shown.iloc[::-1].rename(columns={"pct": "contribution_pct"}), ref,
-           RESULT_FILES["summary"], tag, expanded=not plotted)
+        _plot(charts.contribution_tree_figure(tree, colours, mode), key=f"contrib_chart_{tag}")
+        st.caption(f"Each pillar's contribution as a share of actual sales - "
+                   f"{_region_label(region)}, {period}. Open a pillar with its **+** "
+                   "below to see its variables (the lighter bars). Each pillar keeps its "
+                   "colour in every region, period and chart"
+                   + (f"; {charts.UNASSIGNED} = the variables the prior file gives no "
+                      "pillar." if charts.UNASSIGNED in pillars else "."))
+    _pillar_tree(bars, opened, pillars, open_key, tag)
+    _table(bars.iloc[::-1].rename(columns={"pct": "contribution_pct"}), ref,
+           RESULT_FILES["summary"], tag, expanded=False)
+
+
+def _toggle_pillar(open_key, pillar):
+    opened = list(st.session_state.get(open_key) or [])
+    st.session_state[open_key] = ([p for p in opened if p != pillar] if pillar in opened
+                                  else opened + [pillar])
+
+
+def _pillar_tree(bars, opened, pillars, open_key, tag):
+    """The pillars as rows - press one (its +) to list its variables under it."""
+    first, second, _rest = st.columns([1, 1, 4])
+    with first:
+        st.button("Open all", key=f"contrib_open_all_{tag}", use_container_width=True,
+                  on_click=_set_state, args=(open_key, list(pillars)),
+                  disabled=len(opened) == len(pillars))
+    with second:
+        st.button("Close all", key=f"contrib_close_all_{tag}", use_container_width=True,
+                  on_click=_set_state, args=(open_key, []), disabled=not opened)
+    for p in charts.pillar_rows(bars).itertuples(index=False):
+        is_open = p.pillar in opened
+        digest = hashlib.sha1(str(p.pillar).encode()).hexdigest()[:8]
+        st.button(f"{p.pillar}  ·  {charts.pct_label(p.pct)} of sales  ·  "
+                  f"{p.n} variable{'s' if p.n != 1 else ''}",
+                  key=f"ctree_{tag}_{digest}", use_container_width=True,
+                  icon=":material/remove:" if is_open else ":material/add:",
+                  on_click=_toggle_pillar, args=(open_key, p.pillar),
+                  help=("Hide" if is_open else "Show") + f" the variables of {p.pillar}.")
+        if is_open:
+            members = bars[bars["pillar"] == p.pillar].sort_values("pct", ascending=False)
+            st.dataframe(pd.DataFrame({"variable": members["feature"],
+                                       "% of sales": members["pct"].round(3),
+                                       "volume": members["volume"].round(0)}),
+                         use_container_width=True, hide_index=True,
+                         height=min(36 * (len(members) + 1) + 2, 320))
 
 
 def _view_decomposition(ref, tag, mode, plotted):
@@ -899,6 +1192,40 @@ def _recent_runs(job_id):
     return runs, None
 
 
+def _reported_in_group(bmc, group, run):
+    if not (bmc and group and run):
+        return False
+    try:
+        return projects.run_place(bmc, group, run) == projects.reported_folder()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _recent_row(r):
+    """One row of All recent runs: the run time is the notebook's alone; the
+    time spent queued and starting the cluster is its own column."""
+    t = run_timing(r)
+    if t["phase"] == "done":
+        run_time = fmt_seconds(t["execution_ms"] / 1000) if t["execution_ms"] else ""
+    elif t["phase"] in ("queued", "pending"):
+        run_time = "not started"
+    elif t["phase"] == "running":
+        run_time = f"{fmt_seconds(t['execution_ms'] / 1000)} so far"
+    else:
+        run_time = ""
+    waited = (t["queue_ms"] or 0) + (t["setup_ms"] or 0)
+    bmc, group, name = (_param(r, "bmc_name"), _param(r, "run_group"),
+                        _param(r, "run_name"))
+    return {"run_id": str(r.get("run_id")),
+            "started": local_time(r.get("start_time")),
+            "status": _status_label(r),
+            "run time": run_time,
+            "waited": fmt_seconds(waited / 1000) if waited else "",
+            "bmc": bmc, "period · type": group, "run name": name,
+            "reported": projects.REPORTED_BADGE if _reported_in_group(bmc, group, name) else "",
+            "data_file": _param(r, "data_file")}
+
+
 @st.fragment
 def render_runs_section(on_reuse=None):
     with st.expander("All recent runs of the model job - every BMC, and runs from "
@@ -906,7 +1233,8 @@ def render_runs_section(on_reuse=None):
         head, refresh = st.columns([5, 1], vertical_alignment="center")
         with head:
             st.caption("From the Jobs API: running or finished, from this session or "
-                       "any other. Select one to see its status, log, results and zip.")
+                       "any other. Select one to see its status, log, results and zip. "
+                       "Run time is the notebook's own; waited = queued + cluster start.")
         with refresh:
             if st.button("↻ Refresh list", key="runs_refresh",
                          help="Ask the Jobs API for the job's runs again (otherwise at "
@@ -919,15 +1247,7 @@ def render_runs_section(on_reuse=None):
             st.warning(problem)
         chosen = None
         if runs:
-            table = pd.DataFrame([{
-                "run_id": str(r.get("run_id")),
-                "started": local_time(r.get("start_time")),
-                "status": _status_label(r),
-                "duration": _duration(r),
-                "bmc": _param(r, "bmc_name"),
-                "run name": _param(r, "run_name"),
-                "data_file": _param(r, "data_file"),
-            } for r in runs])
+            table = pd.DataFrame([_recent_row(r) for r in runs])
             event = st.dataframe(table, use_container_width=True, hide_index=True,
                                  on_select="rerun", selection_mode="single-row",
                                  key="runs_table")

@@ -4,6 +4,7 @@ import os
 import re
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import pandas as pd
@@ -20,8 +21,9 @@ from src.config_editor import (access, enforce_fixed, has_full_access, init_conf
                                render_settings_section, role)
 from src.generate_prior import generate_prior
 from src.jobs import job_parameter_names_cached, run_model_job
-from src.runs import (fetch_run, job_params, job_state_label, local_time, render_run_panel,
-                      render_runs_section, render_warnings_table)
+from src.runs import (fetch_run, fmt_seconds, job_params, job_state_label, local_time,
+                      render_run_panel, render_runs_section, render_warnings_table,
+                      run_seconds)
 from src.validation import show_input_check, validate_input_data
 
 uuid = str(uuid.uuid4())
@@ -34,9 +36,11 @@ uuid = str(uuid.uuid4())
 #
 # Where files go: nothing is uploaded block by block any more. Run Model saves
 # the datacube, the settings, the prior file (and mapping/share files) into
-# the run's own folder, Secondary Modelling/<BMC>/<run name>/, then starts the
-# job (see projects.py). Every file on the page came either from an upload box
-# ("upload") or from a reused run (its label) - the "origin".
+# the run's own folder, Secondary Modelling/<BMC>/<period> <modelling type>/
+# <run name>/, then starts the job (see projects.py). The run name, when left
+# empty, is taken from the moment Run Model is pressed. Every file on the page
+# came either from an upload box ("upload") or from a reused run (its label) -
+# the "origin".
 
 
 def get_run_id_from_response(response):
@@ -206,6 +210,11 @@ def render_backend_status():
         source = "workspace" if status.get("source") == "workspace" else "local folder"
         st.caption(f"Backend: codebase 1 **{status['version']}**"
                    + (f" from the {source} `{where}`" if full else ""))
+        if full:
+            w = codebase.worker_status()
+            st.caption(f"Worker processes: {w['alive']} of {w['size']} running" if w["on"]
+                       else f"Worker processes: off ({w['reason']}) - the heavy steps "
+                            "run in the app process")
         if status.get("out_of_sync"):
             stale = ", ".join(f"{m} ({s})" for m, s in status["out_of_sync"])
             st.warning("codebase 1 is only partly updated - these modules are from "
@@ -223,19 +232,39 @@ def render_backend_status():
 
 
 # --------------------------------------------------------------------------- #
-# 1. BMC and run - where the run is saved, and the BMC's earlier runs
+# 1. BMC, period and run - where the run is saved, and the BMC's earlier runs
 # --------------------------------------------------------------------------- #
-def _bmc_options():
-    """The BMC folders - listed at most once a minute for everyone."""
+QUARTERS = (1, 2, 3, 4)
+ALL_GROUPS = "All periods and types"
+NO_GROUP = "Before the period folders"
+PERIOD_KEYS = ("period_start_q", "period_start_y", "period_end_q", "period_end_y",
+               "modelling_type")
+
+
+def _standard_names():
+    """codebase 1's standard names - bmc_names.csv and modelling_types.csv."""
+    out = codebase.standard_names()
+    if out.ok and out.value:
+        return out.value
+    return {"bmc_names": [], "modelling_types": [], "problems": list(out.errors)}
+
+
+def _bmc_options(names=None):
+    """(the BMC names to offer, a listing problem or None): the standard names
+    (bmc_names.csv) first, then any other BMC folder that already has runs -
+    the folders listed at most once a minute for everyone."""
+    standard = list((names or _standard_names()).get("bmc_names") or [])
     try:
-        return projects.list_bmcs_shared(), None
+        folders, problem = projects.list_bmcs_shared(), None
     except Exception as e:
-        return [], f"Could not list the BMC folders: {e}"
+        folders, problem = [], f"Could not list the BMC folders: {e}"
+    seen = {n.lower() for n in standard}
+    return standard + sorted(f for f in folders if f.lower() not in seen), problem
 
 
 def _bmc_runs(bmc, force=False):
-    """(runs, read errors) of a BMC, newest first - read at most every 30 s
-    for everyone; `force` reads it again now."""
+    """(runs, read errors) of a BMC - every period and type - newest first,
+    read at most every 30 s for everyone; `force` reads it again now."""
     try:
         return projects.list_runs_shared(bmc, job_state=job_state_label, force=force)
     except Exception as e:
@@ -246,19 +275,129 @@ def _forget_bmc_runs():
     projects.forget_runs()
 
 
+def _year_options():
+    this = _now_local().year
+    years = set(range(this - 8, this + 2))
+    for key in ("period_start_y", "period_end_y"):
+        if isinstance(st.session_state.get(key), int):
+            years.add(st.session_state[key])
+    return sorted(years, reverse=True)
+
+
+def _chosen_group():
+    """(the run group chosen in ① - "2025Q1-2025Q4 Secondary" - or "", and
+    why not)."""
+    values = [st.session_state.get(k) for k in PERIOD_KEYS]
+    if any(v in (None, "") for v in values):
+        return "", ("choose the modelling period (from and to: quarter and year) and the "
+                    "modelling type in ①")
+    sq, sy, eq, ey, kind = values
+    try:
+        return projects.group_name(sy, sq, ey, eq, kind), None
+    except ValueError as e:
+        return "", str(e)
+
+
 def _run_target():
-    """(bmc, run name, problem or None) for the run about to be started."""
+    """{"bmc", "group", "run", "auto", "problem"} for the run about to be
+    started. "run" is "" when the name is automatic - taken from the moment
+    Run Model is pressed."""
     ss = st.session_state
     bmc = str(ss.get("bmc_name") or "").strip()
-    run = str(ss.get("new_run_name") or "")
+    run = str(ss.get("new_run_name") or "").strip()
+    group, group_problem = _chosen_group()
+    out = {"bmc": bmc, "group": group, "run": run, "auto": not run, "problem": None}
     if not bmc:
-        return bmc, run, "choose or type a BMC name in ①"
-    problem = projects.bmc_problem(bmc) or projects.name_problem(run, "run name")
-    if problem:
-        return bmc, run, problem
-    if run in {r["run"] for r in _bmc_runs(bmc)[0]}:
-        return bmc, run, f"'{run}' already exists in {bmc} - choose another run name"
-    return bmc, run, None
+        out["problem"] = ("choose or type a BMC name in ①" if has_full_access()
+                          else "choose a BMC name in ①")
+        return out
+    problem = projects.bmc_problem(bmc)
+    if not problem and not has_full_access() and bmc not in _bmc_options()[0]:
+        problem = (f"'{bmc}' is not one of the team's BMC names (codebase 1's "
+                   "bmc_names.csv) - pick one from the list")
+    problem = problem or group_problem
+    if not problem and run:
+        problem = projects.run_name_problem(run)
+        if not problem and run in {r["run"] for r in _bmc_runs(bmc)[0] if r["group"] == group}:
+            problem = f"'{run}' already exists in {bmc} / {group} - choose another run name"
+    out["problem"] = problem
+    return out
+
+
+def _target_path(t):
+    return (f"Secondary Modelling/{t['bmc']}/{t['group']}/"
+            f"{t['run'] or 'run_<date>-<time> of pressing Run Model'}/")
+
+
+def _datacube_period():
+    """(start year, quarter, end year, quarter) the loaded datacube covers."""
+    summary = getattr(st.session_state.get("datacube_check"), "value", None) or {}
+    try:
+        return (*projects.quarter_of(summary["date_min"]),
+                *projects.quarter_of(summary["date_max"]))
+    except Exception:
+        return None
+
+
+def _render_period_row(names):
+    ss = st.session_state
+    kinds = list(names.get("modelling_types") or [])
+    if ss.get("modelling_type") and ss["modelling_type"] not in kinds:
+        kinds = [ss["modelling_type"]] + kinds         # e.g. from a reused run
+    years = _year_options()
+    c1, c2, c3, c4, c5 = st.columns([1, 1.2, 1, 1.2, 2.4], vertical_alignment="bottom")
+    with c1:
+        st.selectbox("From quarter", QUARTERS, index=None, key="period_start_q",
+                     format_func=lambda q: f"Q{q}", placeholder="Q")
+    with c2:
+        st.selectbox("From year", years, index=None, key="period_start_y",
+                     placeholder="Year")
+    with c3:
+        st.selectbox("To quarter", QUARTERS, index=None, key="period_end_q",
+                     format_func=lambda q: f"Q{q}", placeholder="Q")
+    with c4:
+        st.selectbox("To year", years, index=None, key="period_end_y", placeholder="Year")
+    with c5:
+        st.selectbox("Modelling type", kinds, index=None, key="modelling_type",
+                     placeholder="Choose a type",
+                     help="The kind of model - the team's list (codebase 1's "
+                          "modelling_types.csv). The run is saved under <period> "
+                          "<modelling type>, e.g. 2025Q1-2025Q4 Secondary.")
+    covered = _datacube_period()
+    if covered:
+        sy, sq, ey, eq = covered
+        text = f"The datacube runs from {sy}Q{sq} to {ey}Q{eq}."
+        chosen = tuple(ss.get(k) for k in ("period_start_y", "period_start_q",
+                                           "period_end_y", "period_end_q"))
+        if chosen == covered:
+            st.caption(text + " ✓")
+            return
+        left, right = st.columns([4, 1.6], vertical_alignment="center")
+        with left:
+            st.caption(text)
+        with right:
+            if st.button("Use the datacube's period", key="use_datacube_period",
+                         use_container_width=True):
+                ss.update(_pending_period_start_y=sy, _pending_period_start_q=sq,
+                          _pending_period_end_y=ey, _pending_period_end_q=eq)
+                st.rerun()
+
+
+def _render_note_button():
+    """A small button that opens the run's note - why it runs, what changed."""
+    ss = st.session_state
+    has_note = bool(str(ss.get("run_note") or "").strip())
+    with st.popover("📝 Note ✓" if has_note else "📝 Add note",
+                    help="Why this run - and, when you reuse a run's inputs, what you "
+                         "changed. Saved with the run in ADLS (run_request.json and "
+                         "note.txt in its folder) and shown wherever the run is listed."):
+        st.text_area("Note for this run", key="run_note", max_chars=projects.NOTE_MAX,
+                     height=120,
+                     placeholder="e.g. Reused the Q3 run: TV prior sd 0.3 -> 0.5, holdout "
+                                 "13 -> 8 weeks")
+        source = ss.get("source_run") or {}
+        if source.get("note"):
+            st.caption(f"The note of {source.get('label')}: {source['note']}")
 
 
 @st.fragment
@@ -266,45 +405,58 @@ def _project_fragment():
     ss = st.session_state
     # values chosen by "Reuse inputs" or by a run that just started - set
     # before the widgets exist (a widget's value cannot change afterwards)
-    for key in ("bmc_name", "new_run_name"):
+    for key in ("bmc_name", "new_run_name", "run_note") + PERIOD_KEYS:
         pending = ss.pop(f"_pending_{key}", None)
         if pending is not None:
             ss[key] = pending
             ss["_project_sig"] = None
-    if "new_run_name" not in ss:
-        ss["new_run_name"] = projects.default_run_name(_now_local())
+    ss.setdefault("new_run_name", "")
+    full = has_full_access()
+    names = _standard_names()
 
     with st.container(border=True):
-        bmc, run, problem = _run_target()
-        st.markdown("### ① BMC and run" + ("" if problem else " ✅"))
-        st.caption("Every run is saved in its own folder, Secondary Modelling/<BMC>/<run "
-                   "name>/, with the inputs it used and its outputs. Pick a BMC to see its "
-                   "runs - and reuse one's inputs to change them and run again.")
-        options, list_problem = _bmc_options()
+        target = _run_target()
+        st.markdown("### ① BMC, period and run" + ("" if target["problem"] else " ✅"))
+        st.caption("Every run is saved in its own folder, Secondary Modelling/<BMC>/<period> "
+                   "<modelling type>/<run name>/, with the inputs it used and its outputs. "
+                   "Pick a BMC to see its runs - reuse one's inputs to change them and run "
+                   "again, or mark the run the results were reported from.")
+        options, list_problem = _bmc_options(names)
         current = ss.get("bmc_name")
         if current and current not in options:
             options = [current] + options
-        left, right = st.columns(2)
-        with left:
-            st.selectbox("BMC name", options, index=None, key="bmc_name",
-                         accept_new_options=True,
-                         placeholder="Choose a BMC, or type a new name",
-                         help="A folder under Secondary Modelling. Type a new name to start "
-                              "a new BMC - its folder is created with the first run.")
-        with right:
-            st.text_input("New run name", key="new_run_name",
-                          help="The run's folder inside the BMC. Letters, digits, spaces, "
-                               "_ - and . - and not the name of an earlier run.")
+        st.selectbox("BMC name", options, index=None, key="bmc_name",
+                     accept_new_options=full,
+                     placeholder="Choose a BMC, or type a new name" if full else "Choose a BMC",
+                     help="A folder under Secondary Modelling. "
+                          + ("Type a new name to start a new BMC - its folder is created "
+                             "with the first run." if full else
+                             "The team's BMC names (codebase 1's bmc_names.csv) and the BMCs "
+                             "that already have runs; the team adds new ones."))
+        _render_period_row(names)
+        name_col, note_col = st.columns([5, 1.3], vertical_alignment="bottom")
+        with name_col:
+            st.text_input("Run name (optional)", key="new_run_name",
+                          placeholder="automatic: run_<date>-<time> of pressing Run Model",
+                          help="The run's folder inside its period and modelling type. Left "
+                               "empty, the run is named after the moment you press Run Model "
+                               "(run_20261007-1430). Letters, digits, spaces, _ - and . - and "
+                               "not the name of an earlier run of the same period and type.")
+        with note_col:
+            _render_note_button()
         if list_problem:
             st.warning(list_problem)
-        bmc, run, problem = _run_target()
-        if problem and bmc:
-            st.error(_sentence(problem))
-        elif not problem:
-            st.caption(f"This run will be saved in **Secondary Modelling/{bmc}/{run}/**.")
+        if full:
+            for problem in names.get("problems") or []:
+                st.warning(f"codebase 1's standard names: {problem}")
+        target = _run_target()
+        if target["problem"] and target["bmc"]:
+            st.error(_sentence(target["problem"]))
+        elif not target["problem"]:
+            st.caption(f"This run will be saved in **{_target_path(target)}**.")
 
-        # the Run block reads the BMC and the run name: refresh the page once
-        signature = (bmc, run)
+        # the Run block reads the BMC, the group and the run name: refresh the page once
+        signature = (target["bmc"], target["group"], target["run"])
         before = ss.get("_project_sig")
         ss["_project_sig"] = signature
         if before is not None and before != signature:
@@ -312,12 +464,35 @@ def _project_fragment():
 
         for note in ss.pop("reuse_notes", None) or []:
             st.info(note)
+        bmc = target["bmc"]
         if not bmc or projects.bmc_problem(bmc):
             return
-        _render_bmc_runs(bmc)
+        _render_bmc_runs(bmc, target["group"])
 
 
-def _render_bmc_runs(bmc):
+def _group_sort_key(name):
+    p = projects.parse_group(name) or {}
+    return (p.get("end_year", 0), p.get("end_quarter", 0), p.get("start_year", 0),
+            p.get("start_quarter", 0), name)
+
+
+def _run_times(rows):
+    """The notebook's run time (s) of each finished row - the Jobs API's
+    execution time, as the run's panel shows it (asked once per run and kept
+    an hour for everyone), else the job's own run_info.json - None while a
+    run waits or runs."""
+    def one(r):
+        if r["state"] not in ("success", "failed"):
+            return None
+        return run_seconds(fetch_run(r["job_run_id"]) if r["job_run_id"] else {}, r["info"])
+    if not rows:
+        return []
+    with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
+        return list(pool.map(one, rows))
+
+
+def _render_bmc_runs(bmc, group=""):
+    ss = st.session_state
     rows, errors = _bmc_runs(bmc)
     head, refresh = st.columns([5, 1], vertical_alignment="center")
     with head:
@@ -334,24 +509,66 @@ def _render_bmc_runs(bmc):
     if not rows:
         st.caption(f"No runs in {bmc} yet - this run will be its first.")
         return
+    options = ([ALL_GROUPS]
+               + sorted({r["group"] for r in rows if r["group"]}, key=_group_sort_key,
+                        reverse=True)
+               + ([NO_GROUP] if any(not r["group"] for r in rows) else []))
+    # the list follows the period and type chosen above (until you pick another)
+    if ss.get("_bmc_runs_follow") != (bmc, group):
+        ss["_bmc_runs_follow"] = (bmc, group)
+        ss["bmc_runs_group"] = group if group in options else ALL_GROUPS
+    if ss.get("bmc_runs_group") not in options:
+        ss["bmc_runs_group"] = ALL_GROUPS
+    shown_group = st.selectbox(
+        "Show the runs of", options, key="bmc_runs_group",
+        help="One period and modelling type - its reported run is marked "
+             f"{projects.REPORTED_BADGE} - or all of them. '{NO_GROUP}' lists the runs "
+             "saved directly under the BMC, before runs were sorted by period.")
+    shown = [r for r in rows if shown_group == ALL_GROUPS
+             or (shown_group == NO_GROUP and not r["group"]) or r["group"] == shown_group]
+    if shown_group not in (ALL_GROUPS, NO_GROUP):
+        reported = next((r for r in shown if r["reported"]), None)
+        if reported:
+            by = (f" - marked by {reported['reported_by']}" if reported["reported_by"] else "")
+            st.caption(f"{projects.REPORTED_BADGE}: the results of {shown_group} were reported "
+                       f"from **{reported['run']}**{by}. The other runs are in its "
+                       f"{projects.archived_folder()} folder.")
+        elif shown:
+            st.caption(f"No run of {shown_group} is marked as reported yet - open a finished "
+                       "run below to mark it.")
+    if not shown:
+        st.caption(f"No runs in {shown_group} yet - this run will be its first.")
+        return
+    times = _run_times(shown)
     table = pd.DataFrame([{
+        "period · type": r["group"] or "–",
         "run": r["run"],
+        "reported": (projects.REPORTED_BADGE if r["reported"]
+                     else projects.ARCHIVED_BADGE if r["archived"] else ""),
         "status": r["status"],
+        "run time": fmt_seconds(seconds),
         "submitted": local_time(r["submitted_ms"]),
         "by": r["submitted_by"],
+        "note": r["note"],
         "reused from": r["source"],
         "changed": ", ".join(r["changed"]),
-    } for r in rows])
+    } for r, seconds in zip(shown, times)])
     event = st.dataframe(table, use_container_width=True, hide_index=True,
                          on_select="rerun", selection_mode="single-row",
-                         key=f"bmc_runs_table_{_sha(bmc.encode())[:8]}")
+                         key=f"bmc_runs_table_{_sha(f'{bmc}|{shown_group}'.encode())[:8]}",
+                         column_config={"note": st.column_config.TextColumn(
+                             "note", help="The modeller's note - why the run was made, what "
+                                          "changed. Open the run to read all of it.")})
+    st.caption("Run time = the notebook's own time (not the time queued or starting the "
+               "cluster).")
     picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])
     if not picked:
-        st.caption("Select a run to see its results, job log and zip - or to reuse its inputs.")
+        st.caption("Select a run to see its results, job log and zip - to reuse its inputs, "
+                   "or to mark it as the reported run.")
         return
-    chosen = rows[picked[0]]
-    render_run_panel(projects.make_ref(chosen["job_run_id"], bmc, chosen["run"]), "bmc",
-                     on_reuse=reuse_run)
+    chosen = shown[picked[0]]
+    render_run_panel(projects.make_ref(chosen["job_run_id"], bmc, chosen["run"], chosen["group"]),
+                     "bmc", on_reuse=reuse_run)
 
 
 def _fingerprints():
@@ -364,10 +581,11 @@ def _fingerprints():
             "share_file": projects.sha(ss.get("share_bytes")) if ss.get("share_bytes") else ""}
 
 
-def _remember_source(ref, label):
+def _remember_source(ref, label, note=""):
     st.session_state["source_run"] = {
         "ref": dict(ref), "label": label, "fingerprints": _fingerprints(),
-        "config": copy.deepcopy(st.session_state.get("cfg_values") or {})}
+        "config": copy.deepcopy(st.session_state.get("cfg_values") or {}),
+        "note": str(note or "")}
 
 
 def _changes_since_source():
@@ -400,10 +618,12 @@ def reuse_run(ref):
     into the page - to edit and run again as a NEW run."""
     ss = st.session_state
     label = projects.ref_label(ref)
+    request = {}
     with st.spinner(f"Loading the inputs of {label} ..."):
         try:
             if projects.has_folder(ref):
-                paths = projects.run_inputs(ref, request=projects.read_request(ref["bmc"], ref["run"]))
+                request = projects.read_request(ref["bmc"], ref["run"], projects.ref_group(ref))
+                paths = projects.run_inputs(ref, request=request)
             else:
                 paths = projects.run_inputs(ref, job_params=job_params(fetch_run(ref.get("job_run_id"))))
             got, errors = projects.fetch_files(paths)
@@ -448,15 +668,28 @@ def reuse_run(ref):
             _check_side(kind, ss.get("datacube_df"), cfg)   # now, not on a later refresh
         else:
             _clear_side(kind)
-    _remember_source(ref, label)
+    _remember_source(ref, label, note=request.get("note"))
     if projects.has_folder(ref):
-        taken = {r["run"] for r in _bmc_runs(ref["bmc"])[0]}
+        group = projects.ref_group(ref)
         ss["_pending_bmc_name"] = ref["bmc"]
-        ss["_pending_new_run_name"] = projects.next_free_name(ref["run"], taken)
+        parts = projects.parse_group(group) if group else None
+        if parts:                           # the same period and type
+            ss.update(_pending_period_start_y=parts["start_year"],
+                      _pending_period_start_q=parts["start_quarter"],
+                      _pending_period_end_y=parts["end_year"],
+                      _pending_period_end_q=parts["end_quarter"],
+                      _pending_modelling_type=parts["modelling_type"])
+        if projects.is_auto_run_name(ref["run"]):
+            ss["_pending_new_run_name"] = ""            # named when Run Model is pressed
+        else:
+            taken = {r["run"] for r in _bmc_runs(ref["bmc"])[0] if r["group"] == group}
+            ss["_pending_new_run_name"] = projects.next_free_name(ref["run"], taken)
+    ss["_pending_run_note"] = ""            # a new run, a new note
     ss.pop("gen_result", None)              # a generated file belongs to other inputs
     notes.insert(0, f"Loaded the inputs of **{label}** - datacube, settings, prior file"
                  + ("".join(f", {k} file" for k in ("mapping", "share") if f"{k}_file" in got))
-                 + ". Change what you need below, then Run Model saves them as a new run.")
+                 + ". Change what you need below, then Run Model saves them as a new run"
+                 + " - and say what you changed in its 📝 note.")
     ss["reuse_notes"] = notes
     st.rerun()
 
@@ -1082,9 +1315,9 @@ def _job_parameters():
 
 def _readiness():
     ss = st.session_state
-    bmc, run, problem = _run_target()
-    ready = {"BMC and run name": (problem is None,
-                                  problem or f"Secondary Modelling/{bmc}/{run}/")}
+    target = _run_target()
+    ready = {"BMC, period and run name": (target["problem"] is None,
+                                          target["problem"] or _target_path(target))}
     ready["Input data checked"] = (ss.get("datacube_bytes") is not None
                                    and bool(ss.get("datacube_ok")),
                                    ss.get("datacube_name", ""))
@@ -1104,9 +1337,12 @@ def _readiness():
                     " ".join(against.errors)[:300]
         ready[f"{label} valid"] = (ok, note)
     params = _job_parameters()
-    if params is not None and not {"bmc_name", "run_name"} <= params:
-        ready["The job has the parameters bmc_name and run_name"] = (
-            False, "add both to the job's Job parameters, default empty - see changes.md")
+    needed = ("bmc_name", "run_group", "run_name")
+    missing = [p for p in needed if params is not None and p not in params]
+    if missing:
+        ready[f"The job has the parameter{'s' if len(missing) > 1 else ''} "
+              f"{', '.join(missing)}"] = (
+            False, "add to the job's Job parameters, default empty - see changes.md")
     return ready
 
 
@@ -1127,19 +1363,24 @@ def _confirm_unchanged(label):
 
 
 def _start_run():
-    """Save the inputs into the run's folder, record the request, start the job."""
+    """Save the inputs into the run's folder, record the request, start the job.
+
+    The run name, when left empty, is the moment of this click. Saving and
+    starting hold the group's lock, so a reporting mark never moves the
+    group's folders while a run is being created in it."""
     ss = st.session_state
-    bmc, run, problem = _run_target()
-    if problem:
-        st.error(_sentence(problem))
+    target = _run_target()
+    if target["problem"]:
+        st.error(_sentence(target["problem"]))
         return None
+    bmc, group = target["bmc"], target["group"]
     cfg = ss.get("cfg_values")
     enforce_fixed(cfg, ss.get("cfg_base") or {})     # the team's fixed settings, always
     check = codebase.validate_config(cfg)
     if not check.ok:
         st.error("The settings are not valid: " + " | ".join(check.errors))
         return None
-    config_text = codebase.config_yaml(cfg, only=access()["editable"])
+    config_text = codebase.config_yaml(cfg, only=access()["allowed"])
     if not config_text.ok:
         st.error("The settings could not be written: " + " | ".join(config_text.errors))
         return None
@@ -1158,73 +1399,87 @@ def _start_run():
     source = None
     if src:
         ref = src.get("ref") or {}
-        source = {"bmc": ref.get("bmc"), "run": ref.get("run"),
+        source = {"bmc": ref.get("bmc"), "group": ref.get("group"), "run": ref.get("run"),
                   "job_run_id": ref.get("job_run_id")}
     job_id = os.environ.get("MDR_JOB_ID", "")
-    try:
-        if projects.run_exists(bmc, run):
-            _forget_bmc_runs()
-            st.error(f"{bmc} / {run} already exists - choose another run name.")
-            return None
-        with st.spinner(f"Saving the inputs to Secondary Modelling/{bmc}/{run}/ ..."):
-            names = projects.save_inputs(bmc, run, files)
-            request = projects.new_request(
-                bmc, run, names, user=_user_email(), source=source,
-                changed=changes[1] if changes else None, job_id=job_id,
-                app_codebase=codebase.status().get("version", ""))
-            request["role"] = role()
-            if changes and changes[2]:
-                request["changed_settings"] = [f"{c['setting']}: {c['before']} → {c['after']}"
-                                               for c in changes[2]]
-            projects.write_request(bmc, run, request)
-    except Exception as e:
-        st.error(f"The inputs could not be saved to ADLS: {e}")
-        return None
-    try:
-        with st.spinner("Starting the model job ..."):
-            response = run_model_job(
-                prior_file=names["prior_file"],
-                data_file=names["data_file"],
-                job_id=job_id,
-                config_file=names["config_file"],
-                mapping_file=names.get("mapping_file", ""),
-                share_file=names.get("share_file", ""),
-                bmc_name=bmc,
-                run_name=run,
-            )
-            payload = response.json()
-    except Exception as e:
-        payload = {"message": str(e)}
-    run_id = get_run_id_from_response(payload)
-    _forget_bmc_runs()
-    if not run_id:
-        message = str(payload.get("message") or payload.get("error") or payload) \
-            if isinstance(payload, dict) else str(payload)
-        request.update(job_error=message, state="not started")
+    note = projects.clean_note(ss.get("run_note"))
+    with projects.group_lock(bmc, group):
         try:
-            projects.write_request(bmc, run, request)
-        except Exception:
-            pass
-        # the folder now holds this attempt's inputs, so its name is taken:
-        # propose the next one and say what happened on the refreshed page
-        ss["run_start_error"] = (f"The job did not start: {message}. The inputs are saved "
-                                 f"in {bmc} / {run} (listed as not started); fix the "
-                                 "problem, then press Run Model again - a new run name "
-                                 "is proposed.")
-        ss["_pending_new_run_name"] = projects.next_free_name(run, {run})
-        st.rerun()
-    request.update(job_run_id=str(run_id), state="submitted")
-    try:
-        projects.write_request(bmc, run, request)
-    except Exception as e:
-        st.warning(f"The run started, but its run_request.json could not be updated: {e}")
-    ss["current_run"] = projects.make_ref(run_id, bmc, run)
+            taken = projects.taken_run_names(bmc, group)
+            # an empty name is the moment of this click (run_<date>-<time>)
+            run = target["run"] or projects.free_run_name(
+                projects.default_run_name(_now_local()), taken)
+            where = f"{bmc} / {group} / {run}"
+            if run in taken:
+                _forget_bmc_runs()
+                st.error(f"{where} already exists - choose another run name.")
+                return None
+            with st.spinner(f"Saving the inputs to Secondary Modelling/{bmc}/{group}/{run}/ ..."):
+                names = projects.save_inputs(bmc, run, files, group=group)
+                request = projects.new_request(
+                    bmc, run, names, user=_user_email(), source=source,
+                    changed=changes[1] if changes else None, job_id=job_id,
+                    app_codebase=codebase.status().get("version", ""), group=group,
+                    note=note)
+                request["role"] = role()
+                if changes and changes[2]:
+                    request["changed_settings"] = [f"{c['setting']}: {c['before']} → {c['after']}"
+                                                   for c in changes[2]]
+                projects.write_request(bmc, run, request, group=group)
+                projects.write_note(bmc, run, note, group=group)
+        except Exception as e:
+            st.error(f"The inputs could not be saved to ADLS: {e}")
+            return None
+        try:
+            with st.spinner("Starting the model job ..."):
+                response = run_model_job(
+                    prior_file=names["prior_file"],
+                    data_file=names["data_file"],
+                    job_id=job_id,
+                    config_file=names["config_file"],
+                    mapping_file=names.get("mapping_file", ""),
+                    share_file=names.get("share_file", ""),
+                    bmc_name=bmc,
+                    run_name=run,
+                    run_group=group,
+                )
+                payload = response.json()
+        except Exception as e:
+            payload = {"message": str(e)}
+        run_id = get_run_id_from_response(payload)
+        _forget_bmc_runs()
+        if not run_id:
+            message = str(payload.get("message") or payload.get("error") or payload) \
+                if isinstance(payload, dict) else str(payload)
+            request.update(job_error=message, state="not started")
+            try:
+                projects.write_request(bmc, run, request, group=group)
+            except Exception:
+                pass
+            # the folder now holds this attempt's inputs, so its name is taken:
+            # propose the next one (or a new moment) and say what happened on
+            # the refreshed page
+            ss["run_start_error"] = (f"The job did not start: {message}. The inputs are saved "
+                                     f"in {where} (listed as not started); fix the problem, "
+                                     "then press Run Model again"
+                                     + (" - a new run name is proposed." if not target["auto"]
+                                        else "."))
+            ss["_pending_new_run_name"] = ("" if target["auto"]
+                                           else projects.next_free_name(run, {run}))
+            st.rerun()
+        request.update(job_run_id=str(run_id), state="submitted")
+        try:
+            projects.write_request(bmc, run, request, group=group)
+        except Exception as e:
+            st.warning(f"The run started, but its run_request.json could not be updated: {e}")
+    ss["current_run"] = projects.make_ref(run_id, bmc, run, group)
     ss["last_run_id"] = str(run_id)
     ss.pop("recent_runs", None)
     # the run just started is now what "changed since" compares with
-    _remember_source(ss["current_run"], f"{bmc} / {run}")
-    ss["_pending_new_run_name"] = projects.next_free_name(run, {run})
-    st.toast(f"Run {bmc} / {run} started (job run {run_id}).")
+    _remember_source(ss["current_run"], where, note=note)
+    ss["_pending_new_run_name"] = "" if target["auto"] else projects.next_free_name(run, {run})
+    ss["_pending_run_note"] = ""
+    st.toast(f"Run {where} started (job run {run_id}).")
     st.rerun()
 
 
@@ -1285,9 +1540,9 @@ def render_input_upload_section():
         header_left, header_right = st.columns([3, 1])
         with header_left:
             st.markdown("### Model Setup")
-            st.caption("① choose the BMC and name the run · ② datacube · ③ settings · "
-                       "④ mapping/share files · ⑤ prior file · ⑥ run. A run's inputs can "
-                       "be reused from any earlier run.")
+            st.caption("① choose the BMC, the period and the modelling type · ② datacube · "
+                       "③ settings · ④ mapping/share files · ⑤ prior file · ⑥ run. A run's "
+                       "inputs can be reused from any earlier run.")
             render_backend_status()
         with header_right:
             render_cluster_status_controls()

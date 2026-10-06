@@ -6,14 +6,25 @@ the logic lives here so it can be tested on a laptop without Databricks.
 
 Where the files are
 -------------------
-Every run has its own folder, one per BMC and run name, holding its inputs
-and its outputs together:
+Every run has its own folder, holding its inputs and its outputs together,
+under its BMC and its RUN GROUP - the modelling period and the modelling type,
+e.g. "2025Q1-2025Q4 Secondary" (`group_name`):
 
-    <base_path>/<bmc_name>/<run_name>/
-        run_request.json               written by the web app: who, when, reused from
+    <base_path>/<bmc_name>/<run_group>/<run_name>/
+        run_request.json               written by the web app: who, when, why (note),
+                                       reused from
         Config/  Data/  Prior/         the run's inputs (Mapping/ and Share/ when used)
         Outputs/                       written here: the stage folders, run_info.json,
                                        job_log.txt, app_config.yaml
+
+A new run always starts directly under its group. When a modeller marks the
+run the results were REPORTED from, the web app moves that run folder into
+`<run_group>/Results Reported/` and the group's other runs into
+`<run_group>/Archived/` - only while none of the group's runs is running, so a
+job never loses its folder. The job itself never moves anything.
+
+Runs made before the run groups existed sit directly under the BMC
+(`<base_path>/<bmc_name>/<run_name>/`); a blank `run_group` still runs there.
 
 `base_path` is the mount the original notebook used, the web app's ADLS root
 `Secondary Modelling` as the cluster sees it:
@@ -23,7 +34,7 @@ and its outputs together:
 A Unity Catalog volume path (`/Volumes/<catalog>/<schema>/<volume>/...`)
 works the same way - pass it as the `base_path` job parameter.
 
-With `bmc_name` and `run_name` both blank, the old shared layout is used:
+With `bmc_name` and `run_name` both blank, the oldest, shared layout is used:
 inputs from `<base_path>/<Folder>/<name>`, outputs to
 `<base_path>/Outputs/<run_id>` (runs made before the run folders existed, and
 hand runs).
@@ -49,7 +60,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.06.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
 
 import contextlib
 import copy
@@ -85,7 +96,17 @@ SHARED_FOLDERS = tuple(FOLDERS.values()) + (OUTPUT_FOLDER,)
 
 # the job parameters demo.ipynb defines as widgets, all blank by default
 PARAMS = ("config_file", "data_file", "prior_file", "mapping_file",
-          "share_file", "run_id", "base_path", "bmc_name", "run_name")
+          "share_file", "run_id", "base_path", "bmc_name", "run_name", "run_group")
+
+# a run group's two folders for the runs the web app has sorted (see above) -
+# never a run name
+REPORTED_FOLDER = "Results Reported"
+ARCHIVED_FOLDER = "Archived"
+GROUP_FOLDERS = (REPORTED_FOLDER, ARCHIVED_FOLDER)
+
+# the standard names, one CSV each in this folder - the web app offers only these
+BMC_NAMES_FILE = "bmc_names.csv"
+MODELLING_TYPES_FILE = "modelling_types.csv"
 
 # A BMC or run name is ONE folder level: letters, digits, spaces, _ - and .,
 # starting with a letter or digit and not ending in a space or a dot (ADLS
@@ -146,19 +167,118 @@ def bmc_problem(name: str) -> str | None:
     return None
 
 
-def run_folder(base_path: str, bmc_name: str, run_name: str) -> str | None:
-    """`<base_path>/<bmc_name>/<run_name>`, or None for the old shared layout
-    (both blank). Raises ValueError for one without the other or a bad name."""
+def run_name_problem(name: str) -> str | None:
+    """name_problem for a run name, which also must not be a group folder."""
+    problem = name_problem(name, "run name")
+    if problem:
+        return problem
+    if str(name).lower() in {f.lower() for f in GROUP_FOLDERS}:
+        return (f"'{name}' is the name of a run group's folder "
+                f"({', '.join(GROUP_FOLDERS)}) - pick another run name")
+    return None
+
+
+# "2025Q1-2025Q4 Secondary": the first and last quarter modelled, and the type
+_GROUP_RE = re.compile(r"(\d{4})Q([1-4])-(\d{4})Q([1-4]) (\S.*)")
+
+
+def group_name(start_year: int, start_quarter: int, end_year: int,
+               end_quarter: int, modelling_type: str) -> str:
+    """The run group folder for a modelling period and type, e.g.
+    group_name(2025, 1, 2025, 4, "Secondary") -> "2025Q1-2025Q4 Secondary".
+    Raises ValueError when the period runs backwards or the name is not a
+    folder name (see group_problem)."""
+    name = (f"{int(start_year):04d}Q{int(start_quarter)}-"
+            f"{int(end_year):04d}Q{int(end_quarter)} {str(modelling_type or '').strip()}")
+    problem = group_problem(name)
+    if problem:
+        raise ValueError(problem)
+    return name
+
+
+def parse_group(name: str) -> dict | None:
+    """The parts of a run group name - {start_year, start_quarter, end_year,
+    end_quarter, modelling_type} - or None when `name` is not one (a run
+    folder of the older layout, for instance)."""
+    m = _GROUP_RE.fullmatch(str(name or ""))
+    if not m:
+        return None
+    sy, sq, ey, eq, kind = m.groups()
+    return {"start_year": int(sy), "start_quarter": int(sq), "end_year": int(ey),
+            "end_quarter": int(eq), "modelling_type": kind}
+
+
+def group_problem(name: str) -> str | None:
+    """Why `name` cannot be a run group folder - None when it can. A group is
+    "<start>-<end> <modelling type>", quarters as 2025Q1, end not before start."""
+    problem = name_problem(name, "run group")
+    if problem:
+        return problem
+    parts = parse_group(name)
+    if parts is None:
+        return (f"the run group '{name}' must read like '2025Q1-2025Q4 Secondary': the "
+                "first and the last quarter modelled, a space, the modelling type")
+    if (parts["end_year"], parts["end_quarter"]) < (parts["start_year"],
+                                                    parts["start_quarter"]):
+        return f"the run group '{name}' ends before it starts"
+    return None
+
+
+def run_folder(base_path: str, bmc_name: str, run_name: str,
+               run_group: str = "") -> str | None:
+    """`<base_path>/<bmc_name>/<run_group>/<run_name>` - or, with no group,
+    `<base_path>/<bmc_name>/<run_name>` (runs made before the groups) - or
+    None for the old shared layout (everything blank). Raises ValueError for a
+    BMC without a run name (or the reverse), a group without both, or a bad
+    name."""
     bmc, run = str(bmc_name or "").strip(), str(run_name or "").strip()
+    group = str(run_group or "").strip()
     if not bmc and not run:
+        if group:
+            raise ValueError(f"run_group={group!r} needs bmc_name and run_name")
         return None
     if not (bmc and run):
         raise ValueError("bmc_name and run_name go together - set both or neither "
                          f"(got bmc_name={bmc!r}, run_name={run!r})")
-    for problem in (bmc_problem(bmc), name_problem(run, "run name")):
+    for problem in (bmc_problem(bmc), run_name_problem(run),
+                    group_problem(group) if group else None):
         if problem:
             raise ValueError(problem)
-    return os.path.join(base_path, bmc, run)
+    return os.path.join(base_path, bmc, group, run) if group else os.path.join(
+        base_path, bmc, run)
+
+
+def read_names(path: str, column: str) -> list:
+    """The standard names in a one-column CSV (`bmc_names.csv`,
+    `modelling_types.csv`): the `column` column (or the first one; a file
+    without the header line is read as names only), in file order - blanks,
+    repeats and lines starting with # dropped. Raises ValueError for a name
+    that cannot be a folder name, so a bad list is caught where it is
+    written."""
+    import csv
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        rows = [r for r in csv.reader(fh) if r and r[0].strip()
+                and not r[0].strip().startswith("#")]
+    if not rows:
+        return []
+    header = [h.strip().lower() for h in rows[0]]
+    has_header = column in header or header[0] in (column.replace("_", " "), "name")
+    col = header.index(column) if column in header else 0
+    names, seen, problems = [], set(), []
+    for r in (rows[1:] if has_header else rows):
+        name = r[col].strip() if col < len(r) else ""
+        if not name or name.lower() in seen:
+            continue
+        problem = (bmc_problem(name) if column == "bmc_name"
+                   else name_problem(name, column.replace("_", " ")))
+        if problem:
+            problems.append(problem)
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    if problems:
+        raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
+    return names
 
 
 def effective_config(raw: dict | None, params: dict, base_path: str,
@@ -175,7 +295,8 @@ def effective_config(raw: dict | None, params: dict, base_path: str,
     run_id = params["run_id"]
     if not run_id:
         raise ValueError("effective_config needs params['run_id']")
-    root = run_folder(base_path, params["bmc_name"], params["run_name"]) or base_path
+    root = run_folder(base_path, params["bmc_name"], params["run_name"],
+                      params["run_group"]) or base_path
     cfg = copy.deepcopy(raw or {})
     if not isinstance(cfg, dict):
         raise ValueError("the config must be a mapping of sections")
@@ -343,7 +464,8 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     RE-RAISED, so the Databricks job fails with the real error.
 
     With `bmc_name` and `run_name` set, the inputs come from, and the outputs
-    go to, `<base_path>/<bmc_name>/<run_name>/` (see the module docstring).
+    go to, `<base_path>/<bmc_name>/<run_group>/<run_name>/` (see the module
+    docstring; without a `run_group`, `<base_path>/<bmc_name>/<run_name>/`).
     A bad name is an error of the run like any other - recorded and published
     to the old shared `Outputs/<run_id>`, never to a path built from it.
 
@@ -365,7 +487,7 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     copier = copier or copy_tree
 
     try:
-        root = run_folder(base_path, p["bmc_name"], p["run_name"])
+        root = run_folder(base_path, p["bmc_name"], p["run_name"], p["run_group"])
         folder_error = None
     except ValueError as e:
         root, folder_error = None, e
@@ -380,7 +502,8 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     published = (os.path.join(root, OUTPUT_FOLDER) if root
                  else os.path.join(base_path, OUTPUT_FOLDER, run_id))
     info = {"status": "running", "run_id": run_id,
-            "bmc_name": p["bmc_name"], "run_name": p["run_name"], "run_folder": root,
+            "bmc_name": p["bmc_name"], "run_group": p["run_group"],
+            "run_name": p["run_name"], "run_folder": root,
             "codebase": mmm.__version__, "config_source": cfg_src,
             "params": p, "local_dir": run_dir,
             "output_dir": published if publish else run_dir,
@@ -388,6 +511,8 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     request = _read_request(root)
     if request.get("submitted_by"):
         info["submitted_by"] = request["submitted_by"]
+    if request.get("note"):
+        info["note"] = str(request["note"])
     error = None
     log_path = os.path.join(run_dir, LOG_FILE)
     every = LIVE_LOG_SECONDS if live_log_every is None else live_log_every
@@ -403,9 +528,13 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
             if folder_error is not None:
                 raise folder_error
             if root:
-                print(f"[app_job] run      {p['bmc_name']} / {p['run_name']}  ->  {root}"
+                where = " / ".join(x for x in (p["bmc_name"], p["run_group"], p["run_name"])
+                                   if x)
+                print(f"[app_job] run      {where}  ->  {root}"
                       + (f"  (submitted by {request['submitted_by']})"
                          if request.get("submitted_by") else ""))
+                if request.get("note"):
+                    print(f"[app_job] note     {request['note']}")
             print(f"[app_job] config   {cfg_src}")
             with open(cfg_src, encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}

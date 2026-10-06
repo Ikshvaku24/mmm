@@ -3,29 +3,39 @@
 # People are named by their Databricks login e-mail - the one shown in the
 # app's top-right corner. Case and spaces do not matter.
 #
-# There are three roles:
+# There are four levels, most rights first:
 #
-#   full_access          EVERYTHING: change every config.yaml setting, and see the
-#                        admin tools nobody else sees - "Reload codebase 1", the
-#                        backend folder, "Open in Databricks" on a run.
-#   config_full_access   change every config.yaml setting (no admin tools).
-#   everyone else        an ANALYST: changes only the settings under `editable`.
+#   full_access              EVERYTHING: change every config.yaml setting, name a
+#                            NEW BMC (anyone else picks one from bmc_names.csv),
+#                            and the admin tools nobody else sees - "Reload
+#                            codebase 1", the backend folder, "Open in Databricks"
+#                            on a run.
+#   config_full_access       change every config.yaml setting (no admin tools).
+#   config_advanced_access   change the settings under `editable` AND, behind the
+#                            "Advanced options" switch, the ones under `advanced`.
+#   everyone else            "editable only": change the settings under
+#                            `editable` - no Advanced options switch.
 #
-# What an analyst may not change stays at its value in this folder's
+# What a person may not change stays at its value in this folder's
 # config.yaml - also when they load another config.yaml (the file's other
-# settings are ignored) or reuse an older run. The config.yaml saved in a
-# run's folder then holds only the settings that person may change; the job
-# fills the rest in from this folder's config.yaml.
+# settings are ignored) or reuse an older run. The same limit applies to the
+# config.yaml they download and to the one saved in a run's folder: it holds
+# only the settings that person may change, and the job fills the rest in from
+# this folder's config.yaml.
 #
 # The app reads this file with the rest of codebase 1: re-upload the folder
-# and the app follows within 5 minutes. No app redeploy.
+# and the app follows within 5 minutes - or at once for anyone who reloads the
+# page. No app redeploy.
 
 full_access:
   - ikshvaku.x.rastogi@haleon.com
 
 config_full_access: []
 
-# What an ANALYST may change in Model settings. Only these get a widget.
+config_advanced_access: []
+
+# What EVERYONE (levels 3 and 4) may change in Model settings. Only these get
+# a widget.
 # * A setting codebase 1 adds later stays fixed until you list it here.
 # * A section can be opened whole:       sampler: all
 # * Everything can be opened at once:    editable: all
@@ -59,6 +69,38 @@ editable:
   cv:
     - enabled
 
-# true: an analyst sees the settings they may not change, read-only, with
-# their values ("Fixed by the team"). false: those are not shown.
+# What config_advanced_access people may change ON TOP of `editable` - the
+# settings needed once in a while. Same rules as `editable` (a setting listed
+# in both counts as editable). Shown under "Advanced options".
+advanced:
+  model:
+    - fourier_period_days
+    - alpha_prior_sd
+    - alpha_regional_sd
+    - pool_sigma
+  run:
+    - dv_scale
+    - dv_scale_scope
+    - scaling_window
+    - cadence
+  sampler:
+    - chains
+    - seed
+  cv:
+    - n_folds
+    - horizon
+    - min_train_periods
+
+# true: a person sees the settings they may not change, read-only, with their
+# values ("Fixed by the team"). false: those are not shown.
 show_fixed: false
+
+# Which levels may mark the run a period's results were REPORTED from (and
+# change that mark later). Marking moves that run's folder into
+# "Results Reported/" and the other runs of the same BMC, period and modelling
+# type into "Archived/". Levels: full_access, config_full_access,
+# config_advanced_access, editable_only (everyone else).
+mark_reported:
+  - full_access
+  - config_full_access
+  - config_advanced_access

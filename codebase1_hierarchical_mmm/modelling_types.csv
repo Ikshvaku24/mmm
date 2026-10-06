@@ -1,0 +1,9 @@
+# modelling_types.csv - the modelling types the BRIDGE web app offers (one per line, under the header).
+# A run is saved under Secondary Modelling/<BMC>/<period> <modelling type>/<run name>/,
+# e.g. "2025Q1-2025Q4 Secondary". Everyone picks from this list.
+# A name is a folder name: letters, digits, spaces, _ - and ., at most 80 characters.
+# Lines starting with # are ignored. Re-upload the folder; the app follows within 5 minutes.
+modelling_type
+LTE
+Primary
+Secondary

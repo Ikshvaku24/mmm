@@ -26,6 +26,9 @@ ALL = "All regions"
 PORTFOLIO = "__portfolio__"
 BASELINE_CORE = "Baseline core"
 OTHER = "Other"
+# variables with no pillar in the prior file - codebase 1 reports them as
+# "Unassigned" (a blank cell is read the same way): ONE group, last, in grey
+UNASSIGNED = "Unassigned"
 
 # categorical slots, in the validated order (adjacent-pair CVD and
 # normal-vision checks pass in both modes; light slots 3-5 are below 3:1 on
@@ -65,6 +68,11 @@ def _num(v):
 
 def _text(v) -> str:
     return "" if v is None or (isinstance(v, float) and math.isnan(v)) else str(v).strip()
+
+
+def _pillar(v) -> str:
+    """A variable's pillar - "Unassigned" when the prior file gave it none."""
+    return _text(v) or UNASSIGNED
 
 
 # --------------------------------------------------------------------------- #
@@ -155,18 +163,19 @@ def pillar_order(summary: pd.DataFrame) -> list:
             d = d[d["row_type"].astype(str) == "component"]
     d = d[~d["feature"].astype(str).str.startswith("__")]
     size = (pd.to_numeric(d["volume"], errors="coerce").abs()
-            .groupby(d["pillar"].map(_text).replace("", OTHER)).sum())
-    order = [p for p in size.sort_values(ascending=False, kind="stable").index if p != OTHER]
-    return order + ([OTHER] if OTHER in size.index else [])
+            .groupby(d["pillar"].map(_pillar)).sum())
+    order = [p for p in size.sort_values(ascending=False, kind="stable").index
+             if p not in (OTHER, UNASSIGNED)]
+    return order + [p for p in (UNASSIGNED, OTHER) if p in size.index]
 
 
 def colour_map(pillars: list, mode: str = "light") -> dict:
     """{pillar: colour}: the first MAX_COLOURED pillars take the categorical
-    slots in order; the rest - and "Other" - share the muted grey; the
-    baseline core is the recessive neutral."""
+    slots in order; the rest - and "Other" and "Unassigned" - share the muted
+    grey; the baseline core is the recessive neutral."""
     slots, ink = SERIES[mode], INK[mode]
-    named = [p for p in pillars if p != OTHER]
-    out = {BASELINE_CORE: ink["neutral"], OTHER: ink["muted"]}
+    named = [p for p in pillars if p not in (OTHER, UNASSIGNED)]
+    out = {BASELINE_CORE: ink["neutral"], OTHER: ink["muted"], UNASSIGNED: ink["muted"]}
     for i, p in enumerate(named):
         out[p] = slots[i] if i < MAX_COLOURED else ink["muted"]
     return out
@@ -174,10 +183,14 @@ def colour_map(pillars: list, mode: str = "light") -> dict:
 
 def shown_groups(pillars: list) -> list:
     """The decomposition's series: the coloured pillars, then "Other" when
-    anything folds into it."""
-    named = [p for p in pillars if p != OTHER]
+    anything folds into it (pillars past the colours - and then "Unassigned"
+    too, so two grey series never sit side by side), else "Unassigned" when
+    there is one."""
+    named = [p for p in pillars if p not in (OTHER, UNASSIGNED)]
     keep = named[:MAX_COLOURED]
-    return keep + ([OTHER] if len(named) > MAX_COLOURED or OTHER in pillars else [])
+    if len(named) > MAX_COLOURED or OTHER in pillars:
+        return keep + [OTHER]
+    return keep + ([UNASSIGNED] if UNASSIGNED in pillars else [])
 
 
 # --------------------------------------------------------------------------- #
@@ -210,8 +223,7 @@ def contribution_bars(summary: pd.DataFrame, region: str = PORTFOLIO, period: st
     body = d[~special]
     bars = pd.DataFrame({
         "feature": body["feature"].astype(str).values,
-        "pillar": body["pillar"].map(_text).replace("", OTHER).values if "pillar" in body
-        else OTHER,
+        "pillar": body["pillar"].map(_pillar).values if "pillar" in body else UNASSIGNED,
         "pct": pd.to_numeric(body["contribution_pct"], errors="coerce").values,
         "volume": pd.to_numeric(body["volume"], errors="coerce").values,
     })
@@ -232,6 +244,40 @@ def by_pillar(bars: pd.DataFrame) -> pd.DataFrame:
         ["feature", "pillar", "pct", "volume"]]
 
 
+def pillar_rows(bars: pd.DataFrame) -> pd.DataFrame:
+    """One row per pillar, largest first: pillar, pct, volume, n (variables).
+    "Unassigned" - the variables without a pillar - comes last."""
+    if bars.empty:
+        return pd.DataFrame(columns=["pillar", "pct", "volume", "n"])
+    out = (bars.groupby("pillar", as_index=False)
+           .agg(pct=("pct", "sum"), volume=("volume", "sum"), n=("feature", "size")))
+    out["_last"] = out["pillar"].isin([UNASSIGNED, OTHER])
+    return (out.sort_values(["_last", "pct"], ascending=[True, False], kind="stable")
+            .drop(columns="_last").reset_index(drop=True))
+
+
+def contribution_tree(bars: pd.DataFrame, open_pillars=()) -> pd.DataFrame:
+    """The contribution chart as a tree, top to bottom: each pillar (largest
+    first, "Unassigned" last) followed - when it is open - by its variables,
+    largest first. Columns: label (unique), pillar, feature, level (0 =
+    pillar, 1 = variable), pct, volume, n."""
+    rows = []
+    opened = set(open_pillars or ())
+    for p in pillar_rows(bars).itertuples(index=False):
+        rows.append({"label": p.pillar, "pillar": p.pillar, "feature": "", "level": 0,
+                     "pct": float(p.pct), "volume": float(p.volume), "n": int(p.n)})
+        if p.pillar in opened:
+            members = bars[bars["pillar"] == p.pillar].sort_values(
+                "pct", ascending=False, kind="stable")
+            for m in members.itertuples(index=False):
+                rows.append({"label": f"↳ {m.feature}", "pillar": p.pillar,
+                             "feature": m.feature, "level": 1, "pct": float(m.pct),
+                             "volume": float(m.volume) if m.volume == m.volume else 0.0,
+                             "n": 1})
+    return pd.DataFrame(rows, columns=["label", "pillar", "feature", "level", "pct",
+                                       "volume", "n"])
+
+
 # --------------------------------------------------------------------------- #
 # data - decomposition (05_contributions/contribution_timeseries.csv)
 # --------------------------------------------------------------------------- #
@@ -249,7 +295,7 @@ def decomposition_frame(ts: pd.DataFrame, pillars: list, region: str = ALL):
     comp = d[~feature.str.startswith("__") | (feature == "__baseline_core__")].copy()
     groups = shown_groups(pillars)
     series = np.where(comp["feature"].astype(str) == "__baseline_core__", BASELINE_CORE,
-                      comp["pillar"].map(_text).replace("", OTHER))
+                      comp["pillar"].map(_pillar))
     comp["series"] = [s if (s == BASELINE_CORE or s in groups) else OTHER for s in series]
     wide = comp.pivot_table(index="date", columns="series", values="volume",
                             aggfunc="sum").fillna(0.0)
@@ -443,6 +489,42 @@ def contribution_figure(bars: pd.DataFrame, colours: dict, mode: str = "light"):
     fig.update_xaxes(range=[lo - (pad if lo < 0 else 0), hi + pad], zeroline=True,
                      zerolinecolor=ink["axis"], zerolinewidth=1)
     fig.update_yaxes(showgrid=False, categoryorder="array", categoryarray=list(bars["feature"]),
+                     tickfont=dict(color=ink["secondary"]))
+    return fig
+
+
+def contribution_tree_figure(tree: pd.DataFrame, colours: dict, mode: str = "light"):
+    """Horizontal bars for contribution_tree: a pillar's bar in its colour,
+    its variables (when open) under it in a lighter shade of the same colour.
+    The y labels name every bar, so there is no legend."""
+    import plotly.graph_objects as go
+    ink = INK[mode]
+    fig = go.Figure()
+    order = list(tree["label"])
+    for pillar in dict.fromkeys(tree["pillar"]):
+        part = tree[tree["pillar"] == pillar]
+        base = colours.get(pillar, SERIES[mode][0])
+        fills = [base if lv == 0 else _alpha(base, 0.5) for lv in part["level"]]
+        fig.add_trace(go.Bar(
+            x=part["pct"], y=part["label"], orientation="h", name=pillar,
+            marker=dict(color=fills), showlegend=False,
+            text=[pct_label(v) for v in part["pct"]], textposition="outside",
+            cliponaxis=False, textfont=dict(color=ink["secondary"], size=11),
+            customdata=np.stack([part["pillar"].astype(str),
+                                 part["volume"].fillna(0).astype(float),
+                                 np.where(part["level"] == 0,
+                                          part["n"].astype(str) + " variable(s)",
+                                          part["feature"].astype(str))], axis=-1),
+            hovertemplate="<b>%{x:.2f}%</b> of sales  ·  %{customdata[1]:,.0f}"
+                          "<br>%{customdata[2]} (%{customdata[0]})<extra></extra>"))
+    _style(fig, mode, max(240, 26 * max(len(tree), 1) + 70), x_title="Share of sales, %",
+           legend=False)
+    fig.update_layout(barmode="overlay", bargap=0.3, barcornerradius=4, hovermode="closest")
+    lo, hi = float(min(0.0, tree["pct"].min())), float(max(0.0, tree["pct"].max()))
+    pad = (hi - lo) * 0.14 or 1.0
+    fig.update_xaxes(range=[lo - (pad if lo < 0 else 0), hi + pad], zeroline=True,
+                     zerolinecolor=ink["axis"], zerolinewidth=1)
+    fig.update_yaxes(showgrid=False, categoryorder="array", categoryarray=order[::-1],
                      tickfont=dict(color=ink["secondary"]))
     return fig
 

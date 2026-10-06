@@ -18,6 +18,13 @@ st.set_page_config(page_title="Model App", page_icon="🧠", layout="wide")
 # background instead of on someone's click, and start the worker processes
 # that run the heavy codebase 1 steps
 codebase.start_background_refresh()
+# a page opened or reloaded (a new session) re-checks codebase 1 at once - at
+# most every 15 s for everyone together - so an app_access.yaml or a standard
+# names CSV re-uploaded a minute ago applies to whoever reloads, without
+# waiting for the 5-minute background check
+if "_bridge_session" not in st.session_state:
+    st.session_state["_bridge_session"] = True
+    codebase.check_now()
 inject_global_styles()
 safe_email = html.escape(name) # Escape the email to prevent XSS attacks
 st.markdown(

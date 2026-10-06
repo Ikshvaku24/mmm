@@ -15,14 +15,15 @@ def _job_id(job_id):
 
 @perf.timed("jobs.run_now")
 def run_model_job(prior_file, data_file, job_id, config_file="", mapping_file="", share_file="",
-                  bmc_name="", run_name=""):
+                  bmc_name="", run_name="", run_group=""):
     """Trigger the model job (it runs codebase 1's demo.ipynb).
 
-    Every file value is a FILE NAME. With bmc_name and run_name the notebook
-    reads them from the run's own folder,
-    /dbfs/mnt/testuat/Secondary Modelling/<bmc_name>/<run_name>/<Data|Prior|
-    Config|Mapping|Share>/, and writes the outputs to its Outputs/. The job's
-    own parameter run_id = {{job.run_id}} is not sent from here.
+    Every file value is a FILE NAME. With bmc_name, run_group and run_name the
+    notebook reads them from the run's own folder,
+    /dbfs/mnt/testuat/Secondary Modelling/<bmc_name>/<run_group>/<run_name>/
+    <Data|Prior|Config|Mapping|Share>/, and writes the outputs to its
+    Outputs/. The job's own parameter run_id = {{job.run_id}} is not sent from
+    here.
     """
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/run-now"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
@@ -38,12 +39,14 @@ def run_model_job(prior_file, data_file, job_id, config_file="", mapping_file=""
     }
     if bmc_name or run_name:
         payload["job_parameters"].update(bmc_name=str(bmc_name), run_name=str(run_name))
+    if run_group:
+        payload["job_parameters"]["run_group"] = str(run_group)
     response = requests.post(url, headers=headers, data=json.dumps(payload), timeout=TIMEOUT)
     return response
 @perf.timed("jobs.get_job")
 def job_parameter_names(job_id):
     """The job parameters the job defines (jobs/get) - the app checks that
-    bmc_name and run_name are among them before it starts a run."""
+    bmc_name, run_group and run_name are among them before it starts a run."""
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/get"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
     response = requests.get(url, headers=headers, params={"job_id": _job_id(job_id)},
@@ -101,11 +104,12 @@ def get_run_output(run_id):
 @perf.timed("jobs.list_runs")
 def list_runs(job_id, limit=20):
     """The job's most recent runs, newest first (run_id, start_time, state,
-    run_page_url, job_parameters) - so a run can be found again after its
-    status panel was closed or the page reloaded."""
+    run_page_url, job_parameters, and its tasks with their queue / setup /
+    execution times) - so a run can be found again after its status panel was
+    closed or the page reloaded."""
     url = f"{DATABRICKS_HOST}/api/2.1/jobs/runs/list"
     headers = {"Authorization": f"Bearer {DATABRICKS_TOKEN}", "Content-Type": "application/json"}
-    params = {"job_id": _job_id(job_id), "limit": int(limit), "expand_tasks": "false"}
+    params = {"job_id": _job_id(job_id), "limit": int(limit), "expand_tasks": "true"}
     response = requests.get(url, headers=headers, params=params, timeout=TIMEOUT)
     response.raise_for_status()
     return response.json().get("runs", []) or []

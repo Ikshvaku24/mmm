@@ -11,14 +11,18 @@ file sent to the job always carries EVERY key, so nothing silently falls back
 to a default. The keys the job sets itself (input paths, output folder, run
 name) cannot be edited.
 
-Who may change what is codebase 1's app_access.yaml (`settings.app_access`):
-people on `full_access` or `config_full_access` may change every setting; an
-ANALYST only the settings under `editable` (an allow-list). Every other
-setting is FIXED at the team's config.yaml value: it gets no widget, and
-`enforce_fixed` puts it back whenever a config.yaml is loaded, a run is
-reused or a run starts. The config.yaml an analyst downloads or saves with a
-run holds only the settings they may change; the job lays it over the team's
-config.yaml.
+Who may change what is codebase 1's app_access.yaml (`settings.app_access`),
+four levels by login e-mail:
+  * full_access / config_full_access - every setting (the "pro");
+  * config_advanced_access - the settings under `editable`, plus those under
+    `advanced` behind the "Advanced options" switch;
+  * everyone else ("editable only") - the settings under `editable`; no
+    Advanced options switch.
+Every other setting is FIXED at the team's config.yaml value: it gets no
+widget, and `enforce_fixed` puts it back whenever a config.yaml is loaded, a
+run is reused or a run starts. The same limit applies to what goes out: the
+config.yaml a person downloads or saves with a run holds only the settings
+they may change; the job lays it over the team's config.yaml.
 """
 import copy
 import hashlib
@@ -70,7 +74,8 @@ def get_schema():
 # --------------------------------------------------------------------------- #
 # who may do what (codebase 1's app_access.yaml)
 # --------------------------------------------------------------------------- #
-def _viewer_email():
+def viewer_email():
+    """The login e-mail of the person viewing the page ('' when unknown)."""
     try:
         headers = getattr(st.context, "headers", None) or {}
         return str(headers.get("X-Forwarded-Email", "") or "").strip().lower()
@@ -78,40 +83,77 @@ def _viewer_email():
         return ""
 
 
+_viewer_email = viewer_email
+
+
+LEVEL_TEXT = {
+    "full_access": "full access",
+    "config_full_access": "every setting",
+    "config_advanced_access": "the team's editable settings + Advanced options",
+    "editable_only": "the team's editable settings",
+}
+
+
 def access():
     """What the person viewing the page may do, from app_access.yaml:
-    {"full": bool, "config_full": bool, "editable": set | None (= every
-    setting), "show_fixed": bool, "policy": the file as read}."""
+    {"level": "full_access" | "config_full_access" | "config_advanced_access"
+     | "editable_only", "full": bool, "config_full": bool,
+     "editable": set | None (None = every setting) - the basic settings,
+     "advanced": set - the Advanced options this person may change (empty
+                 below config_advanced_access),
+     "allowed": set | None - everything this person may change,
+     "show_fixed": bool, "policy": the file as read}."""
     policy = (get_schema() or {}).get("access") or {"editable": None}
-    email = _viewer_email()
-    full = bool(email) and email in (policy.get("full_access") or [])
-    config_full = full or (bool(email) and email in (policy.get("config_full_access") or []))
+    email = viewer_email()
+
+    def named(key):
+        return bool(email) and email in (policy.get(key) or [])
+
+    full = named("full_access")
+    config_full = full or named("config_full_access")
+    advanced_ok = not config_full and named("config_advanced_access")
     editable = policy.get("editable")
-    return {"full": full, "config_full": config_full,
-            "editable": None if (config_full or editable is None) else set(editable),
+    if config_full or editable is None:
+        basic, advanced, allowed = None, set(), None
+    else:
+        basic = set(editable)
+        advanced = (set(policy.get("advanced") or []) - basic) if advanced_ok else set()
+        allowed = basic | advanced
+    level = ("full_access" if full else "config_full_access" if config_full
+             else "config_advanced_access" if advanced_ok else "editable_only")
+    return {"level": level, "full": full, "config_full": config_full,
+            "editable": basic, "advanced": advanced, "allowed": allowed,
             "show_fixed": bool(policy.get("show_fixed")), "policy": policy}
 
 
 def has_full_access():
     """Full access: every setting AND the admin tools (Reload codebase 1, the
-    backend folder, Open in Databricks)."""
+    backend folder, Open in Databricks) AND naming a new BMC."""
     return access()["full"]
 
 
 def role():
+    """The viewer's level: full_access, config_full_access,
+    config_advanced_access or editable_only (recorded in run_request.json)."""
+    return access()["level"]
+
+
+def may_mark_reported():
+    """May the viewer mark the run a group's results were reported from?
+    (app_access.yaml `mark_reported` lists the levels.)"""
     a = access()
-    return "full_access" if a["full"] else "config_full_access" if a["config_full"] else "analyst"
+    return a["level"] in (a["policy"].get("mark_reported") or [])
 
 
 def ui_policy():
-    """(editable 'section.key' set - None = every setting -, show_fixed, the
+    """(allowed 'section.key' set - None = every setting -, show_fixed, the
     policy as read) for the person viewing the page."""
     a = access()
-    return a["editable"], a["show_fixed"], a["policy"]
+    return a["allowed"], a["show_fixed"], a["policy"]
 
 
 def enforce_fixed(values, base):
-    """Every setting the analyst may not change takes the base config's value
+    """Every setting the person may not change takes the base config's value
     (the team's config.yaml). Returns the 'section.key' that were put back."""
     editable, _show, _ui = ui_policy()
     if editable is None or not values or not base:
@@ -326,6 +368,18 @@ def _widget(row, value, base_value, key):
     return text
 
 
+def _render_tabs(rows_by, schema, values, base, job_owned, version):
+    """One tab per section of `rows_by` ({section: [schema rows]})."""
+    order = [s for s in TAB_ORDER if s in rows_by] + [s for s in rows_by if s not in TAB_ORDER]
+    tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order]) if order else []
+    for tab, section in zip(tabs, order):
+        with tab:
+            blurb = schema["blurbs"].get(section)
+            if blurb:
+                st.caption(blurb)
+            _render_section(section, rows_by[section], values, base, job_owned, version)
+
+
 def _render_section(section, rows, values, base, job_owned, version):
     cols = st.columns(2, gap="large")
     for i, row in enumerate(rows):
@@ -389,13 +443,18 @@ def _settings_fragment():
             st.error("Could not read codebase 1's settings schema.")
             st.session_state["cfg_valid"] = False
             return
-        editable, show_fixed, policy = ui_policy()
+        who = access()
+        editable, show_fixed, policy = who["allowed"], who["show_fixed"], who["policy"]
+        basic, advanced = who["editable"], who["advanced"]
         st.caption("codebase 1's config.yaml. Dropdowns list the values codebase 1 "
                    "accepts; hover a setting for its help."
                    + (" You may change every setting." if editable is None else
-                      f" You can change the {len(editable)} settings the team opened "
-                      "(app_access.yaml); every other setting keeps the team's value, "
-                      "and the config.yaml saved with your run holds only yours."))
+                      f" You can change the {len(basic)} settings the team opened"
+                      + (f" and {len(advanced)} more under Advanced options" if advanced
+                         else "")
+                      + " (app_access.yaml); every other setting keeps the team's value, "
+                        "and the config.yaml you download or save with your run holds "
+                        "only yours."))
         for err in st.session_state.get("cfg_base_error") or []:
             st.warning("The backend's config.yaml could not be read, so these start "
                        f"from the codebase defaults: {err}")
@@ -419,26 +478,29 @@ def _settings_fragment():
         def shown(row):
             return editable is None or f"{row['section']}.{row['key']}" in editable
 
-        rows_by = {}
+        def is_advanced(row):
+            return f"{row['section']}.{row['key']}" in advanced
+
+        rows_by, advanced_by = {}, {}
         for row in schema["rows"]:
             if shown(row):
-                rows_by.setdefault(row["section"], []).append(row)
+                (advanced_by if is_advanced(row) else rows_by).setdefault(
+                    row["section"], []).append(row)
 
         # The widgets are only drawn while the editor is open - up to a hundred
         # of them, which every page refresh would otherwise redraw.
         if st.toggle("Edit settings", key="cfg_editor_open"):
-            if not rows_by:
+            if not rows_by and not advanced_by:
                 st.caption("Every setting is fixed by the team (app_access.yaml).")
-            order = [s for s in TAB_ORDER if s in rows_by] + [
-                s for s in rows_by if s not in TAB_ORDER]
-            tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order]) if order else []
-            for tab, section in zip(tabs, order):
-                with tab:
-                    blurb = schema["blurbs"].get(section)
-                    if blurb:
-                        st.caption(blurb)
-                    _render_section(section, rows_by[section], values, base,
-                                    job_owned, version)
+            _render_tabs(rows_by, schema, values, base, job_owned, version)
+            n_advanced = sum(len(v) for v in advanced_by.values())
+            if n_advanced and st.toggle(
+                    f"Advanced options ({n_advanced} settings)", key="cfg_advanced_open",
+                    help="The settings app_access.yaml opens to config_advanced_access - "
+                         "needed once in a while. Your changes to them count whether "
+                         "this is open or not."):
+                st.markdown("##### Advanced options")
+                _render_tabs(advanced_by, schema, values, base, job_owned, version)
             if show_fixed and editable is not None:
                 fixed = [{"setting": f"{r['section']}.{r['key']}",
                           "value": _fmt((values.get(r["section"]) or {}).get(r["key"])),
@@ -497,8 +559,10 @@ def _settings_fragment():
                                disabled=not text.ok, key="cfg_download",
                                on_click="ignore",
                                help="Every setting." if editable is None else
-                               "The settings you may change; the team's config.yaml "
-                               "supplies the rest when the file is run.")
+                               "The settings you may change"
+                               + (" (Advanced options included)" if advanced else "")
+                               + "; the team's config.yaml supplies the rest when the "
+                                 "file is run.")
         with reset_col:
             if st.button("Reset to base", key="cfg_reset", type="secondary",
                          help="Every setting back to the team's config.yaml."):

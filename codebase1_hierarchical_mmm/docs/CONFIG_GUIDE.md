@@ -25,8 +25,9 @@ python run_real_data.py config.yaml
 help as the tooltip. So a key you add to a config dataclass (plus its `HELP`
 line) appears in the app by itself. The app starts from this folder's
 `config.yaml`. The file it saves with a run - `Config/config.yaml` in the
-run's own folder, `Secondary Modelling/<BMC>/<run name>/` - holds **only the
-settings that person may change** (`settings_text(only=...)`); the job
+run's own folder, `Secondary Modelling/<BMC>/<period> <modelling type>/<run
+name>/` - holds **only the settings that person may change**
+(`settings_text(only=...)`); the job
 (`demo.ipynb` -> `mmm/app_job.py`) lays it over this folder's `config.yaml`
 (`app_job.merge_config`), so a fixed setting always comes from here, then
 replaces only the input paths, the output folder and the run name -
@@ -36,23 +37,35 @@ top of this `config.yaml`.
 
 **Who may change which setting in the app** is `app_access.yaml`, next to
 `config.yaml` - one role-based access file (it replaced `config_ui.yaml` in
-2026.09.30.1):
+2026.09.30.1; four levels since 2026.10.07.1):
 
 | Key | Who | What they get |
 |---|---|---|
-| `full_access:` | login e-mails | every setting, and the admin tools: "Reload codebase 1", the backend folder, "Open in Databricks" on a run |
+| `full_access:` | login e-mails | every setting, the admin tools ("Reload codebase 1", the backend folder, "Open in Databricks" on a run), and naming a NEW BMC (everyone else picks one from `bmc_names.csv`) |
 | `config_full_access:` | login e-mails | every setting (no admin tools) |
-| `editable:` | everyone else (analysts) | only the settings listed here get a widget |
-| `show_fixed:` | analysts | `true` lists the settings they may not change, read-only |
+| `config_advanced_access:` | login e-mails | the `editable:` settings, plus the `advanced:` ones behind the app's **Advanced options** switch |
+| `editable:` | everyone (levels 3 and 4) | the settings listed here get a widget; for everyone not named above ("editable only") that is all - no Advanced options switch |
+| `advanced:` | `config_advanced_access` | the settings needed once in a while; same format as `editable:` (one listed in both counts as editable) |
+| `show_fixed:` | levels 3 and 4 | `true` lists the settings they may not change, read-only |
+| `mark_reported:` | levels | which levels may mark the run a period's results were reported from (moves run folders): `full_access`, `config_full_access`, `config_advanced_access`, `editable_only`. Default: the first three |
 
-`editable` is an allow-list. Every other setting is fixed at its value in
-`config.yaml` - also when an analyst uploads another config.yaml (only its
-editable settings are taken; the app says which were ignored) or reuses an
-older run. `sampler: all` opens a section and `editable: all` opens
-everything. A setting added to codebase 1 later stays fixed until it is
-listed. `settings.app_access()` reads the file; a misspelt setting is
-reported, and a broken file fixes every setting and grants nobody full
-access. The app re-reads it with the rest of codebase 1 - no redeploy.
+`editable` and `advanced` are allow-lists. Every other setting is fixed at
+its value in `config.yaml` - also when someone uploads another config.yaml
+(only the settings they may change are taken; the app says which were
+ignored) or reuses an older run - and the config.yaml they download or save
+with a run holds only the settings they may change. `sampler: all` opens a
+section and `editable: all` opens everything. A setting added to codebase 1
+later stays fixed until it is listed. `settings.app_access()` reads the file;
+a misspelt setting (or level) is reported, and a broken file fixes every
+setting and grants nobody any level. The app re-reads it with the rest of
+codebase 1 - within 5 minutes, at once for anyone who reloads the page - no
+redeploy.
+
+Two more files next to it hold the **standard names** the app offers:
+`bmc_names.csv` (the BMC names - only `full_access` may type another) and
+`modelling_types.csv` (LTE, Primary, Secondary ...). One name per line under
+the header; lines starting with `#` are ignored; a name that cannot be a
+folder name stops the list with a message (`app_job.read_names`).
 
 **Two rules that save time:**
 

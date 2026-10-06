@@ -1,0 +1,6 @@
+# bmc_names.csv - the BMC names the BRIDGE web app offers (one per line, under the header).
+# Only people with full_access in app_access.yaml may type a BMC name that is not here;
+# everyone else picks from this list (or from a BMC folder that already exists).
+# A name is a folder name: letters, digits, spaces, _ - and ., at most 80 characters.
+# Lines starting with # are ignored. Re-upload the folder; the app follows within 5 minutes.
+bmc_name
