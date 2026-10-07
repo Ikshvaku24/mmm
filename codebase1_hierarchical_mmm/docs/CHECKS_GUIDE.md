@@ -1325,12 +1325,30 @@ proves the bookkeeping, not the model.
 
 - **Computes.** The median of a total is not the sum of the medians of its
   parts. The gap is the difference.
+- **Where it comes from — three columns that add up to it exactly**
+  (since 2026-10-07):
+
+  | Column | The gap between | Large when |
+  |---|---|---|
+  | `baseline_median_gap_volume` | the baseline's own total and its parts (core + `baseline=1` features) | several wide, log-normal baseline coefficients (TDP, category, a UCM) |
+  | `incremental_median_gap_volume` | the incremental block's total and its features | many skewed media coefficients |
+  | `cross_median_gap_volume` | fitted, and baseline total + incremental total | both block totals are skewed; correlation between them across draws (the baseline high when the drivers are low) changes its size |
+
+  `contribution_reconciliation_chain.csv` prints the same numbers as a statement
+  to read top to bottom; its last block traces the gap.
 - **Reading it.**
   - A fraction of a percent is normal.
   - Several percent means the contribution posteriors are skewed (wide,
-    log-normal), so the parts will not add to the reported total.
-- **Change.** Nothing in the model. Report totals as medians of the total, and
-  say the parts are medians too.
+    log-normal), so the parts will not add to the reported total. The three
+    columns say which block is skewed.
+  - The cross gap needs no correlation — skewed block totals are enough. If
+    it is large *and* `posterior_correlation.csv` shows baseline features
+    trading off against drivers (§9), the two are the same story.
+- **Change.** Nothing in the model for the gap itself — it is arithmetic, not
+  error. Report totals as medians of the total, and say the parts are medians
+  too. If the gap is driven by a few very wide coefficients, those are the ones
+  to look at in §5 (contraction): a wide log-normal posterior is usually a
+  coefficient the data barely moved. Worked example: `cases/002`.
 
 ### 12.3 `contribution_math.csv` — recompute any contribution by hand
 

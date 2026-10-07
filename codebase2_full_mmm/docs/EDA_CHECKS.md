@@ -1,12 +1,15 @@
 # EDA checks — what is checked in Phase 2, and why
 
-> **Status:** planning, 2026-09-17. **No code yet.**
+> **Status:** planning, 2026-09-17; updated 2026-10-07 for codebase 1's changes. **No code yet.**
 >
 > **Companions** (same folder):
 > - `METHODOLOGY.md`: the order to build in, including variable splitting.
 > - `PHASE2_ARCHITECTURE.md`: the model.
 > - `Codebase_2_blueprint.html`: the one-page overview.
-> - `EXPLANATION.md`: what the transforms do, in plain words.
+> - `EXPLANATION.md`: the model equation and its transforms, in plain words.
+> - Codebase 1's `docs/CHECKS_GUIDE.md`: every check codebase 2 inherits, written as theory → a real
+>   example → how to read it → what to change. Write Phase 2's new checks up the same way.
+>   `docs/cases/` holds the real problems already met (001: a blank VIF on a monthly panel).
 >
 > **Meridian source:** `../../../meridian/meridian/model/eda/eda_engine.py` (checks),
 > `eda/constants.py` and `eda/eda_spec.py` (thresholds), and `analysis/review/` (checks after fitting).
@@ -136,7 +139,9 @@ at the posterior-median transform (stage D).
 | Pairwise correlation | two columns moving together | ATTENTION at \|r\| ≥ 0.8 (severe at 0.95); ERROR at ≥ 0.999 | 0.8 / 0.95 | ERROR at 0.999 only |
 | VIF, centred | a column predicted by several others | ATTENTION at 5 / 10; ERROR at 1000 | 5 / 10 | ERROR at 1000 only |
 | VIF, uncentred, and condition number | a column that duplicates the intercept | ATTENTION at condition number 10 / 30 | yes | no |
-| Near-constant after scaling | an always-on column sitting at ~1.0 | ATTENTION | `near_constant_sd` 0.1 | sd < 1e-4, ATTENTION |
+| VIF not computable | a region with more columns than training periods (e.g. 27 features on 24 months): every auxiliary regression is exact | ATTENTION, category `collinearity_not_computable`; a `vif_note` on every row; `max_vif` blank, never 0 | since 2026.10.06.1 (`docs/cases/001`) | — |
+| Dead columns | a feature with no activity in a region, such as another brand's media | INFO; the column is left out of that region's design and listed | since 2026.10.06.1 | — |
+| Near-constant | an always-on column that barely moves | ATTENTION | `near_constant_sd` 0.1, **relative** since 2026-09-22: sd ÷ the mean of the non-zero values, on columns active in over 90% of weeks | sd < 1e-4, ATTENTION |
 | Variable ≈ week or ≈ region | a column that is really a trend, or really a region effect (adjusted R²) | INFO | implicit in the design-matrix VIF | `check_variable_geo_time_collinearity`, INFO |
 | Media vs baseline drivers | media moving with TDP, price or category (possible confounding) | ATTENTION above max(0.1, 2/√n) | `confounding_pairs`, after fitting | `PotentialBiasCheck` at 0.1, after fitting |
 | Rows per parameter | more parameters than the data can support | ATTENTION below 10 | — | `check_data_param_ratio`, INFO |
@@ -146,7 +151,8 @@ at the posterior-median transform (stage D).
 These run after fitting.
 
 - **Kept from codebase 1:**
-  - R-hat ≤ 1.01, and divergences;
+  - R-hat ≤ 1.01, and divergences, in the convergence report as audited on ArviZ 1.x (BFMI, energy
+    and trace plots, one summary row per region × parameter);
   - contraction;
   - the residual battery (Durbin-Watson, heteroscedasticity, tails, influence);
   - posterior correlation;
@@ -170,7 +176,7 @@ These run after fitting.
 |---|---|---|---|
 | `check_pairwise_corr` | ERROR at \|r\| ≥ 0.999 | **Adapt.** Keep 0.999 as the ERROR gate for true duplicates; add ATTENTION at 0.8 / 0.95 | 0.999 only catches duplicated columns. Two channels correlated at 0.95 pass Meridian, and how credit is split between them is then decided by the prior |
 | `check_vif` | ERROR at VIF ≥ 1000 (centred, with a constant) | **Adapt.** ERROR at 1000; ATTENTION at 5 / 10; add uncentred VIF and the condition number | On the column that broke codebase 1's first real run, the centred VIF read 1.09 while the condition number read 23,000 |
-| `check_std` | ATTENTION if sd (outliers removed) < 1e-4; IQR outliers | **Adapt.** Keep the outlier part; use codebase 1's `near_constant_sd` of 0.1 on the scaled column | 1e-4 misses columns that are nearly constant after scaling, such as TDP and price at ~1.0 |
+| `check_std` | ATTENTION if sd (outliers removed) < 1e-4; IQR outliers | **Adapt.** Keep the outlier part; use codebase 1's relative `near_constant_sd` (sd ÷ level below 0.1) | 1e-4 misses columns that are nearly constant relative to their level, such as TDP and price |
 | `check_overall_kpi_invariability` | ERROR if the KPI is constant | **Adopt** | cheap and unambiguous |
 | `check_cost_per_media_unit` | ATTENTION for spend without units, or units without spend; ATTENTION for cost-per-unit outliers (1.5 × IQR) | **Adopt**, for every channel with a spend column | every source file carries spend. Used only to check data quality, never for ROI |
 | `check_variable_geo_time_collinearity` | INFO: adjusted R² against geo and against time | **Adopt**, against region and against week | it names *what* a collinear column duplicates |
@@ -220,7 +226,7 @@ These run after fitting.
 | `02_eda/raw_checks.csv` | stage B, one row per variable × check |
 | `02_eda/cost_per_unit.csv` | spend ÷ metric per variable, region and week, with outlier flags |
 | `02_eda/learnability.csv` | per transformed variable: off-weeks, 95th percentile ÷ median of active weeks, first and last active week |
-| `01_data/collinearity_*.csv` | stage C, in codebase 1's format and location |
+| `01_data/collinearity_*.csv` | stage C, in codebase 1's format and location, with `vif_note` |
 | `00_warnings/` | every ERROR and ATTENTION finding, one document per category |
 
 ---

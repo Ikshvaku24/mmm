@@ -60,7 +60,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
 
 import contextlib
 import copy

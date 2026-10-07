@@ -8,6 +8,7 @@ link in the chain from a raw feature column to a percentage in the deck:
                                             01_data/model_input_summary.csv
     scaled feature   -> contribution        05_contributions/contribution_math.csv
     contributions    -> fitted sales        05_contributions/contribution_reconciliation.csv
+                                            (+ _chain.csv: the same, as a statement)
     fitted sales     -> actual sales        04_fit/actual_vs_predicted.csv
     everything       -> volume + % table    05_contributions/contribution_summary.csv
 
@@ -577,11 +578,32 @@ def write_contribution_reconciliation(comp: pd.DataFrame, decomp, pdata,
         = fitted        the model's median prediction
         + residual      what the model could not explain (actual - fitted)
         = actual        which is why reconciles_to_actual_pct is exactly 100
+
+    `median_gap` is split into the three places it arises, so it can be traced
+    instead of read as one lump (they sum to it exactly):
+
+        baseline_median_gap     median(baseline total) - [core + sum of the
+                                baseline features' medians]
+        incremental_median_gap  median(incremental total) - sum of the
+                                incremental features' medians
+        cross_median_gap        median(baseline + incremental) - median(baseline)
+                                - median(incremental): the same effect again,
+                                between the two block totals. Skewed totals are
+                                enough to cause it; correlation between the
+                                blocks across draws changes its size
+
+    Every figure is a sum over the window of WEEKLY medians, the same basis as
+    contribution_summary.csv. `contribution_reconciliation_chain.csv` prints the
+    same numbers as a statement to read top to bottom.
     """
     med = np.median(decomp.yhat_draws, axis=0)
     base = np.median(decomp.baseline_draws, axis=0)
     core = (np.median(decomp.core_draws, axis=0)
             if decomp.core_draws is not None else base)
+    # the incremental block as ONE draw-level total, so it has its own median
+    # (yhat = baseline + every incremental contribution, draw by draw)
+    incr_tot = np.median(np.asarray(decomp.yhat_draws)
+                         - np.asarray(decomp.baseline_draws), axis=0)
     region = _region_col(pdata)
     base_feats = set(decomp.baseline_features or ())
 
@@ -604,8 +626,12 @@ def write_contribution_reconciliation(comp: pd.DataFrame, decomp, pdata,
             incr_v = float(sum(v[m].sum() for f, v in decomp.contrib_median.items()
                                if f not in base_feats))
             comp_v = core_v + base_feat_v + incr_v
+            incr_tot_v = float(incr_tot[m].sum())
             resid = actual - fitted
             gap = fitted - comp_v
+            gap_base = base_v - (core_v + base_feat_v)
+            gap_incr = incr_tot_v - incr_v
+            gap_cross = fitted - (base_v + incr_tot_v)
             pct = (lambda v: v / actual * 100 if actual else np.nan)
             rows.append({
                 "scope": scope, "region": rname,
@@ -613,15 +639,23 @@ def write_contribution_reconciliation(comp: pd.DataFrame, decomp, pdata,
                 "actual_volume": actual, "fitted_volume": fitted,
                 "baseline_core_volume": core_v,
                 "baseline_features_volume": base_feat_v,
+                "baseline_median_gap_volume": gap_base,
                 "baseline_total_volume": base_v,
                 "incremental_volume": incr_v,
+                "incremental_median_gap_volume": gap_incr,
+                "incremental_total_volume": incr_tot_v,
+                "cross_median_gap_volume": gap_cross,
                 "sum_components_volume": comp_v,
                 "median_gap_volume": gap,
                 "residual_volume": resid,
                 "baseline_core_pct": pct(core_v),
                 "baseline_features_pct": pct(base_feat_v),
+                "baseline_median_gap_pct": pct(gap_base),
                 "baseline_total_pct": pct(base_v),
                 "incremental_pct": pct(incr_v),
+                "incremental_median_gap_pct": pct(gap_incr),
+                "incremental_total_pct": pct(incr_tot_v),
+                "cross_median_gap_pct": pct(gap_cross),
                 "median_gap_pct": pct(gap),
                 "residual_pct": pct(resid),
                 "fitted_pct_of_actual": pct(fitted),
@@ -629,6 +663,79 @@ def write_contribution_reconciliation(comp: pd.DataFrame, decomp, pdata,
             })
     df = pd.DataFrame(rows)
     df.to_csv(os.path.join(outdir, "contribution_reconciliation.csv"), index=False)
+    write_reconciliation_chain(df, outdir)
+    return df
+
+
+# The reconciliation as a statement: blocks of "+" lines closing on an "="
+# line, read top to bottom. (block, line, op, column stem, what it is)
+_CHAIN = (
+    ("1 baseline", (
+        ("baseline core", "+", "baseline_core",
+         "intercept + seasonality + trend - sum of weekly medians"),
+        ("baseline features", "+", "baseline_features",
+         "every baseline=1 feature - sum of each one's weekly medians"),
+        ("baseline median gap", "+", "baseline_median_gap",
+         "median of the baseline TOTAL minus the sum of its parts' medians"),
+        ("baseline total", "=", "baseline_total",
+         "weekly median of (core + baseline features), summed"))),
+    ("2 incremental", (
+        ("incremental features", "+", "incremental",
+         "every other feature - sum of each one's weekly medians"),
+        ("incremental median gap", "+", "incremental_median_gap",
+         "median of the incremental TOTAL minus the sum of its parts' medians"),
+        ("incremental total", "=", "incremental_total",
+         "weekly median of (all incremental features together), summed"))),
+    ("3 fitted", (
+        ("baseline total", "+", "baseline_total", "from block 1"),
+        ("incremental total", "+", "incremental_total", "from block 2"),
+        ("cross median gap", "+", "cross_median_gap",
+         "median(baseline + incremental) minus median(baseline) minus "
+         "median(incremental) - the same sum-of-medians effect, between the "
+         "two block totals"),
+        ("fitted", "=", "fitted",
+         "the model's median prediction, summed over the weeks"))),
+    ("4 actual", (
+        ("fitted", "+", "fitted", "from block 3"),
+        ("residual", "+", "residual",
+         "actual - fitted: sales the MODEL cannot explain"),
+        ("actual", "=", "actual", "observed KPI"))),
+    ("5 median gap, traced", (
+        ("baseline median gap", "+", "baseline_median_gap", "block 1"),
+        ("incremental median gap", "+", "incremental_median_gap", "block 2"),
+        ("cross median gap", "+", "cross_median_gap", "block 3"),
+        ("median gap", "=", "median_gap",
+         "fitted - sum of every component's medians: a REPORTING artefact "
+         "(the median of a sum is not the sum of medians), not model error"))),
+)
+
+
+def write_reconciliation_chain(recon: pd.DataFrame, outdir: str) -> pd.DataFrame:
+    """`contribution_reconciliation.csv` laid out as a statement to read.
+
+    One row per scope x region x line. Inside each `block` the "+" lines add
+    up to the "=" line. Block 5 traces the median gap to the three places it
+    arises; blocks 1-4 walk from the components to actual sales.
+    """
+    rows = []
+    for _, r in recon.iterrows():
+        actual = float(r["actual_volume"])
+        step = 0
+        for block, lines in _CHAIN:
+            for line, op, stem, meaning in lines:
+                step += 1
+                v = float(r[f"{stem}_volume"])
+                rows.append({
+                    "scope": r["scope"], "region": r["region"],
+                    "block": block, "step": step, "op": op, "line": line,
+                    "volume": v,
+                    "pct_of_actual": v / actual * 100 if actual else np.nan,
+                    "meaning": meaning})
+    df = pd.DataFrame(rows, columns=["scope", "region", "block", "step", "op",
+                                     "line", "volume", "pct_of_actual",
+                                     "meaning"])
+    df.to_csv(os.path.join(outdir, "contribution_reconciliation_chain.csv"),
+              index=False)
     return df
 
 

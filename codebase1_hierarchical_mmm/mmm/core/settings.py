@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
 
 import dataclasses
 import difflib
@@ -258,7 +258,8 @@ HELP: dict[str, dict[str, str]] = {
         "contribution_summary": "05_contributions: the vendor-style volume + % table",
         "contribution_timeseries": "05_contributions: volume per region x date x driver (large file)",
         "contribution_math": "05_contributions: the beta x sum(x) x dv_scale audit trail",
-        "contribution_reconciliation": "05_contributions: components -> fitted -> actual",
+        "contribution_reconciliation": ("05_contributions: components -> fitted -> actual, the median "
+                                        "gap traced in three parts, and a _chain.csv to read top to bottom"),
         "benchmark_comparison": ("05_contributions: benchmark_comparison.xlsx - paste a "
                                  "benchmark contribution into one column and %diff, the "
                                  "ratio, delta and the corrected global_prior_mean "

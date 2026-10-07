@@ -1,14 +1,17 @@
 # Codebase 2 — Phase 2 architecture blueprint
 
-> **Status:** blueprint, 2026-09-14. **No code has changed yet.** `codebase2_full_mmm/` still
-> predates the v1.5 scaling fix. Do not fit it on client data until the **P0** items in §4 are done.
+> **Status:** blueprint, 2026-09-14; brought up to date with codebase 1 on 2026-10-07 (the package
+> layout, the fluid period, the pre-model prior builder, the real-PyMC audit fixes, the checks
+> guide). **No code has changed yet.** `codebase2_full_mmm/` still predates the v1.5 scaling fix.
+> Do not fit it on client data until the **P0** items in §4 are done.
 >
 > **Decisions of record:** `../../CLAUDE.md` (the Phase 2 brief). **Meridian source:**
 > `../../../meridian/meridian/` (read-only). Every Meridian claim below carries a file pointer.
 > **One-page overview:** `Codebase_2_blueprint.html` in this folder. (`PHASE2_ARCHITECTURE.html` is an
 > HTML render of this file.)
-> **Companions:** `METHODOLOGY.md` (the order to build in), `EXPLANATION.md` (what the
-> transforms do and how they move the numbers) and `EDA_CHECKS.md` (what is checked).
+> **Companions:** `METHODOLOGY.md` (the order to build in), `EXPLANATION.md` (the model equation
+> term by term: the adstock and saturation forms, our choice among them, and the trade and
+> baseline variables) and `EDA_CHECKS.md` (what is checked).
 
 Written for the MMM team. Meridian's vocabulary is translated into standard MMM terms
 throughout: decay (adstock), EC50 (half-saturation), coefficients, random effects, contribution priors,
@@ -58,7 +61,9 @@ the reconciliation audit trail, and run hygiene (warning documents, one plotting
 Codebase 2 has almost none of it.
 
 - **Direction of travel:** codebase 1 infrastructure goes *into* codebase 2, never the reverse.
-- **31 capabilities** are listed in §2.
+- **39 capabilities** are listed in §2. Eight were added on 2026-10-07 for what codebase 1 has
+  gained since: the scaling window, the pre-model prior builder, version stamps, the web-app
+  contract, the audited convergence report, a real-PyMC test, the package layout and the docs.
 - **7 of them cannot be copied as-is**, because learned transforms break an assumption they rest on
   (§3).
 - **Build order:** P0 → P1 → P2 → P3 (§4).
@@ -131,7 +136,7 @@ The Trade and Competitor TV defaults:
 |---|---|---|
 | Input | pre-transformed features | **raw** media + spend |
 | Transforms | fixed upstream, invisible to the model | **learned in-model** |
-| Status | live, 995 local checks, eight real-data runs | early design, ~2,570 lines, no work since |
+| Status | live: a package `mmm/{core,data,modelling,reporting,checks}`, 1968 local checks (incl. the BRIDGE web app that runs it), eight real-data runs | early design, ~2,570 lines in flat files, no work since |
 | Scaling | `resolve_scaling`: every column, both sides of every transform | hard-wired per column type. **The v1 defect is still present** |
 | Priors | `prior_sd_basis` / `prior_mean_basis`, three pooling modes | a raw log-scale sd, hierarchical/global only |
 | Front end | `config.yaml` + prior CSV | Python driver |
@@ -150,7 +155,9 @@ The Trade and Competitor TV defaults:
 | `eda.py` | panel gaps, media summary, cost consistency, outliers |
 | `cross_validation.py` | `cv_transform_stability.csv`: do decay and EC50 hold across folds? |
 
-`fit.py` and `compat.py` are **line-for-line identical** in the two codebases. Keep them in sync.
+`fit.py` and `compat.py` are identical in the two codebases apart from one import line
+(`from mmm.core.config import SamplerConfig` in codebase 1, `from config import …` in codebase 2).
+Keep them in sync.
 
 **Figure D1. Direction of travel.**
 
@@ -191,7 +198,14 @@ Grey is ported from codebase 1. Green is kept from codebase 2. Amber is new in P
 ## 2. Adoption table
 
 How to read it:
-- **Codebase 1 source** is `file::function` in `codebase1_hierarchical_mmm/`.
+- **Codebase 1 source** is `file::function` in `codebase1_hierarchical_mmm/`. Codebase 1 has been a
+  package since September 2026:
+  - `mmm/core/`: config, settings, compat;
+  - `mmm/data/`: data_prep, prior_builder, mapping;
+  - `mmm/modelling/`: model, fit;
+  - `mmm/reporting/`: outputs, reconciliation, benchmark, plotting, prior_plots;
+  - `mmm/checks/`: diagnostics, assumptions, warnings_report, cross_validation;
+  - `mmm/run_pipeline.py` and `mmm/app_job.py` (the web app's job).
 - **Action** is one of:
   - **port**: copy the logic;
   - **port + adapt**: copy it, then change it for learned transforms (see §3);
@@ -202,82 +216,90 @@ How to read it:
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| One scaling helper for every column | `data_prep.py::resolve_scaling` | returns *(centre, scale)*; every column becomes `(v − centre) / scale`, using training-window stats only | hard-wired per column type | **port + adapt**: add `median_positive`, the statistic codebase 2 already uses for media | P0 |
-| Per-feature centring and scaling | `FeatureSpec.center_mode`, `scale_mode` | lets always-on level variables (TDP, price) be centred. This is the v1 fix | signed linear features are scale-only, **the v1 defect** | port | P0 |
+| One scaling helper for every column | `mmm/data/data_prep.py::resolve_scaling` | returns *(centre, scale)*; every column becomes `(v − centre) / scale`, using training-window stats only | hard-wired per column type | **port + adapt**: add `median_positive`, the statistic codebase 2 already uses for media | P0 |
+| Per-feature centring and scaling | `FeatureSpec.center_mode`, `scale_mode` | lets always-on level variables (TDP, price) be centred. This is the v1 fix. Since 2026-09-22 a blank cell means `none` / `none` for every sign (raw units), and the old `center` column is **removed**: a prior file that still carries it is rejected | signed linear features are scale-only, **the v1 defect** | port, with the same defaults and the same rejection | P0 |
 | KPI scale = unit of the priors | `RunConfig.dv_center`, `dv_scale`, `dv_scale_scope` | priors derived on another scale can be expressed; the inverse transform stays exact | fixed per-region standardise | port | P0 |
-| Data guards | `RunConfig.zero_threshold_rel`, `min_feature_scale`, `near_constant_sd` | catches dust columns (the coupon extract at ~1e-15) and flat always-on columns | none | port, and apply to spend | P0 |
+| Data guards | `RunConfig.zero_threshold_rel`, `min_feature_scale`, `near_constant_sd` | catches dust columns (the coupon extract at ~1e-15) and flat always-on columns. `near_constant_sd` is now **relative**: sd ÷ the mean of the non-zero values, on columns active in over 90% of weeks, so it works on unscaled columns too | none | port, and apply to spend | P0 |
+| Scaling window | `RunConfig.scaling_window` (`train`, the default, or `full`); `mmm/data/data_prep.py::split_train` | one function decides the training window for the model and the pre-model step alike. `full` takes the statistics from the whole panel: the holdout is then not strictly out of sample (warned), and CV always forces `train`. The team's `config.yaml` uses `full` | training weeks hard-wired | port | P0 |
 
 ### B. Priors
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Prior units | `config.py::resolve_prior_params`, `lognormal_sigma`, `lognormal_moments`; `prior_sd_basis`, `prior_mean_basis` | writing `0.2` with `relative` really means ±20%; median vs mean is explicit | `prior_beta_sd` on the raw log scale, no conversion | **port, then reuse for contribution-volume priors** (§10) | P0 |
-| Three pooling modes | `FeatureSpec.pooling`; buckets `h*` / `i*` / `g*` in `model.py::_bucket_betas` | per feature: shrink accounts toward a shared mean, estimate each alone, or share one coefficient | hierarchical or global only | port the `independent` buckets | P0 |
-| Region-specific priors | `RegionPrior`, `validate_region_priors` | override one retailer's prior; a misspelt region stops the run | none | port | P1 |
+| Prior units | `mmm/core/config.py::resolve_prior_params`, `lognormal_sigma`, `lognormal_moments`; `prior_sd_basis`, `prior_mean_basis` | writing `0.2` with `relative` really means ±20%; median vs mean is explicit | `prior_beta_sd` on the raw log scale, no conversion | **port, then reuse for contribution-volume priors** (§10) | P0 |
+| Pre-model prior builder | `mmm/data/prior_builder.py::build_priors`, `decide_case`, `check_units`; `mmm/data/mapping.py::load_mapping`, `align_regions` | generates the prior file from the **datacube**, filled in from a mapping file (vendor ↔ our variables, optionally with the vendor's contributions) and a share file (media / expert / comp_media / trade / baseline). Four cases: contributions; mapping + shares; shares only; a skeleton. `national_basis: average` or `weighted`. Writes `feature_priors_national.csv` (hierarchical), `feature_priors_regional.csv` (independent) and `prior_calculation.xlsx`. Its means hold only with `dv_scale: mean`, `dv_scale_scope: region`, `dv_aggregation: mean` | none | **port + adapt**: unchanged for linear and carryover-only features; for a saturating channel the group's contribution (or share × total volume) becomes the volume target V instead of a coefficient (§10) | P1 |
+| Three pooling modes | `FeatureSpec.pooling`; buckets `h*` / `i*` / `g*` in `mmm/modelling/model.py::_bucket_betas` | per feature: shrink accounts toward a shared mean, estimate each alone, or share one coefficient | hierarchical or global only | port the `independent` buckets, in their audited form: an `independent` + `free` coefficient is one sampled parameter (it used to be a Normal and a Deterministic both named `beta_ifree`, which PyMC refuses) | P0 |
+| Region-specific priors | `mmm/core/config.py::RegionPrior`, `validate_region_priors` | override one retailer's prior; a misspelt region stops the run | none | port | P1 |
 | Intercept switch | `ModelConfig.include_intercept`, `INTERCEPT_PARAMS` | vendor-style decomposition with no free intercept | always on | port | P2 |
 
 ### C. Configuration
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| YAML front end | `settings.py::load_settings`, `run_from_yaml`, `HELP`, `write_default_yaml`; `config.yaml` | every setting listed at its default with one line of help; a typo is an error; writes `01_data/resolved_config.yaml` | hand-edited Python driver | **port + adapt**: add `transforms:`, `priors:` and `eda:` sections (§13) | P0 |
-| Feature table | `config.py::load_feature_config` (the prior CSV) | one row per modelled column | `load_channel_config` (media) plus `FeatureSpec` objects (controls) | **port + adapt**: **one** table, with transform columns (§13) | P0 |
+| YAML front end | `mmm/core/settings.py::load_settings`, `run_from_yaml`, `HELP`, `write_default_yaml`; `config.yaml` | every setting listed at its default with one line of help; a typo is an error; writes `01_data/resolved_config.yaml` | hand-edited Python driver | **port + adapt**: add `transforms:`, `priors:` and `eda:` sections (§13) | P0 |
+| Feature table | `mmm/core/config.py::load_feature_config` (the prior CSV) | one row per modelled column | `load_channel_config` (media) plus `FeatureSpec` objects (controls) | **port + adapt**: **one** table, with transform columns (§13) | P0 |
+| Version stamps | `mmm.__version__`, each module's `__codebase__`, `mmm.check_sync()` | every entry point prints the codebase version; a half-uploaded folder names its stale modules instead of silently running old logic | none | port | P1 |
+| Web-app contract | `mmm/core/settings.py::config_schema`, `CHOICES`; `app_access.yaml`; `mmm/app_job.py` | what the BRIDGE app needs to drive a codebase: the settings schema, who may change what, the job entry point | none | only if BRIDGE is to run codebase 2 | P3 |
 
 ### D. Assumptions and diagnostics
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Collinearity on the design matrix | `assumptions.py::design_matrix`, `vif`, `condition_index`, `correlation_pairs`, `write_collinearity` | what the data can separate, including a column that duplicates the intercept (uncentred VIF + Belsley condition number) | VIF on raw data in `eda.py` | **port + adapt** (§3, item 3) | P0 |
-| Threshold config | `config.py::AssumptionConfig` (25 thresholds) | widen or narrow any check from `config.yaml` | constants in code | port | P0 |
-| Residual battery | `assumptions.py::residual_assumptions` | linearity, Durbin-Watson, heteroscedasticity, tails, influence | none | port | P0 |
-| Structural checks | `confounding_pairs`, `exogeneity_cross_correlation`, `posterior_predictive_p`, `negative_baseline_probability` | the three checks adopted from Meridian, plus feature vs residual at leads and lags | none | port | P1 |
-| Posterior trade-offs | `assumptions.py::posterior_correlation` | which coefficient pairs the model cannot separate | none | **port + adapt**: add decay / EC50 / peak lag vs β | P1 |
-| Contraction bookkeeping | `diagnostics.py::prior_posterior_report`, `_use_for_delta`, `_role_of` | exactly one parameter family per feature feeds the delta arithmetic; separate `feature` and `region` columns | basic contraction table | **port + adapt**: add transform parameters and log contribution volume | P1 |
+| Collinearity on the design matrix | `mmm/checks/assumptions.py::design_matrix`, `vif`, `condition_index`, `correlation_pairs`, `write_collinearity` | what the data can separate, including a column that duplicates the intercept (uncentred VIF + Belsley condition number). Since 2026.10.06.1: a `vif_note` on every row, columns with no activity in a region left out of its design, and `max_vif` blank (not 0) with an infinite condition index when a region has more columns than periods, plus the warning `collinearity_not_computable` (codebase 1 `docs/cases/001`) | VIF on raw data in `eda.py` | **port + adapt** (§3, item 3) | P0 |
+| Threshold config | `mmm/core/config.py::AssumptionConfig` (25 thresholds) | widen or narrow any check from `config.yaml` | constants in code | port | P0 |
+| Residual battery | `mmm/checks/assumptions.py::residual_assumptions` | linearity, Durbin-Watson, heteroscedasticity, tails, influence | none | port | P0 |
+| Structural checks | `mmm/checks/assumptions.py`: `confounding_pairs`, `exogeneity_cross_correlation`, `posterior_predictive_p`, `negative_baseline_probability` | the three checks adopted from Meridian, plus feature vs residual at leads and lags | none | port | P1 |
+| Posterior trade-offs | `mmm/checks/assumptions.py::posterior_correlation` | which coefficient pairs the model cannot separate | none | **port + adapt**: add decay / EC50 / peak lag vs β | P1 |
+| Contraction bookkeeping | `mmm/checks/diagnostics.py::prior_posterior_report`, `_use_for_delta`, `_role_of` | exactly one parameter family per feature feeds the delta arithmetic; separate `feature` and `region` columns | basic contraction table | **port + adapt**: add transform parameters and log contribution volume | P1 |
+| Convergence report on ArviZ 1.x | `mmm/checks/diagnostics.py::posterior_summary` (one variable at a time, `round_to="none"`), BFMI and the energy / trace plots drawn from `sample_stats` with matplotlib, `_SAMPLED_BETA_PREFIXES`; `mmm/checks/warnings_report.py::split_library_notices` | the 2026-10-01 real-PyMC audit (PyMC 6.3, ArviZ 1.3) found these silently wrong or missing: mislabelled region × feature rows, small coefficients rounded away, no BFMI and no plots, library notices flooding `00_warnings` (now `library_notices.csv`), ADVI R-hat printed as a failure (now n/a) | the pre-audit versions | port the audited versions | P1 |
 
 ### E. Reporting vocabulary
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
 | Baseline flag | `FeatureSpec.baseline`; `Decomposition.core_draws`, `baseline_features` | `__baseline__` = `__baseline_core__` + every `baseline=1` feature; each part is still listed | baseline = intercept + seasonality + trend only | port | P1 |
-| Contribution reference | `FeatureSpec.contribution_reference`; `outputs.py::compute_decomposition` (`contrib_shift`) | measure a driver against zero, its mean, its minimum or a number. Reporting only; the fit does not change | none | **port + adapt**: media always vs zero; propose `max` for price | P1 |
+| Contribution reference | `FeatureSpec.contribution_reference`; `mmm/reporting/outputs.py::compute_decomposition` (`contrib_shift`) | measure a driver against zero, its mean, its minimum or a number. Reporting only; the fit does not change | none | **port + adapt**: media always vs zero; propose `max` for price | P1 |
 | Pillars | `FeatureSpec.pillar`; `contribution_by_pillar.csv`; `baseline_breakdown.png` | vendor-style roll-up (Trade, TV, Online Media, Baseline) | none | port | P1 |
 
 ### F. Reconciliation
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Audit trail | `reconciliation.py::write_model_input`, `write_prior_summary`, `write_actual_vs_predicted`, `write_contribution_timeseries`, `write_contribution_summary`, `write_contribution_reconciliation`, `write_contribution_math` | every reported number can be re-derived by hand, from raw input to actual sales | none | **port + adapt** (§3, item 1) | P1 |
-| Output switches | `config.py::OutputConfig` (`core_only`, `tables_only`) | light runs; no PNG floods on Databricks `/Workspace` | writes everything | port | P1 |
+| Audit trail | `mmm/reporting/reconciliation.py::write_model_input`, `write_prior_summary`, `write_actual_vs_predicted`, `write_contribution_timeseries`, `write_contribution_summary`, `write_contribution_reconciliation`, `write_contribution_math` | every reported number can be re-derived by hand, from raw input to actual sales. Since 2026.10.07.2 the median gap is traced: `incremental_total_volume` splits it into baseline / incremental / cross parts that add up exactly, and `contribution_reconciliation_chain.csv` prints the blocks top to bottom (codebase 1 `docs/cases/002`) | none | **port + adapt** (§3, item 1) | P1 |
+| Output switches | `mmm/core/config.py::OutputConfig` (`core_only`, `tables_only`) | light runs; no PNG floods on Databricks `/Workspace` | writes everything | port | P1 |
 
 ### G. Run hygiene
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Warning documents | `warnings_report.py::collect_warnings`, `write_warning_docs` | `00_warnings/00_INDEX.md` plus one document per category, instead of 65 repeated paragraphs | printed | port; add categories for transform bounds, build checks and raw-data checks | P1 |
-| One figure owner | `plotting.py::set_figure_defaults`, `save_fig`, `annotate`, `units_note` | consistent size, dpi and labels; WSFS-safe saving | local `save_fig` copies | port | P1 |
-| Prior / posterior charts | `prior_plots.py::write_prior_posterior_plots`, `implied_likelihood` | the three-curve chart per parameter | none | port | P2 |
+| Warning documents | `mmm/checks/warnings_report.py::collect_warnings`, `write_warning_docs` | `00_warnings/00_INDEX.md` plus one document per category, instead of 65 repeated paragraphs | printed | port; add categories for transform bounds, build checks and raw-data checks | P1 |
+| One figure owner | `mmm/reporting/plotting.py::set_figure_defaults`, `save_fig`, `annotate`, `units_note` | consistent size, dpi and labels; WSFS-safe saving | local `save_fig` copies | port | P1 |
+| Prior / posterior charts | `mmm/reporting/prior_plots.py::write_prior_posterior_plots`, `implied_likelihood` | the three-curve chart per parameter | none | port | P2 |
 
 ### H. Coefficient-report semantics
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Honest significance | `outputs.py::coefficient_report`: `t_stat` (mean ÷ posterior sd), `p_value_basis`, `prob_negligible` + `OutputConfig.rope_scaled`, `data_support` incl. near-constant | no sampler-length-dependent t-stats; a real "negligible?" probability for sign-constrained features | P(>0) and a basic support flag | port | P2 |
-| Like-for-like fit metrics | `outputs.py::fit_report`: `r2_within_region`, `__aggregate__` row | compare with national vendor models; don't quote the pooled R² | per-region R², `__all__` | port | P2 |
+| Honest significance | `mmm/reporting/outputs.py::coefficient_report`: `t_stat` (mean ÷ posterior sd), `p_value_basis`, `prob_negligible` + `OutputConfig.rope_scaled`, `data_support` incl. near-constant | no sampler-length-dependent t-stats; a real "negligible?" probability for sign-constrained features | P(>0) and a basic support flag | port | P2 |
+| Like-for-like fit metrics | `mmm/reporting/outputs.py::fit_report`: `r2_within_region`, `__aggregate__` row | compare with national vendor models; don't quote the pooled R² | per-region R², `__all__` | port | P2 |
 
 ### I. Periods, cross-validation, benchmark
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Cadence presets | `config.py::PeriodPlan`, `resolve_period_plan`, `infer_cadence` | weekly and monthly panels get sensible holdout, MAT and CV counts | hard-coded 13 / 52 | port | P2 |
-| Model selection | `cross_validation.py::scorecard`, `select_model`, `compare_cv_runs`; `CVConfig.enabled`, `resolved` | gate → accuracy beyond one standard error → stability → parsimony | `run_cv` with no scorecard | port; **keep** transform stability | P2 |
-| Benchmark sheet | `benchmark.py::write_benchmark_comparison`, `load_mapping`, `sheet_rows`, `benchmark_values` | paste a vendor contribution; live formulas; regions across the columns; group + member rows (R on the group, contraction per member) | none | **port + adapt** (§3, item 2) | P2 |
+| The fluid period | `mmm/core/config.py::PeriodPolicy`, `PeriodPlan`, `resolve_period_plan`, `infer_cadence` | a year is always 52 weeks or 12 months; everything else is a fraction of the panel: holdout and CV horizon 12.5%, CV minimum training half the panel but never under a year, 5 folds capped at what fits. MAT 1 = year 1. Precedence: an absolute number, then a fraction, then the policy; half-up rounding. 104 weeks → 13 / 13 / 52; 208 weeks → 26 / 26 / 104 | hard-coded 13 / 52 | port | P2 |
+| Model selection | `mmm/checks/cross_validation.py::scorecard`, `select_model`, `compare_cv_runs`; `CVConfig.enabled`, `resolved` | gate → accuracy beyond one standard error → stability → parsimony | `run_cv` with no scorecard | port; **keep** transform stability | P2 |
+| Benchmark sheet | `mmm/reporting/benchmark.py::write_benchmark_comparison`, `sheet_rows`, `benchmark_values`; `mmm/data/mapping.py::load_mapping` | paste a vendor contribution; live formulas; regions across the columns; group + member rows (R on the group, contraction per member); the correction `new = old × R^(1/(1 − max(c, 0)))` | none | **port + adapt** (§3, item 2): for a saturating channel the correction applies to the volume target V | P2 |
 
 ### J. Tests and shared modules
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Tests with no PyMC | `tests/run_all.py` (995 checks, stubbed pymc and matplotlib) | scaling, decomposition and reporting logic run on a laptop | none | **new** suite `tests_phase2/`. Do not extend the codebase 1 suites | P0 |
-| Sampler and trace shims | `fit.py`, `compat.py` | NumPyro/JAX on GPU with fallbacks; InferenceData vs DataTree | identical files | keep in sync | — |
+| Tests with no PyMC | `tests/run_all.py` (1968 checks, stubbed pymc and matplotlib) | scaling, decomposition and reporting logic run on a laptop | none | **new** suite `tests_phase2/`. Do not extend the codebase 1 suites | P0 |
+| A real-PyMC test | `tests/test_v24_real_pymc.py` | samples the real model on a small panel and SKIPs without PyMC: the only test that can catch a PyMC or ArviZ API change | none | **new**: the same for codebase 2, transforms included | P1 |
+| Package layout | `mmm/{core,data,modelling,reporting,checks}`, absolute imports from the package root, entry points at the folder root | one place for each concern; the shared modules import cleanly | flat files; `tests/test_no_pymc.py` swaps `sys.path` between the two codebases | **new**: the same layout under its own package name (proposal: `mmm2`), so both import side by side | P0 |
+| Modeller docs | `docs/CONFIG_GUIDE.md`, `CHECKS_GUIDE.md` (every check: theory, a real example, how to read it, what to change), `OUTPUTS_GUIDE.md`, `FEATURE_PRIOR_GUIDE.md`, `cases/` (one file per real problem) | the references a modeller works from | the planning docs in this folder | codebase 2 editions, with the transform checks as new chapters | P1 |
+| Sampler and trace shims | `mmm/modelling/fit.py`, `mmm/core/compat.py` | NumPyro/JAX on GPU with fallbacks; InferenceData vs DataTree | identical files (one import line differs) | keep in sync | — |
 
 ---
 
@@ -296,6 +318,10 @@ break that. The seven places it matters:
      Σx is not fixed, so there is no single coefficient to correct.
    - The correction moves onto **contribution volume**. The benchmark's volume becomes the prior
      target directly, and the model converts it into a coefficient on every draw (§10).
+   - Codebase 1's correction rule carries over: `new = old × R^(1/(1 − max(c, 0)))`, with R
+     computed once on a vendor group and c per member. On a saturating channel it multiplies V.
+     Codebase 1 `docs/METHODOLOGY.md` §2d applies too: above c ≈ 0.7 the correction is an
+     extrapolation, and correcting twice does not converge.
 3. **`design_matrix` for collinearity.**
    - Pre-fit, measure media on **raw scaled media**. This is what the data can separate before any
      transform.
@@ -354,7 +380,7 @@ transform checks.
   - `resolve_scaling`, with the centring and scaling modes and `dv_scale*`;
   - prior units, plus the contribution-volume prior conversion (§10);
   - `settings.py`, `config.yaml` and the one feature table;
-  - `tests_phase2/` skeleton.
+  - the package layout (§2 J) and a `tests_phase2/` skeleton.
 - Done when:
   - split pieces add back to their parent, every week and region;
   - the v1 always-on level-variable case passes;
@@ -366,21 +392,22 @@ transform checks.
   - `OutputConfig`;
   - baseline / reference / pillar;
   - `warnings_report.py` and `plotting.py`;
-  - contraction, posterior correlation and bound flags on transform parameters.
+  - contraction, posterior correlation and bound flags on transform parameters;
+  - the audited convergence report, version stamps, the pre-model prior builder and a real-PyMC test.
 - Done when:
   - every identity in `contribution_reconciliation.csv` holds on every draw;
-  - the v7 variables rebuild from recipes.
+  - the v7 variables load from the datacube, with any split pieces adding back to their parent.
 
 **P2: quality of life**
 - Contents:
   - `benchmark.py`, on volume;
   - `prior_plots.py`;
-  - cadence / `PeriodPlan`;
+  - the fluid period (`PeriodPolicy` / `PeriodPlan`);
   - CV scorecard and `select_model`;
   - `include_intercept`;
   - `rope_scaled` / `prob_negligible`;
   - `data_support`.
-- Done when: CV compares recipe variants and `min_lag` variants using the one-standard-error rule.
+- Done when: CV compares split variants and `min_lag` variants using the one-standard-error rule.
 
 **P3: new or pending**
 - Contents:
@@ -509,6 +536,7 @@ flowchart TB
 | `dummy_*` (21 rows) | `baseline=0`, pillar *Baseline* | `baseline=1` |
 | `media_competitor-tv_…_grps` | `baseline=0`, pillar *Competitor TV* | `baseline=1`; `transform=geometric`; `saturation=none` |
 | `sales_brand_…_distribution_tdp_*`, `sales_brand_…_price_base-price_*` | `baseline=1` | no change |
+| every row | a `center` column (0) | drop the column: codebase 1 has rejected it since 2026-09-22, and `center_mode` is the only centring setting |
 
 In codebase 1 the **pillar** roll-up already files the dummies under *Baseline*. But `__baseline__`
 itself is decided by the **flag**, not the pillar name, so the dummies are not in it today.
@@ -527,15 +555,18 @@ with the rules in §9.2, from the slowest decay each family is allowed.
 | OOH `media_ooh_*_invest_2024/2025` | 2 | delayed, θ ∈ [0, 2] | Hill | 0–8 wk | α ≤ 0.717 | median of active weeks | + | hierarchical | **contribution volume** (metric = spend) | 0 | Online Media |
 | Competitor TV `media_competitor-tv_*` | 1 | geometric | none | 0–13 wk | α ≤ 0.807 | median of active weeks | − | hierarchical | coefficient | **1** | Competition |
 | BTL `btl_*_invest_*` | 6 | geometric | none | 0–4 wk | α ≤ 0.549 (half-life ≤ 1.2 wk) | median of active weeks | + | hierarchical | coefficient | 0 | Trade |
-| TPR `sales_brand_*_trade_tpr_*` | 3 | none | — | — | — | mean of positives, or centred if always on | + | hierarchical | coefficient | 0 | Trade |
-| Distribution `…_distribution_tdp_*` (ACV) | 3 | none | — | — | — | centre mean, scale sd | + | hierarchical | coefficient | 1 | Baseline |
-| Base price `…_price_base-price_*` (AVP) | 3 | none | — | — | — | centre mean, scale sd | − | hierarchical | coefficient | 1 | Baseline |
-| Category volume and price `sales_market_*` | 2 | none | — | — | — | centre mean, scale sd | + | hierarchical | coefficient | **1** | Baseline |
+| TPR `sales_brand_*_trade_tpr_*` | 3 | none | — | — | — | as delivered, or centred if always on | + | hierarchical | coefficient | 0 | Trade |
+| Distribution `…_distribution_tdp_*` (ACV) | 3 | none | — | — | — | centred, unscaled | + | hierarchical | coefficient | 1 | Baseline |
+| Base price `…_price_base-price_*` (AVP) | 3 | none | — | — | — | centred, unscaled | − | hierarchical | coefficient | 1 | Baseline |
+| Category volume and price `sales_market_*` | 2 | none | — | — | — | centred, unscaled | + | hierarchical | coefficient | **1** | Baseline |
 | Event dummies `dummy_*` | 21 | none | — | — | — | none / none | free | global | coefficient | **1** | Baseline |
 | Core: intercept, trend, Fourier | — | — | — | — | — | — | — | pooled | model block | core | Baseline |
 
 - **Reference.** Every contribution is measured against zero. For price, §9.3 proposes an
   additional `max` option ("versus price at its highest").
+- **Trade and baseline transforms.** Why these families get no adstock or Hill, and the options
+  beyond linear (log price or TDP, the post-promotion dip, price relative to competitors), are in
+  `EXPLANATION.md` §7.
 - **OOH columns.** `ooh_…_2024` and `ooh_…_2025` are one activity split by year. Merge them unless
   the split is deliberate.
 - **The 27-feature retailer datacube maps the same way:**
@@ -548,14 +579,15 @@ with the rules in §9.2, from the slowest decay each family is allowed.
 
 ## 7. Data preparation
 
-All statistics are computed on the **training window only**. Every inverse transform uses the
-same stored numbers.
+All statistics come from the window `run.scaling_window` names: the **training weeks** by default.
+`full` (the whole panel) is allowed and warned, and CV always uses the training weeks. Every
+inverse transform uses the same stored numbers.
 
 | Column type | Centre | Scale | Why | Meridian equivalent (`model/transformers.py`) |
 |---|---|---|---|---|
-| KPI `dv` | training mean per account | training sd per account | coefficients read "account sd of sales" | `KpiTransformer`: per capita, one global mean and sd |
+| KPI `dv` | `dv_center`: none, or the account mean | **the account's mean week** (`dv_scale: mean`, `dv_scale_scope: region`): what the generated priors assume. `sd` is codebase 1's template default and is wrong for them | coefficients read "fraction of an account's average week" | `KpiTransformer`: per capita, one global mean and sd |
 | Transformed media: TV, digital, OOH, Competitor TV, BTL | none | **median of positive training weeks**, per account × channel | zero activity stays zero; **EC50 lives on this axis** | `MediaTransformer`: one per-channel median of non-zero values × population |
-| Level drivers: TDP / ACV, base price, category volume and price | training mean | training sd | always-on columns would otherwise duplicate the intercept (the v1 defect) | `CenteringAndScalingTransformer` |
+| Level drivers: TDP / ACV, base price, category volume and price | the mean, when always on (`center_mode: mean`) | none (codebase 1's default since 2026-09-22), so the generated raw-unit priors stay valid | always-on columns would otherwise duplicate the intercept (the v1 defect) | `CenteringAndScalingTransformer` |
 | TPR | none if zero means "no promotion"; mean if always on | mean of positives, or sd | the `near_constant_sd` guard tells you which | non-media treatment |
 | Event dummies | none | none | already 0 / 1 | control |
 
@@ -564,9 +596,10 @@ same stored numbers.
 > to 100% either way, so no reconciliation check can catch a mismatch. This is the Phase 1 scaling
 > rule with one new surface.
 
-v7 passes every column through unscaled (`none/none`), because its priors were derived on that
-axis. Transformed media cannot do that: EC50 needs the "typical active week" axis. When a level
-driver switches to centring, re-derive its prior on the new axis (METHODOLOGY §1, stage 2).
+v7 passes every column through unscaled (`none/none`), codebase 1's default since 2026-09-22,
+because the generated priors are per raw unit. Transformed media cannot do that: EC50 needs the
+"typical active week" axis. Centring a level driver does not change its prior's units, only the
+reference it is reported against. Adding a scale does change them, so re-derive the prior then.
 
 **Figure D6. The lag tensor** (`data_prep.py::make_lag_tensor`).
 
@@ -619,7 +652,7 @@ One channel, step by step. The code for steps 3 and 4 already exists in `transfo
 | 3. Lag window | only lags `min_lag … max_lag` can carry weight | weights outside the window = 0 | fixed |
 | 4. Adstock | weighted average of the recent weeks; weights sum to 1, so the output stays on the step-2 axis | geometric `w_l ∝ α^l`; delayed `w_l ∝ α^((l−θ)²)` | **α, θ** |
 | 5. Saturation | diminishing returns; 0 at no activity, 0.5 at EC50, approaching 1 | `h = a^s / (a^s + ec^s)`; or skipped when `saturation = none` | **ec, s** |
-| 6. Coefficient | account-specific effect at full saturation, in KPI sd units | `β[g] · h` | **β** (from the volume prior, §10) |
+| 6. Coefficient | account-specific effect at full saturation, in units of the account's KPI scale | `β[g] · h` | **β** (from the volume prior, §10) |
 | 7. Contribution | back to sales units | `β[g] · h · dv_scale[g]` | — |
 
 **Figure D7. The chain, with its priors.**
@@ -723,6 +756,8 @@ of active weeks in an example channel.
 | Lag window meaning | `max_lag` = last lag included, window of `max_lag + 1` weeks (`adstock_hill.py::_adstock`), default 8 | `ChannelSpec.max_lag` counts **slots** (13 → lags 0–12) | adopt Meridian's meaning; migrate `ChannelSpec` |
 | Peak lag | none; geometric or binomial decay both peak at lag 0 | delayed adstock `α^((l−θ)²)`, the Jin et al. (2017, Google) form | keep; add `min_lag` (§9.2) |
 | Binomial decay | `(1 − l/window)^(1/α − 1)` | none | P3 |
+| Normalisation | always (`compute_decay_weights(normalize=True)`) | always | same. `adstock_normalise: false` only for the bridge test (`EXPLANATION.md` §4.4) |
+| A window longer than the data | the window becomes the whole media history (`adstock_hill.py`, line 254) | — | allow `max_lag` up to the panel length, for a deliberate long-term variable (`EXPLANATION.md` §4.8) |
 | Saturation off per channel | `saturation_spec = "none"` (`equations.py::adstock_hill_media`) | `adstock = "none"` switches off both transforms | add a separate `saturation` column |
 | Order | `hill_before_adstock=False` by default | adstock then Hill | keep the default; the option is P3 |
 | Slope | `Deterministic(1.0)` for media | fixed 1.0 unless `learn_slope` | same |
@@ -839,8 +874,9 @@ flowchart TB
   window is setting the carryover, not α. Warn, keep the written bound, and report
   `alpha_max_supported_by_window`.
 - `ec_min > 0`. A raw-unit EC50 bound needs a positive media scale. **Error** on an all-zero channel.
-- A parameter both pinned and bounded: the pin wins, with a warning. This is codebase 1's rule from
-  `center` vs `center_mode`: two settings meaning the same thing must never disagree silently.
+- A parameter both pinned and bounded: the pin wins, with a warning. This is the lesson of codebase
+  1's `center` vs `center_mode`, which ended with `center` removed: two settings meaning the same
+  thing must never disagree silently.
 
 **Bound diagnostics after the fit** (new columns in `04_transforms/transform_parameters.csv`)
 
@@ -874,7 +910,7 @@ flowchart TB
 - This is the "lag" the team applies in preprocessing today.
 - It is **fixed, not learned**. NUTS samples only continuous parameters, so `min_lag` is chosen by
   fitting variants (0, 1, 2) and comparing them in cross-validation with the one-standard-error rule
-  (`cross_validation.py::select_model`).
+  (`mmm/checks/cross_validation.py::select_model`).
 - The code change is small: `transforms.py::adstock_weights_pt` already multiplies by `lag_mask`
   before normalising, so `min_lag` just zeroes the first rows of that mask.
 
@@ -940,7 +976,8 @@ max_lag = ceil( ln(0.05) / ln(α_max) − 1 )
 
 **Rule 4 — caps from the data.**
 - Keep `max_lag` at or below about a quarter of the training weeks (91 → 22), so most weeks have a
-  full window.
+  full window. A deliberate long-term variable is the exception, with media history supplied
+  (`EXPLANATION.md` §4.8).
 - Every extra week of window adds a week of understated carryover at the start of the series, unless
   lead-in media is supplied. See the §7 table: at α = 0.8, week 3 still misses 38.2% of its weight.
 
@@ -966,6 +1003,9 @@ max_lag = ceil( ln(0.05) / ln(α_max) − 1 )
  lag 16 | █                    0.006   … and so on
 ```
 
+With normalised weights the cut share is not lost: it is re-spread over the lags inside the
+window, so the effect arrives earlier than it should (`EXPLANATION.md` §4.3–4.5).
+
 #### Worked windows for our families
 
 | Family | Slowest decay allowed | α_max | Rule | max_lag | Cut at α_max |
@@ -983,8 +1023,8 @@ without lead-in media.
 ### 9.3 Other mins and maxes in the pipeline
 
 **Scaling statistics**
-- Median of positive training weeks for media; mean and sd for level drivers and the KPI; training
-  window only (§7).
+- Median of positive training weeks for media; the mean for centring a level driver (no scale);
+  the account's mean week for the KPI; all computed on `run.scaling_window` (§7).
 - Not min–max scaling: dividing by the maximum lets one outlier week move every EC50.
 
 **Reported ranges**
@@ -1045,7 +1085,10 @@ What follows from this:
   - Codebase 1 turned the vendor's volumes into coefficient priors as `contribution ÷ Σx ÷ dv_scale`.
   - Codebase 2 takes the vendor's volume directly, with no division outside the model. The division
     happens inside, on every draw.
-- **The units machinery is unchanged.** V is positive and log-normal, so `config.resolve_prior_params`
+  - Codebase 1's pre-model step (`build_priors`) already produces the number: the vendor group's
+    contribution in case a), a share × total volume in cases b) and c). For a saturating channel
+    that number is V; for every other feature it is divided by support and `dv_agg`, as today.
+- **The units machinery is unchanged.** V is positive and log-normal, so `mmm/core/config.py::resolve_prior_params`
   and `lognormal_moments` apply as they are. `01_data/prior_summary.csv` prints each prior's implied
   median, mean and 90% range.
 
@@ -1175,12 +1218,13 @@ flowchart TB
 | `settings.py`, `config.yaml` | port codebase 1, extend | load and validate the YAML and the one feature table; typo guard; `resolved_config.yaml` |
 | `run_pipeline.py` | port codebase 1 structure, keep codebase 2 stages | stage order, warning capture, output folders |
 | `eda.py` | keep codebase 2, extend | build, raw-data and design checks before fitting (`EDA_CHECKS.md`) |
-| `data_prep.py` | merge | codebase 1 `resolve_scaling` + guards + `PeriodPlan`, onto codebase 2's `(G,T)` panel, lag tensor (with `min_lag` mask) |
+| `data_prep.py` | merge | codebase 1 `resolve_scaling` + `split_train` / `scaling_window` + guards + `PeriodPolicy` / `PeriodPlan`, onto codebase 2's `(G,T)` panel, lag tensor (with `min_lag` mask) |
 | `priors.py` | **new** | resolve bounds (§9.1); unit conversions; contribution volume → β in pytensor, with a numpy twin for tests |
+| `prior_builder.py`, `mapping.py` | port codebase 1, adapt | the pre-model step: datacube + mapping and share files → the feature table's prior columns; V for saturating channels (§10) |
 | `transforms.py` | keep codebase 2, extend | adstock and Hill in pytensor and numpy; `min_lag` mask; `saturation = none` |
 | `model.py` | merge | codebase 2 transform block + codebase 1 buckets (three pooling modes, region priors, `include_intercept`) |
 | `fit.py`, `compat.py` | shared, identical | NumPyro / JAX sampling with fallbacks; InferenceData shims |
-| `diagnostics.py` | port codebase 1, extend | convergence, contraction with `use_for_delta` for transform parameters and log contribution volume |
+| `diagnostics.py` | port codebase 1 (the audited 2026-10-01 version), extend | convergence, contraction with `use_for_delta` for transform parameters and log contribution volume |
 | `transform_report.py` | keep codebase 2, extend | parameter table with bound flags (§9.1), `adstock_ranges.csv`, curves, `transform_identifiability.csv` |
 | `outputs.py` | merge | codebase 1 coefficient semantics and baseline / reference logic, plus codebase 2's numpy replay of the transforms for the decomposition; fit metrics |
 | `reconciliation.py` | port codebase 1, adapt | audit trail; `contribution_math` per §3 item 1 |
@@ -1191,6 +1235,11 @@ flowchart TB
 | `synthetic_example.py` | keep codebase 2, extend | recovers known decay, EC50 **and contribution volume** |
 | `tests_phase2/` | **new** | no-PyMC suite (§16) |
 
+**Layout.** Codebase 1's modules live in a package (§2 J). Codebase 2 should take the same layout
+under its own name (proposal: `mmm2/{core,data,modelling,reporting,checks}`), so a test can import
+both without swapping `sys.path`. `priors.py` then sits in `mmm2/data/`, next to the prior builder
+it extends.
+
 ---
 
 ## 13. Configuration design
@@ -1200,7 +1249,7 @@ Two inputs:
 | File | What it holds | Written by |
 |---|---|---|
 | `config.yaml` | run settings | the modeller |
-| **one feature table** | one row per modelled column | the modeller; codebase 1's `mmm/data/prior_builder.py` can draft the prior columns |
+| **one feature table** | one row per modelled column | the modeller; codebase 1's pre-model step (`build_priors`: the datacube plus the mapping and share files) drafts the prior columns |
 
 ### `config.yaml`
 
@@ -1211,10 +1260,14 @@ defaults, and the group bounds are the §6 starting assumptions.
 data:
   datacube: model_datacube.csv              # the datacube as delivered
   feature_table: feature_table_phase2.csv
+  mapping_file: null                        # pre-model step, as in codebase 1
+  share_file: null                          # pre-model step, as in codebase 1
+  national_basis: average                   # average | weighted (use weighted with pooling: global)
 
 transforms:
   window_cut: 0.05          # largest share of carryover a lag window may cut (§9.2)
   ec_bounds: prior          # prior | data (§9.1)
+  normalise: true           # false only for the bridge test (EXPLANATION.md §4.4)
   defaults:
     geometric: {max_lag: 8, alpha_min: 0.0, alpha_max: null}   # null = largest the window supports
     delayed:   {max_lag: 8, peak_lag_min: 0, peak_lag_max: 2}
@@ -1230,9 +1283,11 @@ priors:
 
 run:
   dv_center: mean
-  dv_scale: sd
+  dv_scale: mean            # the generated priors assume mean; sd is wrong for them
   dv_scale_scope: region
-  holdout_periods: null     # cadence preset: 13 weeks
+  scaling_window: train     # train | full (the whole panel; warned)
+  holdout_periods: null     # null = the period policy: 12.5% of the panel (13 of 104 weeks)
+  holdout_fraction: null
   media_lead_in: 0          # weeks of media-only history before the KPI window (§7)
 
 sampler:
@@ -1253,19 +1308,20 @@ eda:
 - `variable`, `region`, `pooling`, `sign_constraint`
 - `global_prior_mean`, `global_prior_sd`, `regional_sd_prior`, `prior_sd_basis`, `prior_mean_basis`
 - `baseline`, `pillar`, `contribution_reference`, `center_mode`, `scale_mode`
+- **No `center` column**: codebase 1 rejects a file that carries one (since 2026-09-22).
 
 **New columns:**
 
 | Group | Columns |
 |---|---|
-| Transform | `transform` (none / geometric / delayed), `saturation` (hill / none), `transform_group` |
+| Transform | `transform` (none / geometric / delayed; binomial P3; `log`, a proposal for price and distribution), `saturation` (hill / none), `transform_group`, `adstock_normalise` (true; false for the bridge test only) |
 | Lag window | `min_lag`, `max_lag` |
 | Decay | `half_life_min`, `half_life_max`, or `alpha_min`, `alpha_max`; `fix_alpha` |
 | Peak lag | `peak_lag_min`, `peak_lag_max`, `fix_theta` |
 | EC50 | `ec_min`, `ec_max`, `ec_units` (scaled / raw), `fix_ec` |
 | Slope | `learn_slope`, `slope_min`, `slope_max`, `fix_slope` |
 | Prior | `media_prior_type`, `prior_contribution_volume`, `prior_contribution_sd` |
-| Lineage | `spend_col` (checks only), `recipe_id` (links back to `variable_dictionary.csv`) |
+| Lineage | `spend_col` (checks only), `split_of` (the parent of a split piece, `METHODOLOGY.md` §1.5) |
 
 **Five example rows, turned sideways.** The prior values are illustrative. Each name is written in
 full once; read across the row.
@@ -1280,8 +1336,8 @@ full once; read across the row.
 | decay cap | half-life 3.2 weeks → α ≤ 0.805 | window cap α ≤ 0.549 | — | — | — |
 | EC50 | blank → 0.1–10 typical weeks | — (no saturation) | — | — | — |
 | `media_prior_type` | contribution_volume | coefficient | coefficient | coefficient | coefficient |
-| prior values | the vendor's TV volume, `prior_contribution_sd` 0.2 `relative` | re-derived on the new axis (§7) | re-derived on the new axis | re-derived on the new axis | the v7 value (axis unchanged) |
-| `center_mode` / `scale_mode` | none / median_positive | none / median_positive | none / mean_positive | mean / sd | none / none |
+| prior values | the vendor's TV volume, `prior_contribution_sd` 0.2 `relative` | the generated value × the median active week (§7) | the generated value (axis unchanged) | the generated value (centring does not change the units) | the v7 value (axis unchanged) |
+| `center_mode` / `scale_mode` | none / median_positive | none / median_positive (or none / none: no EC50 needs the typical-week axis, and the generated prior then applies as it is) | none / none | mean / none | none / none |
 | `baseline` / `pillar` | 0 / TV | 0 / Trade | 0 / Trade | 1 / Baseline | 1 / Baseline |
 | `contribution_reference` | zero | zero | zero | zero | auto |
 
@@ -1309,15 +1365,17 @@ adopted) and the reason.
 
 ```
 outputs/<run_name>/
-├── 00_warnings/          00_INDEX.md · <category>.md · all_warnings.csv
+├── 00_warnings/          00_INDEX.md · <category>.md · all_warnings.csv · library_notices.csv
 │                         ★ new categories: transform_bounds, split_checks, raw_data
 ├── 01_data/              panel_summary · feature_scaling_stats (incl. media medians)
 │                         model_input_matrix · resolved_config.yaml
 │                         ★ prior_summary: contribution-volume priors and resolved transform bounds
-│                         collinearity_summary / _vif / _pairs: pre-fit, on raw scaled media
+│                         collinearity_summary / _vif (with vif_note) / _pairs: pre-fit, on raw
+│                         scaled media
 ├── 02_eda/               eda_report.md · ★ split_checks · ★ raw_checks · ★ cost_per_unit
 │                         ★ learnability
 ├── 03_convergence/       sampling_log.json · convergence_report · posterior_summary_full
+│                         energy_plot.png · trace_worst_rhat.png · BFMI (ArviZ 1.x-safe)
 │                         ★ prior_posterior_contraction: adds decay, EC50, peak lag, log volume
 ├── 04_transforms/        ★ transform_parameters.csv: adds prior_min / prior_max and bound flags
 │                         adstock_ranges.csv · adstock_decay_curves.png · saturation_curves.png
@@ -1329,7 +1387,9 @@ outputs/<run_name>/
 │                         structural_checks · assumptions_report.md
 ├── 07_contributions/     contribution_totals · contribution_by_pillar · baseline_breakdown.png
 │                         ★ contribution_math: Σ Hill(Adstock) at the posterior median + per-draw totals
-│                         contribution_reconciliation · contribution_summary · contribution_timeseries
+│                         contribution_reconciliation (median gap split three ways)
+│                         contribution_reconciliation_chain · contribution_summary
+│                         contribution_timeseries
 │                         ★ contribution_prior_vs_posterior · benchmark_comparison.xlsx
 ├── 08_cross_validation/  cv_scorecard · cv_stability_ranking · cv_transform_stability
 └── trace.nc
@@ -1346,7 +1406,7 @@ numbers. Against codebase 1:
 | Contributions | `05_contributions` | `07_contributions` |
 | Cross-validation | `06_cross_validation` | `08_cross_validation` |
 
-`OUTPUTS_GUIDE.md` will need a codebase 2 edition.
+`OUTPUTS_GUIDE.md` and `CHECKS_GUIDE.md` will need codebase 2 editions.
 
 **The decomposition identity**, exact on every draw:
 
@@ -1359,8 +1419,10 @@ media contribution[g,t]  = β[g] · Hill(Adstock(x̃))[g,t] · dv_scale[g]    re
 linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      shift from contribution_reference
 ```
 
-- Medians of the parts add up only approximately; the gap is reported as `__median_gap__`. This is
-  codebase 1's rule, unchanged.
+- Medians of the parts add up only approximately; the gap is reported as `__median_gap__`. The
+  reconciliation splits it three ways (baseline / incremental / cross) using
+  `incremental_total_volume` (codebase 1 2026.10.07.2, `docs/cases/002`). This is codebase 1's rule,
+  unchanged.
 - Baseline features appear twice in `contribution_totals.csv`, so filter on `group` before summing.
 
 ---
@@ -1377,7 +1439,8 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
   `fix_slope`, `min_lag`), and use coefficient priors.
 - On the same data, codebase 2 should then reproduce codebase 1's decomposition, up to the change of
   scaling. This holds only if the preprocessing uses the same adstock and Hill formulas; match them
-  first.
+  first. A traditional, un-normalised preprocessing adstock is reproduced with
+  `adstock_normalise: false`.
 - A difference here is a porting bug, not a modelling result.
 
 **`tests_phase2/`: no PyMC, runs on a laptop.**
@@ -1397,8 +1460,14 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 | Split checks | pieces add back to their parent; units preserved; periods do not overlap (`EDA_CHECKS.md` stage A) |
 | Config round-trip | `config.yaml` → settings → `resolved_config.yaml` → the same settings |
 
+**A real-PyMC test**, codebase 1's `test_v24_real_pymc` pattern.
+- Sample the real model, transforms included, on a small synthetic panel; SKIP without PyMC.
+- The stub suite cannot catch a PyMC or ArviZ API change. Codebase 1's 2026-10-01 audit found four
+  silent ones.
+
 **Cross-validation.**
-- Expanding-window CV, with codebase 1's scorecard.
+- Expanding-window CV, with codebase 1's scorecard and its fluid period policy: horizon 12.5% of
+  the panel, minimum training half the panel and never under a year, 5 folds capped at what fits.
 - `cv_transform_stability.csv` asks whether decay and EC50 hold across origins.
 - Wide fold-to-fold ranges mean the response curves are not yet pinned down, and neither is any
   budget conclusion drawn from them.
@@ -1466,7 +1535,12 @@ linear contribution[g,t] = β[g] · (x̃[g,t] + shift[g]) · dv_scale[g]      sh
 - `../../CLAUDE.md`: the Phase 2 brief, run history, decisions not to re-litigate.
 - `METHODOLOGY.md`, `EXPLANATION.md`, `EDA_CHECKS.md`: this folder.
 - `../../codebase1_hierarchical_mmm/docs/`:
-  - `METHODOLOGY.md`, `TUNING_GUIDE.md`, `OUTPUTS_GUIDE.md`;
+  - `METHODOLOGY.md` (incl. §2b brand equity, §2c the secondary model, §2d corrections that do not
+    converge, §3c short panels), `TUNING_GUIDE.md`, `OUTPUTS_GUIDE.md`;
+  - `CHECKS_GUIDE.md` (every check: theory, a real example, how to read it, what to change) and
+    `cases/` (the casebook);
+  - `CONFIG_GUIDE.md`, `FEATURE_PRIOR_GUIDE.md` (incl. generating the prior file),
+    `PROJECT_STRUCTURE.md`;
   - `MERIDIAN_ASSUMPTIONS.md`, including the §5b EDA gap list.
 - `../../../docs/Meridian_Core_Model_Flow.md`: the Meridian model walkthrough.
 - Jin, Wang, Sun, Chan and Koehler (2017), *Bayesian Methods for Media Mix Modeling with Carryover and

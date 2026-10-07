@@ -13,6 +13,7 @@ next person who meets it can act in ten minutes.
 | # | Case | Symptom | Date | Status |
 |---|---|---|---|---|
 | [001](001_blank_vif_more_columns_than_periods.md) | Blank VIF file and "severe" everywhere on a monthly panel | `collinearity_vif.csv` all blank; `max_vif` 0; every region `severe` | 2026-10-06 | Diagnosed; reporting fixed in 2026.10.06.1; modelling response written |
+| [002](002_median_gap_not_traceable.md) | The median gap is bigger than the baseline gap, and the rest cannot be traced | `median_gap` 962,225 vs `baseline_total − baseline_features` 942,713; 19,512 unaccounted for | 2026-10-07 | Fixed in 2026.10.07.2: gap split in three, plus a statement file |
 
 ## Earlier cases, documented elsewhere
 

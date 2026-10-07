@@ -77,7 +77,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `contribution_summary` | `contribution_summary.csv` | 05 |
 | `contribution_timeseries` | `contribution_timeseries.csv` | 05 |
 | `contribution_math` | `contribution_math.csv` | 05 |
-| `contribution_reconciliation` | `contribution_reconciliation.csv` | 05 |
+| `contribution_reconciliation` | `contribution_reconciliation.csv`, `contribution_reconciliation_chain.csv` | 05 |
 | `benchmark_comparison` | `benchmark_comparison.xlsx` (or `.csv`) — regions across the columns; group + member rows and pre-filled benchmarks from `data.mapping_file` | 05 |
 | `contribution_plots` | the four 05 PNGs | 05 |
 | *(always)* | `00_warnings/*` | 00 |
@@ -1184,19 +1184,59 @@ This is the file to open when a number looks wrong.
 |---|---|
 | `actual_volume`, `fitted_volume` | Actual sales, and the median prediction |
 | `baseline_core_volume` | Intercept + seasonality + trend |
-| `baseline_features_volume` | Features flagged `baseline=1` (TDP, AVP) |
-| `baseline_total_volume` | The two above combined |
-| `incremental_volume` | Every non-baseline driver |
-| `sum_components_volume` | Core + all features |
-| `median_gap_volume` | `fitted − sum_components` — the sum-of-medians gap, should be tiny |
+| `baseline_features_volume` | Features flagged `baseline=1` (TDP, AVP), each one's medians summed |
+| 🆕 `baseline_median_gap_volume` | `baseline_total − (core + baseline features)` — the gap **inside** the baseline |
+| `baseline_total_volume` | The median of the baseline **as one total** (core + baseline features, draw by draw) |
+| `incremental_volume` | Every non-baseline driver, each one's medians summed |
+| 🆕 `incremental_median_gap_volume` | `incremental_total − incremental` — the gap **inside** the incremental block |
+| 🆕 `incremental_total_volume` | The median of the incremental block **as one total** |
+| 🆕 `cross_median_gap_volume` | `fitted − (baseline_total + incremental_total)` — the same sum-of-medians effect between the two block totals (skew is enough; correlation between the blocks changes its size) |
+| `sum_components_volume` | Core + all features (sums of medians) |
+| `median_gap_volume` | `fitted − sum_components` — the whole sum-of-medians gap; **= the three gaps above, exactly** |
 | `residual_volume` | `actual − fitted` — genuine unexplained sales |
 | `*_pct` | Each of the above as % of actual |
 | `reconciles_to_actual_pct` | **Always exactly 100** — if not, something is broken |
 
 ```
-sum_components + median_gap = fitted
-fitted         + residual   = actual
+core + baseline features      + baseline gap    = baseline total
+incremental features          + incremental gap = incremental total
+baseline total + incremental total + cross gap  = fitted
+fitted                        + residual        = actual
+
+baseline gap + incremental gap + cross gap      = median gap
 ```
+
+Every figure is a sum over the window of **weekly** medians — the same basis as
+`contribution_summary.csv`. (`contribution_totals.csv` reports the median of each
+window total instead; `contribution_math.csv`'s `median_basis_diff_pct` shows
+the difference.)
+
+> 🆕 **Why the gap is split (2026-10-07).** Before, `median_gap` was one
+> catch-all. You could see the baseline's share of it only by subtracting
+> `baseline_core + baseline_features` from `baseline_total` by hand, and the rest
+> — the incremental block's own gap and the gap between the two blocks — had no
+> column at all, because no incremental total was computed. A real run read
+> `baseline_total − baseline_features` = 942,713 against a `median_gap` of
+> 962,225, and the missing 19,512 could not be traced. It now can.
+> `cases/002` has the walk-through.
+
+### 🆕 `contribution_reconciliation_chain.csv` — the same numbers, as a statement
+
+The wide file above is for filtering; this one is for **reading**. One row per
+`scope` × region × line, in order, in five blocks. Inside each block the `+`
+lines add up to the `=` line:
+
+| Block | Lines |
+|---|---|
+| `1 baseline` | baseline core + baseline features + baseline median gap = **baseline total** |
+| `2 incremental` | incremental features + incremental median gap = **incremental total** |
+| `3 fitted` | baseline total + incremental total + cross median gap = **fitted** |
+| `4 actual` | fitted + residual = **actual** |
+| `5 median gap, traced` | baseline gap + incremental gap + cross gap = **median gap** |
+
+Columns: `scope`, `region`, `block`, `step` (1–18, the reading order), `op`
+(`+` / `=`), `line`, `volume`, `pct_of_actual`, `meaning` (what the line is, in
+words). Filter `scope = all`, `region = __portfolio__` and read down.
 
 ### 🆕 `contribution_timeseries.csv` — the weekly decomposition as data
 

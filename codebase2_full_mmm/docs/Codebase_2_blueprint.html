@@ -395,11 +395,11 @@
         <div class="what">
           <h3>What happens</h3>
           <ul>
-            <li><strong>Scale</strong> with codebase 1's rule, using training weeks only:
+            <li><strong>Scale</strong> with codebase 1's rule, on the training weeks (<code>run.scaling_window: train</code>, the default):
               <ul>
-                <li>KPI: per sub-brand, mean and sd;</li>
+                <li>KPI: ÷ each sub-brand's mean week (<code>dv_scale: mean</code>, what the generated priors assume);</li>
                 <li>media: ÷ the median active week, so 1.0 = a typical week and zero stays zero;</li>
-                <li>level drivers such as TDP and price: centred.</li>
+                <li>level drivers such as TDP and price: centred when always on, otherwise as delivered.</li>
               </ul>
             </li>
             <li><strong>Lag tensor:</strong> for every week, the scaled media 0 … <code>max_lag</code> weeks earlier.</li>
@@ -933,7 +933,7 @@ h    = Hill(Adstock(TV))   this draw
 <text x="1220.0" y="223.0" class="sv-tick" text-anchor="middle">104</text>
 <text x="160.0" y="223.0" class="sv-tick" text-anchor="end">week</text>
 </svg></div>
-        <figcaption>Expanding-window folds on the example's 104 weeks. Each fold refits the whole model on everything before its 13-week test window. Scaling, bounds and priors are recomputed inside each fold, so no test week leaks into training. With a 52-week minimum, four folds fit (the weekly preset asks for five).</figcaption>
+        <figcaption>Expanding-window folds on the example's 104 weeks. Each fold refits the whole model on everything before its 13-week test window. Scaling, bounds and priors are recomputed inside each fold, so no test week leaks into training. With a 52-week minimum, four folds fit (the period policy asks for five and stops at what fits; on four years the test windows become 26 weeks, after week 104).</figcaption>
       </figure>
       <div class="phase-grid">
         <div class="what">
@@ -949,9 +949,9 @@ h    = Hill(Adstock(TV))   this draw
                 <li>fewer parameters.</li>
               </ol>
             </li>
-            <li><strong>This is where the builder's freedom gets tested.</strong> Two recipes are two specifications, compared like any others.</li>
+            <li><strong>This is where a split gets tested.</strong> A split and an unsplit version of a variable are two specifications, compared like any others.</li>
           </ul>
-          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">cv_scorecard</span><span class="tag t-infra">select_model</span><span class="tag t-infra">cadence presets</span></p>
+          <p class="from"><span class="eyebrow">From codebase 1</span><span class="tag t-infra">cv_scorecard</span><span class="tag t-infra">select_model</span><span class="tag t-infra">fluid period policy</span></p>
         </div>
         <aside class="ex" aria-label="Phase 6 in the example">
           <p class="ex-label">In the example: two questions CV answers</p>
@@ -1019,8 +1019,8 @@ h    = Hill(Adstock(TV))   this draw
         <thead><tr><th>Topic</th><th>Meridian</th><th>Codebase 2</th><th>What it means</th></tr></thead>
         <tbody>
           <tr><td><strong>Currency of results</strong></td><td>revenue or a non-revenue KPI; ROI is central</td><td>sales volume (<code>Units EQ</code>); no ROI</td><td>priors and contributions are in units sold</td></tr>
-          <tr><td><strong>Scaling</strong></td><td>KPI per capita, standardised over all geos and weeks. Media ÷ (population × one median per channel)</td><td>KPI standardised per sub-brand. Media ÷ that sub-brand's median active week. No population</td><td>in both, EC50 means "multiples of a typical active week"; ours is per region</td></tr>
-          <tr><td><strong>Carryover</strong></td><td>geometric or binomial, normalised. Window of max_lag + 1 weeks (default 8). Peak always at lag 0</td><td>geometric, or delayed with a learned peak θ. Window from min_lag to max_lag, with the decay cap tied to the window</td><td>can represent build-up, and the team's fixed lag</td></tr>
+          <tr><td><strong>Scaling</strong></td><td>KPI per capita, standardised over all geos and weeks. Media ÷ (population × one median per channel)</td><td>KPI ÷ each sub-brand's mean week. Media ÷ that sub-brand's median active week. No population</td><td>in both, EC50 means "multiples of a typical active week"; ours is per region</td></tr>
+          <tr><td><strong>Carryover</strong></td><td>geometric or binomial, normalised. Window of max_lag + 1 weeks (default 8). Peak always at lag 0</td><td>geometric, or delayed with a learned peak θ; normalised, as in Meridian. Window from min_lag to max_lag (up to the whole panel for a long-term variable), with the decay cap tied to the window</td><td>can represent build-up, and the team's fixed lag</td></tr>
           <tr><td><strong>Saturation</strong></td><td>Hill, slope fixed at 1 by default, per channel</td><td>same Hill; parameters per channel or per transform group</td><td>groups keep 33 transformed columns learnable</td></tr>
           <tr><td><strong>Media coefficient prior</strong></td><td>ROI LogNormal(0.2, 0.9), turned into β on every draw (<code>calculate_beta_x</code>)</td><td>contribution volume (e.g. vendor ±20%), turned into β on every draw</td><td>the same algebra, with units instead of money</td></tr>
           <tr><td><strong>Other coefficients</strong></td><td>Normal random effects for controls and non-media; no sign constraint</td><td>structural signs (<code>±exp</code>); hierarchical, independent or global; per-region prior overrides</td><td>a price effect can never turn positive</td></tr>
@@ -1063,7 +1063,7 @@ h    = Hill(Adstock(TV))   this draw
       <article class="card"><p class="card-title">Transform groups</p><p>Decay and EC50 shared within a channel family: 14 transform parameters instead of 59.</p></article>
       <article class="card"><p class="card-title">Bound diagnostics</p><p>Flags for a parameter pressed against its bound, an EC50 beyond the data, and decay trading off with β.</p></article>
       <article class="card"><p class="card-title">Volume priors inverted per draw</p><p>The vendor's volumes are used as priors directly, with no ROI and no hand division by Σx.</p></article>
-      <article class="card"><p class="card-title">CV chooses the variables</p><p>Recipe variants and <code>min_lag</code> variants are compared with the same scorecard as any other specification.</p></article>
+      <article class="card"><p class="card-title">CV chooses the variables</p><p>Split variants and <code>min_lag</code> variants are compared with the same scorecard as any other specification.</p></article>
       <article class="card"><p class="card-title">Bridge test to codebase 1</p><p>Pin every transform at today's preprocessing values: codebase 2 should then reproduce codebase 1.</p></article>
     </div>
   </section>

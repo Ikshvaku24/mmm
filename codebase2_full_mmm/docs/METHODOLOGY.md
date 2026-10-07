@@ -1,12 +1,16 @@
 # Methodology — how to build a Phase 2 model
 
-> **Status:** planning, 2026-09-21. **No code yet.**
+> **Status:** planning, 2026-09-21; updated 2026-10-07 for codebase 1's changes (the pre-model prior
+> builder, the fluid period, the checks guide and casebook). **No code yet.**
 >
 > **Companions** (same folder):
-> - `EXPLANATION.md`: what adstock and saturation are, and how they change the answer.
+> - `EXPLANATION.md`: the model equation term by term, the adstock and saturation forms, and the
+>   transforms for trade and baseline variables.
 > - `PHASE2_ARCHITECTURE.md`: the full blueprint (every table, every default).
 > - `Codebase_2_blueprint.html`: the one-page overview.
 > - `EDA_CHECKS.md`: what is checked, and when.
+> - Codebase 1's `docs/CHECKS_GUIDE.md` (every check: theory, a real example, how to read it, what
+>   to change) and `docs/cases/` (the casebook) cover everything the two codebases share.
 >
 > This is the **order of operations**. Codebase 1's `docs/METHODOLOGY.md` is still the
 > reference for everything the two codebases share; this file covers what changes once the
@@ -197,6 +201,13 @@ The full rules, tables and conversions are in the blueprint (§9). The order to 
    converts to a scaled range once the median active week is known.
 5. **Pin what the data cannot inform.** A channel with no off-weeks cannot show its decay; a
    channel that never rises far above a typical week cannot show its EC50. Pin, and say so.
+6. **On a monthly panel, think in months.** Most media carryover ends inside the month, so the
+   decay is small and hard to learn: pin it, or switch the adstock off. A short monthly panel
+   (the BMC panel: 3 regions × 24 months) already has more columns than periods in each region,
+   which is codebase 1 METHODOLOGY §3c's problem, and every learned transform makes it worse.
+7. **A long-term variable is the deliberate exception to the window caps.** A half-life of 13–52
+   weeks needs a window of 56 weeks or more, and media history from before week 1
+   (`EXPLANATION.md` §4.8).
 
 ---
 
@@ -211,24 +222,39 @@ The full rules, tables and conversions are in the blueprint (§9). The order to 
 
 ### Using codebase 1's prior builder
 
-`mmm/data/prior_builder.py` turns a vendor decomposition into coefficient priors with:
+Codebase 1's pre-model step, `build_priors("config.yaml")` (`mmm/data/prior_builder.py`), writes the
+prior file from the **datacube**, so no prior file is needed to make one. Two optional inputs fill
+it in:
+
+- a **mapping file** (`data.mapping_file`): vendor variable ↔ our variable, optionally per region,
+  optionally with the vendor's contribution;
+- a **share file** (`data.share_file`): shares of sales by media / expert / comp_media / trade /
+  baseline.
+
+Four cases: a) a mapping with contributions → invert them; b) a mapping plus shares, or c) shares
+only → use the shares; d) neither → a skeleton. For each variable and region:
 
 ```
 region_coef   = contribution ÷ support ÷ dv_agg          support = Σ of the RAW column
-national mean = Σ region_coef over regions with support ÷ that count
+national mean = average of region_coef over the regions with support    national_basis: average
+              = Σ contribution ÷ Σ (support × dv_agg)                   national_basis: weighted
 ```
 
-It writes two files - `feature_priors_national.csv` (hierarchical) and
-`feature_priors_regional.csv` (plus a row per region, independent) - with
-`scale_mode: none`, so they are only in the model's units with
-`dv_scale: mean`, `dv_scale_scope: region`. Codebase 2 must keep that pairing
-when it ports `resolve_scaling`, or warn the same way.
+Use `weighted` with `pooling: global`. When a contribution sits in a few regions, the plain average
+under-delivers the national total; that was the v9 lesson.
+
+It writes `feature_priors_national.csv` (hierarchical), `feature_priors_regional.csv` (plus a row
+per region, independent) and `prior_calculation.xlsx`, with `scale_mode` blank (= `none`). So the
+means are in the model's units only with `run.dv_scale: mean`, `dv_scale_scope: region` and
+`dv_aggregation: mean`. Codebase 2 must keep that pairing when it ports `resolve_scaling`, or warn
+the same way (`check_units`). Blank cells are legal; the old `center` column is not.
 
 - **Linear and carryover-only features:** this still holds. Normalised adstock preserves volume, so
   the support of the adstocked column is the support of the raw one (minus carryover past the end).
 - **Saturating channels:** it does **not** hold, because `Σ Hill(Adstock(x))` changes with the decay
   and the EC50. Take the **contribution itself** as the prior target and let the model do the
-  division on every draw.
+  division on every draw. In the builder's terms: stop before the division. The group's
+  contribution (case a), or the share × total volume (cases b and c), is the volume target.
 
 So the same vendor file feeds both routes: one column of numbers, used two ways.
 
@@ -244,6 +270,14 @@ So the same vendor file feeds both routes: one column of numbers, used two ways.
 
 Read `contraction` **before** you read agreement with the benchmark. A prior taken from the
 benchmark, pinned tight, will agree with the benchmark and prove nothing.
+
+**Correcting a prior after a run.**
+- Codebase 1's benchmark sheet gives `new = old × R^(1/(1 − max(c, 0)))`, with R computed on the
+  vendor group and c per member. For a saturating channel it multiplies the volume target.
+- Above c ≈ 0.7 the correction is an extrapolation, and repeated corrections oscillate instead of
+  converging. Codebase 1 METHODOLOGY §2d gives the reason and the stopping rule.
+- In a vendor-anchored (secondary) model, follow codebase 1 METHODOLOGY §2c, and pin the
+  transforms as well. Otherwise the transforms become the free valve that absorbs the gap.
 
 ---
 
@@ -270,11 +304,20 @@ Levers, in the order to reach for them:
 `02_eda` reports rows per parameter. Below 10 it warns; treat anything near 1 as a warning that the
 priors, not the data, will decide most answers.
 
+On a short monthly panel the per-region VIF cannot be computed at all, because each region has more
+columns than periods. Codebase 1 `docs/cases/001` shows the symptom, and its METHODOLOGY §3c says
+what pooling can and cannot separate there.
+
 ---
 
 ## 7. Choosing between specifications
 
-Specifications are compared with expanding-window cross-validation and codebase 1's selection rule:
+Specifications are compared with expanding-window cross-validation. The folds follow codebase 1's
+fluid period policy: a test horizon of 12.5% of the panel, a minimum training window of half the
+panel (never under a year), and up to 5 folds. 104 weeks gives four 13-week folds after week 52;
+208 weeks gives four 26-week folds after week 104.
+
+The selection rule is codebase 1's:
 
 1. **Admissibility gate:** R-hat, divergences, predictive coverage. A model that fails the gate is
    not compared on accuracy at all.
@@ -292,6 +335,9 @@ What is worth comparing in Phase 2:
 | Learned vs pinned decay | did learning it change anything? |
 | Hill vs no saturation | is there enough range to see a curve at all? |
 | `fourier_order`, trend on or off | is the baseline absorbing what the drivers should explain? |
+| A long-term variable, or none (4-year panels) | does a long carryover earn its place, or is it the trend under another name? (`EXPLANATION.md` §4.8) |
+| Linear vs log price or TDP | is there curvature worth a transform? (`EXPLANATION.md` §7) |
+| TPR with and without last week's TPR | is there a post-promotion dip? |
 
 Run one comparison at a time. Two changes at once and the scorecard cannot attribute the difference.
 
@@ -309,7 +355,9 @@ Before trusting anything Phase 2 says, make it reproduce Phase 1.
 The decompositions should agree, up to the change in scaling. A difference is a porting bug, not a
 finding. This only works if the adstock and Hill formulas match the preprocessing ones — check that
 first, because a different adstock convention (unnormalised weights, a different lag count) will
-show up here as a mystery.
+show up here as a mystery. If the preprocessing uses the traditional, un-normalised adstock, set
+`adstock_normalise: false` for the bridge run only (`EXPLANATION.md` §4.4). The coefficients then
+differ from the normalised ones by the factor S, and nothing else does.
 
 ---
 
@@ -324,6 +372,8 @@ show up here as a mystery.
 7. **Treating a long decay as "better" because it fits.** Longer carryover with a smaller
    coefficient draws almost the same line — check the posterior correlation before believing either.
 8. **Keeping a period split whose pieces are 0.95 correlated** with each other.
+9. **Switching to traditional (un-normalised) adstock to get longer effects.** It rescales the
+   coefficient and nothing else. A longer window and decay range do the job (`EXPLANATION.md` §4.4).
 
 ---
 
@@ -334,6 +384,8 @@ show up here as a mystery.
 - [ ] Level variables are centred, with `contribution_reference=zero`.
 - [ ] Transform bounds written in business units; windows consistent with the decay caps.
 - [ ] Volume priors for saturating channels; coefficient priors elsewhere; `prior_sd_basis` set.
+- [ ] Generated priors: `run.dv_scale: mean`, `dv_scale_scope: region`; no `center` column in the file.
+- [ ] Any long-term variable has media history from before week 1.
 - [ ] EDA passes with no ERROR; every ATTENTION has been read.
 - [ ] Rows per parameter checked; transform groups set where needed.
 - [ ] Stage 3 run with transforms pinned, and it reproduces codebase 1.

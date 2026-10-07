@@ -69,7 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.07.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
 
 import math
 import warnings
@@ -1146,7 +1146,9 @@ class OutputConfig:
     contribution_summary: bool = True        # vendor-style volume + % table
     contribution_timeseries: bool = True     # volume per region x date x driver
     contribution_math: bool = True           # beta x sum(x) x sd_y audit trail
-    contribution_reconciliation: bool = True  # components -> fitted -> actual
+    contribution_reconciliation: bool = True  # components -> fitted -> actual,
+                                              # median gap split in three, plus
+                                              # contribution_reconciliation_chain.csv
     benchmark_comparison: bool = True    # benchmark_comparison.xlsx (or .csv):
                                         # one row per region x feature with the
                                         # run's numbers already laid out, ONE
