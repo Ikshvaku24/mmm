@@ -19,3 +19,11 @@ env:
     valueFrom: DATABRICKS_TOKEN
   - name: MDR_JOB_ID
     valueFrom: MDR_JOB_ID
+  # the company theme that leads - themes/haleon.toml (default) or
+  # themes/capgemini.toml: colours, fonts and corners, light and dark; the
+  # logos and accents follow it (src/brand.py)
+  - name: STREAMLIT_THEME_BASE
+    value: "themes/haleon.toml"
+  # no ⋮ menu in the top-right corner - the cluster sits there
+  - name: STREAMLIT_CLIENT_TOOLBAR_MODE
+    value: "minimal"

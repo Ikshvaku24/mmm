@@ -26,7 +26,8 @@ import streamlit as st
 # widgets whose values are kept across pages (re-saved on every full run)
 KEEP = ("bmc_name", "period_start_q", "period_start_y", "period_end_q", "period_end_y",
         "modelling_type", "new_run_name", "run_note", "cfg_advanced_open",
-        "bmc_runs_group", "results_bmc", "gen_restrict", "runs_typed_id")
+        "rf_bmc", "rf_start_q", "rf_start_y", "rf_end_q", "rf_end_y", "rf_type",
+        "gen_restrict", "runs_typed_id")
 KEEP_PREFIXES = ("fit_region_", "contrib_region_", "contrib_period_", "decomp_drivers_",
                  "warn_cat_", "collin_region_", "collin_count_")
 RUN_NO = "_run_no"

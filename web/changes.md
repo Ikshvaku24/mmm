@@ -19,6 +19,79 @@ needs no redeploy.
 
 ---
 
+## Update 10 - YAML modelling types, filters on Runs and results, deleting a run, the cluster top right, Haleon × Capgemini co-branding (2026.10.09.2)
+
+The eight points, in order:
+
+| You asked | Now |
+|---|---|
+| 1. The modelling types in YAML, not a CSV | codebase 1's `modelling_types.yaml` replaces `modelling_types.csv`: each type, then the sections of config.yaml under it, then the settings and their values - written as in config.yaml (`Primary:` / `model:` / `include_intercept: true`). The names are the types the app offers, in that order; a type with nothing under it (`LTE: {}`) is just a name. A section or setting codebase 1 does not have, a setting the job sets itself, or a value the setting cannot take stops with the type and the setting named. The job applies it as before: config.yaml < the type's settings < the run's own |
+| 2. The settings a type changed, in the difference table | ③'s table now compares with the **team's** config.yaml: *setting · team's config.yaml · the type's value · now · changed by* (*modelling type Primary*, or *edited here*). A setting the type set carries a blue ● by its name, an edit an orange ● |
+| 3. Filters on Runs and results - from and to quarter and year, modelling type - each independent | Six filters: BMC, From quarter, From year, To quarter, To year, Modelling type. Each is optional and works on its own: a year alone lists every run whose period starts (or ends) in it, across every BMC; a type alone, every run of that type. With no BMC chosen the list spans every BMC and gets a BMC column. Runs from before the period folders have no period or type, so only a BMC filter (or none) lists them. **Clear filters** empties all six; the newest 200 runs are listed at once |
+| 4. ①'s choices carried over to Runs and results | Each filter follows ①: when the BMC, a quarter, a year or the type changes on ①, the filter takes the new value; a filter you change on Runs and results keeps yours until ① changes again. **See the runs and their results**, on ①, copies all of ①'s choices and opens the page. Nothing needs anything else: no BMC is needed for a year, no year for a BMC |
+| 5. A slight animation as it filters | The list redraws the moment a filter is chosen and fades in - a third of a second, rising a few pixels; the counter beside it says how many runs match and which filters are on. Anyone who switched animations off in their system settings gets none |
+| 6. Delete a run - for config_advanced_access and above, and only when app_access.yaml allows it | A run's panel has **🗑️ Delete**: type the run's name to enable it. It deletes the run's folder in ADLS - inputs, outputs, note - for good, records who and when in the period's `deleted.json`, and the name is never used again (an old link to the run opens a "deleted" notice). Never while the run runs, never the period's reported run (mark another one first). Who: `app_access.yaml` `delete_runs` - nobody unless it lists levels; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
+| 7. Start cluster top right, where the ⋮ is - and no ⋮ | The top-right corner of every page shows who is signed in and the cluster - a dot and a word (running, starting, stopped) - with **Start cluster** when it is stopped. Streamlit's ⋮ menu is gone (`client.toolbarMode = minimal`, and hidden by the page's CSS). Without it there is no switch for light and dark in the app: it follows each person's system setting |
+| 8. Co-branding: AOMMM in the side panel, and the two company themes | Below |
+
+**How the two company themes are kept** - my recommendation, and what is built:
+- **One company leads the look at a time; both are always shown.** The app runs on
+  Haleon's Databricks, on Haleon's data, for Haleon's modellers, so **Haleon leads
+  by default**: black and white with restrained hits of Haleon Green (`#30EA03`,
+  the bar in the E of its logo), Verdana as in Haleon's own template,
+  near-square corners. The green bar comes back as the header's baseline and
+  as the marker of the page titles and of the current page. **Capgemini's theme**
+  is complete and one setting away, for a Capgemini-led deployment: Capgemini
+  Blue `#0070AD` and Vibrant Blue `#12ABDB` on white, a navy side panel, Ubuntu
+  as in Capgemini's template.
+- Mixing both palettes on one screen - a blue panel beside a green-and-black
+  page - would look like two apps stitched together, with the brands
+  competing. The usual co-branding rule is one host brand plus a partner
+  lockup, and that is what this is.
+- **The side panel**: AOMMM, the product, at the top (`assest/aommm.png`,
+  copied in as before; on a dark panel it sits on a small white card). At the
+  foot, both companies side by side - the lead one first, a thin rule between
+  - in their own logos (`web/brand/`), white on a dark panel.
+- **Where it lives**: `web/themes/haleon.toml` and `web/themes/capgemini.toml` -
+  Streamlit's own colours, fonts and corners, light and dark, each with its
+  side panel; `src/brand.py` - the accents, the logo order and the charts'
+  font, following the same setting; `src/styles.py` - the CSS. Every colour
+  comes from the two companies' templates and logos (`snapshots/company
+  theme/`), and every text-on-colour pairing reads at 4.5:1 or better (a test
+  checks them).
+- **To switch the lead**: in `app.yml`, set `STREAMLIT_THEME_BASE` to
+  `themes/capgemini.toml` and redeploy (on a laptop: `base` in
+  `.streamlit/config.toml`).
+- The charts keep their validated, colour-blind-safe data colours and take
+  the lead company's font.
+
+**Also fixed**: a new run could take the name a run had before it was renamed -
+the Jobs API's record of the old run would then have opened the new one. No
+new run, and no rename, may now take the name of a renamed or deleted run.
+
+**Codebase 1 2026.10.09.2** (needed - the app refuses an older one):
+- `modelling_types.yaml` (new) replaces `modelling_types.csv` (removed), read by
+  `settings.modelling_types_yaml` / `modelling_type_settings` and
+  `app_job.read_modelling_types`.
+- `app_access.yaml`: `delete_runs`.
+
+**To get these changes:**
+1. Check `modelling_types.yaml`, and `delete_runs` in `app_access.yaml`.
+2. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3). If the
+   old `modelling_types.csv` stays behind in the workspace copy, delete it -
+   nothing reads it any more.
+3. **Copy `web/` to the app's source folder** - it now has `themes/`, `brand/`,
+   `.streamlit/` and `src/brand.py` - keep your `assest/aommm.png` in it, and
+   press **Deploy**. `app.yml` has two new lines (`STREAMLIT_THEME_BASE`,
+   `STREAMLIT_CLIENT_TOOLBAR_MODE`): plain values, no resource to add. No new
+   library, no new job parameter.
+4. Deleting a run needs the same ADLS rights as marking and renaming (Step 1):
+   the app's identity removes folders the job wrote into.
+5. Open the app: Haleon's look, the cluster top right, the filters on Runs and
+   results.
+
+---
+
 ## Update 9 - pages, collinearity, readable warnings, renaming runs, type settings (2026.10.09.1)
 
 The nine points from the team, in order:
@@ -456,8 +529,9 @@ client instead of logging in again for every file.
   first.
 - **Model settings.** Edit codebase 1's `config.yaml` in the app.
   - The page shows them at once, starting from the team's `config.yaml` with
-    the modelling type's settings (`modelling_types.csv`) on top. Dropdowns
-    list the allowed values; hovering shows the help.
+    the modelling type's settings (`modelling_types.yaml`) on top; the
+    difference table lists what differs from the team's file and what changed
+    it. Dropdowns list the allowed values; hovering shows the help.
   - You can load, download or reset the file.
   - You see and change the settings `app_access.yaml` gives you; the rest
     are the team's. The job fills in the file paths and the run name.
@@ -505,6 +579,14 @@ client instead of logging in again for every file.
   - It shows only what would stop the run: missing columns, missing values,
     duplicate rows, text columns and dates it cannot read. Notes about single
     variables (constant, near zero) are in the run's `00_warnings` folder.
+- **Runs and results.** Every run, filtered by BMC, from and to quarter and
+  year, and modelling type - each filter optional and independent, each
+  following ① (Update 10). A run's panel can rename it, edit its note and
+  delete it, as `app_access.yaml` allows.
+- **The top bar and the look.** Top right: who is signed in, and the cluster
+  with **Start cluster**. The lead company's theme - Haleon by default,
+  Capgemini one setting away - with both logos in the left-hand panel
+  (Update 10).
 - **Run panel, the BMC's runs, All recent runs.** Described under "2. Run
   Model button" above. The **job log** is `job_log.txt`, in the run's
   `Outputs/` in ADLS: everything the job printed. The job copies it there
@@ -646,11 +728,12 @@ permissions are the ones that count.
 
 Upload the **whole** `codebase1_hierarchical_mmm` folder to
 `/Workspace/Modelling/Backend/mmm_v5/`. Leave `mmm_v4` alone: the old job uses
-it. The app needs version **2026.10.09.1** or later: it refuses an older one
+it. The app needs version **2026.10.09.2** or later: it refuses an older one
 (2026.09.29.2 brought the run folders, 2026.09.30.1 `app_access.yaml` and the
 live job log, 2026.10.07.1 the period folders - the job's `run_group` - the
 four access levels and the standard-name CSVs, 2026.10.09.1 the modelling
-types' settings, `edit_runs` and the collinearity matrix).
+types' settings, `edit_runs` and the collinearity matrix, 2026.10.09.2
+`modelling_types.yaml` and `delete_runs`).
 
 For a later update, upload the whole folder again the same way, while no run
 is in progress. If only some files get replaced, the app's header warns that
@@ -705,7 +788,9 @@ why. Fix that before you create the app.
 
    Leave out `_reference/`: it only holds the screenshots and is git-ignored,
    so both tools skip it. Copy the logo from the old app
-   (`.../model-app/assest/aommm.png`) into `assest/`.
+   (`.../model-app/assest/aommm.png`) into `assest/` - it goes at the top of
+   the left-hand panel. `themes/`, `brand/` and `.streamlit/` must come along
+   (the company themes and logos).
 2. In the copied `app.yml`, delete the `MAPPING_JOB_ID` and `FEASIBILITY_JOB_ID`
    entries. `model-app` has no resources with those names, and its Environment
    tab shows neither variable, so they were never set. Only the disabled
@@ -721,8 +806,9 @@ why. Fix that before you create the app.
    | User authorization | add no scopes. The app only reads the user's email, for the "Hello ..." in the corner, and Databricks always sends it |
    | App telemetry | optional; `model-app` has none |
 
-4. Under **Resources** → **Add resource**, add one per `app.yml` entry. Each
-   *resource key* must match the `valueFrom` name exactly. The secrets are in
+4. Under **Resources** → **Add resource**, add one per `app.yml` entry with
+   `valueFrom` (the two with `value:` - the theme and the menu - are plain
+   settings). Each *resource key* must match the `valueFrom` name exactly. The secrets are in
    the scope `am03-mmm…`, or your own scope for a new token:
 
    | Resource key | Type | Points to | Permission |
@@ -758,16 +844,18 @@ On the app's page:
   do there.
 
 Then open the app's URL.
-- Under the page list on the left: *Backend: codebase 1 2026.10.09.1* - and, for the
+- The look is Haleon's (black and white, green bars), with AOMMM at the top of
+  the left-hand panel and the two company logos at its foot.
+- Under the page list on the left: *Backend: codebase 1 2026.10.09.2* - and, for the
   people under `full_access` in `app_access.yaml`, *from the workspace
   `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
   codebase 1**. If it says codebase 1 could not be loaded, check two things:
   - `MDR_JOB_ID` points to the **new** job (the old one runs `mmm_v4`, which is
     too old);
   - the token owner can read the `mmm_v5` folder.
-- The cluster badge shows the cluster whose ID is written into
-  `src/clusters.py` (`cluster_id`). If the new job uses a different cluster,
-  change that ID.
+- The cluster, top right on every page (with **Start cluster** when it is
+  stopped), is the one whose ID is written into `src/clusters.py`
+  (`cluster_id`). If the new job uses a different cluster, change that ID.
 
 ### Every run
 The steps are pages in the left-hand panel; a step gets ✅ once it is done,
@@ -776,9 +864,10 @@ and everything chosen on a page stays chosen when you move to another.
    the From and To quarter and year, and the modelling type (its settings
    switch with it). Leave the run name empty to have it named when you press
    Run Model, or type one; add a **📝 note** (why this run, what changed). To
-   start from an earlier run: on **Runs and results**, select it and press
-   **Reuse inputs** - its datacube, settings and prior (and mapping/share)
-   files are loaded, with its BMC, period and type, and you land on ①.
+   start from an earlier run: on **Runs and results** (**See the runs and their
+   results** opens it filtered by what ① shows), select it and press **Reuse
+   inputs** - its datacube, settings and prior (and mapping/share) files are
+   loaded, with its BMC, period and type, and you land on ①.
 2. **② Input data** - choose the datacube (or keep the reused one). Only
    problems that would stop the run are listed.
 3. **③ Model settings** - change what you need (**Advanced options** for
@@ -806,9 +895,10 @@ and everything chosen on a page stays chosen when you move to another.
    decomposition, collinearity, convergence, warnings) and the job log, and
    **Download run (zip)** gives the inputs and the outputs in one file
    (**Download trace.nc** gives the raw posterior on its own). **📝 Edit note**
-   and **✏️ Rename** record what you made of it. Every run stays on **Runs and
-   results**, in its BMC's list; **All recent runs**, below it, also has runs
-   from before the run folders.
+   and **✏️ Rename** record what you made of it; **🗑️ Delete** removes a run
+   for good (if `app_access.yaml` lets you). Every run stays on **Runs and
+   results** - filter it by BMC, period and modelling type, each on its own;
+   **All recent runs**, below, also has runs from before the run folders.
 8. When a period's results are reported, open the run they came from and
    press **⭐ Mark as reported**: it moves to `Results Reported/`, the period's
    other runs to `Archived/`.
@@ -826,7 +916,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (2021 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2072 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.

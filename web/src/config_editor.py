@@ -24,13 +24,16 @@ run is reused or a run starts. The same limit applies to what goes out: the
 config.yaml a person downloads or saves with a run holds only the settings
 they may change; the job lays it over the team's config.yaml.
 
-The MODELLING TYPE chosen in block ① brings its own settings (codebase 1's
-modelling_types.csv - e.g. Primary carries an intercept, Secondary does not):
+The MODELLING TYPE chosen on page ① brings its own settings (codebase 1's
+modelling_types.yaml - e.g. Primary carries an intercept, Secondary does not):
 `cfg_team` is the team's config.yaml, `cfg_base` = the team's settings WITH
-the type's, and everything above ("fixed at the team's value", Reset, the
-changes table) reads `cfg_base`. Choosing a type switches its settings at
-once (`apply_modelling_type`); the job lays the same type settings between
-the team's config.yaml and the run's own.
+the type's, and "fixed at the team's value" and Reset read `cfg_base`.
+Choosing a type switches its settings at once (`apply_modelling_type`); the
+job lays the same type settings between the team's config.yaml and the run's
+own. The difference table compares with the TEAM's config.yaml, so the
+type's settings are listed too, each saying what changed it (the modelling
+type, or an edit); a widget's marker says the same - orange ● edited here,
+blue ● set by the modelling type.
 """
 import copy
 import hashlib
@@ -153,15 +156,28 @@ def may_mark_reported():
     return a["level"] in (a["policy"].get("mark_reported") or [])
 
 
-def may_edit_run(request) -> bool:
-    """May the viewer rename this run and edit its note? (app_access.yaml
-    `edit_runs`: levels, and "submitter" = the person who started the run.)"""
+def _may(key, request) -> bool:
+    """Is the viewer among app_access.yaml's `key` list - by level, or as the
+    "submitter" (the person who started the run)?"""
     a = access()
-    allowed = a["policy"].get("edit_runs") or []
+    allowed = a["policy"].get(key) or []
     if a["level"] in allowed:
         return True
     who = str((request or {}).get("submitted_by") or "").strip().lower()
     return "submitter" in allowed and bool(who) and who == viewer_email()
+
+
+def may_edit_run(request) -> bool:
+    """May the viewer rename this run and edit its note? (app_access.yaml
+    `edit_runs`: levels, and "submitter" = the person who started the run.)"""
+    return _may("edit_runs", request)
+
+
+def may_delete_run(request) -> bool:
+    """May the viewer delete this run? (app_access.yaml `delete_runs` - nobody
+    when the file does not list anyone; shipped: config_advanced_access and
+    above.)"""
+    return _may("delete_runs", request)
 
 
 def ui_policy():
@@ -192,7 +208,7 @@ def enforce_fixed(values, base):
 
 
 # --------------------------------------------------------------------------- #
-# the modelling type's own settings (codebase 1's modelling_types.csv)
+# the modelling type's own settings (codebase 1's modelling_types.yaml)
 # --------------------------------------------------------------------------- #
 def all_type_settings():
     """{modelling type: {section: {key: value}}} - what each type sets."""
@@ -404,13 +420,20 @@ def job_owned_keys():
     return set((get_schema() or {}).get("job_owned") or [])
 
 
-def _widget(row, value, base_value, key):
-    """One widget for one config key; returns the (typed) value."""
+def _widget(row, value, base_value, key, team_value=None, by_type=None):
+    """One widget for one config key; returns the (typed) value. Marked
+    orange ● when edited here (it differs from the base), blue ● when the
+    modelling type `by_type` set it (it differs from the team's
+    config.yaml)."""
     kind, name = row["kind"], row["key"]
     changed = not _same(value, base_value)
-    label = f"{name} :orange[●]" if changed else name
+    typed = bool(by_type) and not changed and not _same(value, team_value)
+    label = (f"{name} :orange[●]" if changed else
+             f"{name} :blue[●]" if typed else name)
     help_text = (f"{row['help']}\n\nCodebase default: `{_fmt(row['default'])}`"
-                 + (f"  ·  base config: `{_fmt(base_value)}`" if changed else ""))
+                 + (f"  ·  base config: `{_fmt(base_value)}`" if changed else "")
+                 + (f"  ·  set by the modelling type **{by_type}** (the team's "
+                    f"config.yaml: `{_fmt(team_value)}`)" if typed else ""))
 
     if kind == "choice":
         options = list(row["choices"])
@@ -464,8 +487,11 @@ def _widget(row, value, base_value, key):
     return text
 
 
-def _render_tabs(rows_by, schema, values, base, job_owned, version):
-    """One tab per section of `rows_by` ({section: [schema rows]})."""
+def _render_tabs(rows_by, schema, values, base, job_owned, version, team=None,
+                 typed=None):
+    """One tab per section of `rows_by` ({section: [schema rows]}). `team` is
+    the team's config.yaml, `typed` (kind, {section: {key: value}}) what the
+    modelling type sets - for the widgets' markers."""
     order = [s for s in TAB_ORDER if s in rows_by] + [s for s in rows_by if s not in TAB_ORDER]
     tabs = st.tabs([SECTION_LABELS.get(s, s) for s in order]) if order else []
     for tab, section in zip(tabs, order):
@@ -473,10 +499,14 @@ def _render_tabs(rows_by, schema, values, base, job_owned, version):
             blurb = schema["blurbs"].get(section)
             if blurb:
                 st.caption(blurb)
-            _render_section(section, rows_by[section], values, base, job_owned, version)
+            _render_section(section, rows_by[section], values, base, job_owned, version,
+                            team, typed)
 
 
-def _render_section(section, rows, values, base, job_owned, version):
+def _render_section(section, rows, values, base, job_owned, version, team=None,
+                    typed=None):
+    kind, by_type = typed or (None, {})
+    sets = by_type.get(section) or {}
     cols = st.columns(2, gap="large")
     for i, row in enumerate(rows):
         key = row["key"]
@@ -488,21 +518,40 @@ def _render_section(section, rows, values, base, job_owned, version):
                                    "files you upload here, so it cannot be edited.")
                 continue
             new = _widget(row, values[section].get(key), base[section].get(key),
-                          f"cfg_{version}_{section}_{key}")
+                          f"cfg_{version}_{section}_{key}",
+                          team_value=((team or base).get(section) or {}).get(key),
+                          by_type=kind if key in sets else None)
             values[section][key] = new
 
 
-def _changed_keys(values, base, job_owned):
-    """One row per setting that differs from the base config."""
+TEAM_COLUMN = "team's config.yaml"
+TYPED_BY = "modelling type"
+EDITED_BY = "edited here"
+
+
+def _changed_keys(values, team, job_owned, kind=None, by_type=None):
+    """One row per setting that differs from the TEAM's config.yaml - the
+    modelling type's settings included - or from what the type sets (an edit
+    back to the team's value): setting · the team's value · the type's value
+    (when the type sets one) · now · what changed it."""
+    by_type = by_type or {}
     out = []
     for section, block in values.items():
         for key, v in block.items():
             if f"{section}.{key}" in job_owned:
                 continue
-            b = (base.get(section) or {}).get(key)
-            if not _same(v, b):
-                out.append({"setting": f"{section}.{key}", "base config": _fmt(b),
-                            "now": _fmt(v)})
+            t = (team.get(section) or {}).get(key)
+            sets = key in (by_type.get(section) or {})
+            tv = (by_type.get(section) or {}).get(key)
+            if _same(v, t) and not (sets and not _same(v, tv)):
+                continue
+            row = {"setting": f"{section}.{key}", TEAM_COLUMN: _fmt(t)}
+            if by_type:
+                row[f"{kind}" if kind else TYPED_BY] = _fmt(tv) if sets else ""
+            row["now"] = _fmt(v)
+            row["changed by"] = (f"{TYPED_BY} {kind}" if sets and _same(v, tv)
+                                 else EDITED_BY)
+            out.append(row)
     return out
 
 
@@ -569,11 +618,13 @@ def _settings_fragment():
             st.info(f"Modelling type **{kind}** (chosen in ①) sets "
                     + ", ".join(f"`{sec}.{key}` = {_fmt(v)}" for sec, block in by_type.items()
                                 for key, v in block.items())
-                    + " - codebase 1's modelling_types.csv. Those values are the base below; "
-                      "Reset goes back to them.")
+                    + " - codebase 1's modelling_types.yaml. They are marked :blue[●] below "
+                      "and listed in the difference table; Reset goes back to them.")
 
         values = st.session_state["cfg_values"]
         base = st.session_state["cfg_base"]
+        team = st.session_state.get("cfg_team") or base
+        typed = (kind, by_type)
         version = st.session_state.get("cfg_version", 0)
         job_owned = set(schema["job_owned"])
         watched_before = _watched(values)
@@ -595,7 +646,7 @@ def _settings_fragment():
         # it opens - no "Edit settings" switch any more.
         if not rows_by and not advanced_by:
             st.caption("Every setting is fixed by the team (app_access.yaml).")
-        _render_tabs(rows_by, schema, values, base, job_owned, version)
+        _render_tabs(rows_by, schema, values, base, job_owned, version, team, typed)
         n_advanced = sum(len(v) for v in advanced_by.values())
         if n_advanced and st.toggle(
                 f"Advanced options ({n_advanced} settings)", key="cfg_advanced_open",
@@ -603,7 +654,8 @@ def _settings_fragment():
                      "needed once in a while. Your changes to them count whether "
                      "this is open or not."):
             st.markdown("##### Advanced options")
-            _render_tabs(advanced_by, schema, values, base, job_owned, version)
+            _render_tabs(advanced_by, schema, values, base, job_owned, version, team,
+                         typed)
         if show_fixed and editable is not None:
             fixed = [{"setting": f"{r['section']}.{r['key']}",
                       "value": _fmt((values.get(r["section"]) or {}).get(r["key"])),
@@ -679,13 +731,16 @@ def _settings_fragment():
 
         check = codebase.validate_config(values)
         st.session_state["cfg_valid"] = check.ok
-        changed = _changed_keys(values, base, job_owned)
+        changed = _changed_keys(values, team, job_owned, kind, by_type)
+        n_typed = sum(1 for c in changed if c["changed by"] != EDITED_BY)
+        differ = (f"{len(changed)} differ from the team's config.yaml"
+                  + (f" ({n_typed} set by the modelling type {kind})" if n_typed else ""))
         if check.ok:
             st.success("Settings are valid"
-                       + (f" - {len(changed)} differ from the base config:" if changed
-                          else " - the base config, unchanged."))
+                       + (f" - {differ}:" if changed else
+                          " - the team's config.yaml, unchanged."))
         elif changed:
-            st.caption(f"{len(changed)} setting(s) differ from the base config:")
+            st.caption(f"{differ}:")
         if changed:
             st.dataframe(pd.DataFrame(changed), use_container_width=True, hide_index=True)
         for err in check.errors:

@@ -27,7 +27,12 @@ A finished run can be RENAMED (`rename_run`: its folder, where it sits; the
 old name is kept in its run_request.json, and in the group's renames.json so
 the Jobs API's record of the run - which keeps the name it ran under - still
 finds it) and its NOTE edited (`update_note`: run_request.json keeps every
-version, note.txt the latest).
+version, note.txt the latest). A run can be DELETED (`delete_run`: its whole
+folder, for good - never while it runs, never the reported run); the group's
+deleted.json records who and when. A name a run had - renamed away or deleted
+- is never used again (`retired_names`): the Jobs API keeps the name a run
+ran under, and a new run under that name would make the old record open the
+wrong run.
 
 So a run's zip holds exactly what went in and what came out, and a new run
 can start from any earlier run's inputs. Runs from before the run groups
@@ -51,8 +56,9 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from src import codebase, perf
-from src.files import (ADLS_ROOT, delete_file, download_from_adls, is_not_found, list_dir,
-                       move_dir, path_exists, read_json, upload_to_adls, write_json)
+from src.files import (ADLS_ROOT, delete_dir, delete_file, download_from_adls,
+                       is_not_found, list_dir, move_dir, path_exists, read_json,
+                       upload_to_adls, write_json)
 
 FILE_KINDS = ("config_file", "data_file", "prior_file", "mapping_file", "share_file")
 KIND_LABELS = {"config_file": "settings", "data_file": "datacube",
@@ -62,6 +68,7 @@ RUN_INFO = "run_info.json"
 NOTE_FILE = "note.txt"
 REPORTING_FILE = "reporting.json"
 RENAMES_FILE = "renames.json"
+DELETED_FILE = "deleted.json"
 NOTE_MAX = 2000                   # characters - a note, not a document
 
 # used only until the backend answers (the same values as mmm/app_job.py)
@@ -90,6 +97,7 @@ _RUN_LISTS = perf.SharedCache("bmc_runs", ttl=RUN_LIST_SECONDS, maxsize=64)
 _GROUPS = perf.SharedCache("group_places", ttl=RUN_LIST_SECONDS, maxsize=512)
 _REQUESTS = perf.SharedCache("run_requests", ttl=60, maxsize=512)
 _RENAMES = perf.SharedCache("run_renames", ttl=RUN_LIST_SECONDS, maxsize=256)
+_DELETED = perf.SharedCache("run_deletions", ttl=RUN_LIST_SECONDS, maxsize=256)
 _FINISHED = {}            # "<bmc>/<group>/<run>" -> {"request", "info"} of a finished run
 _FINISHED_MAX = 5000
 
@@ -549,10 +557,12 @@ def forget_runs(bmc=None):
         _BMCS.invalidate()
         _GROUPS.invalidate()
         _RENAMES.invalidate()
+        _DELETED.invalidate()
     else:
         _RUN_LISTS.invalidate(str(bmc))
         _GROUPS.invalidate(prefix=f"{bmc}/")
         _RENAMES.invalidate(prefix=f"{bmc}/")
+        _DELETED.invalidate(prefix=f"{bmc}/")
 
 
 def run_exists(bmc, run, group="") -> bool:
@@ -762,6 +772,39 @@ def renames(bmc, group="") -> dict:
     return value
 
 
+def deleted_runs(bmc, group="") -> dict:
+    """{name: {by, at, job_run_id, ...}} of the group's deleted runs (shared,
+    30 s) - deleted.json, next to renames.json."""
+    def load():
+        data, _problem = _read(f"{_names_home(bmc, group)}/{DELETED_FILE}")
+        return dict((data or {}).get("deleted") or {})
+    value, _hit = _DELETED.get_or_compute(f"{bmc}/{group}", load)
+    return value
+
+
+def retired_names(bmc, group="") -> set:
+    """The names no new run of the group may take: those of renamed and of
+    deleted runs. The Jobs API keeps the name a run ran under - a new run
+    with that name would make the old record open the wrong run."""
+    return set(renames(bmc, group)) | set(deleted_runs(bmc, group))
+
+
+def unavailable_names(bmc, group="") -> set:
+    """Every name a new (or renamed) run of the group cannot have: the runs
+    there now and the retired names."""
+    return taken_run_names(bmc, group) | retired_names(bmc, group)
+
+
+def deleted_record(ref) -> dict | None:
+    """Who deleted the ref's run and when - None when it was not deleted."""
+    if not has_folder(ref):
+        return None
+    try:
+        return deleted_runs(ref["bmc"], ref_group(ref)).get(ref["run"])
+    except Exception:  # noqa: BLE001 - an unreadable deleted.json: not deleted
+        return None
+
+
 def current_run_name(bmc, group, run) -> str:
     """The name a run has NOW. The Jobs API keeps the name a run ran under;
     renames.json says what it became."""
@@ -829,6 +872,9 @@ def rename_run(bmc, group, run, new, user="", running=False) -> str:
         if new in renamed:
             raise ValueError(f"'{new}' was the name of another run before (now "
                              f"'{renamed[new]}') - choose another name")
+        gone, _problem = _read(f"{home}/{DELETED_FILE}")
+        if new in ((gone or {}).get("deleted") or {}):
+            raise ValueError(f"'{new}' was the name of a deleted run - choose another name")
         place = _place_now(bmc, group, run)
         try:
             move_dir(run_dir(bmc, run, group, place), run_dir(bmc, new, group, place))
@@ -859,6 +905,49 @@ def rename_run(bmc, group, run, new, user="", running=False) -> str:
         forget_runs(bmc)
         _REQUESTS.invalidate()
     return new
+
+
+def delete_run(bmc, group, run, user="", running=False) -> dict:
+    """Delete a run for good: its folder - inputs, Outputs/, note - wherever
+    it sits in its group. Refused while the run may still write into it, and
+    for the group's reported run (mark another run as reported first). The
+    group's deleted.json (the BMC's, without a group) records who deleted it
+    and when, and its name is never used again (`retired_names`), so the
+    Jobs API's record of the run can only say "deleted". Returns the record;
+    raises ValueError when it cannot be done."""
+    group = group or ""
+    if running:
+        raise ValueError("the run is still running - cancel it, or delete it once it "
+                         "has finished")
+    where = f"{bmc} / {group}" if group else bmc
+    with group_lock(bmc, group):
+        if run not in taken_run_names(bmc, group):
+            raise ValueError(f"'{run}' is not a run of {where}")
+        place = _place_now(bmc, group, run)
+        if place == reported_folder():
+            raise ValueError(f"'{run}' is the run the results of {group} were reported "
+                             "from - mark another run as reported first")
+        request, _problem = _read(request_path(bmc, run, group, place))
+        request = request or {}
+        try:
+            delete_dir(run_dir(bmc, run, group, place))
+        finally:
+            forget_runs(bmc)
+            _REQUESTS.invalidate()
+        entry = {"by": user or "", "at": _stamp(), "place": place or "",
+                 "job_run_id": str(request.get("job_run_id") or "") or None,
+                 "submitted_by": request.get("submitted_by", ""),
+                 "note": str(request.get("note") or "")}
+        home = _names_home(bmc, group)
+        record, _problem = _read(f"{home}/{DELETED_FILE}")
+        record = record or {}
+        deleted = dict(record.get("deleted") or {})
+        deleted[run] = entry
+        write_json({"deleted": deleted,
+                    "history": list(record.get("history") or []) + [dict(entry, run=run)]},
+                   DELETED_FILE, home)
+        forget_runs(bmc)
+    return entry
 
 
 def update_note(bmc, group, run, note, user="") -> dict:

@@ -1,0 +1,38 @@
+# modelling_types.yaml - the modelling types the BRIDGE web app offers, and the
+# settings each one sets.
+#
+# A run is saved under Secondary Modelling/<BMC>/<period> <modelling type>/<run name>/,
+# e.g. "2025Q1-2025Q4 Secondary". Everyone picks a type from this list, in this
+# order. A name is a folder name: letters, digits, spaces, _ - and ., at most 80
+# characters.
+#
+# Under each type: the sections of config.yaml (model, run, sampler, cv, output,
+# assumptions, data), and under each section the settings that type fixes, with
+# their values - exactly as they are written in config.yaml:
+#
+#   Primary:
+#     model:
+#       include_intercept: true
+#       fourier_order: 3
+#     sampler:
+#       draws: 2000
+#
+# A setting not named here keeps the team's config.yaml value. A type with
+# nothing under it (LTE: {}) is just a name. Choosing a type in the app switches
+# its settings at once (the Model settings page lists them in its difference
+# table), and the job applies them too:
+#     config.yaml  <  the type's settings  <  what the modeller changed for the run.
+# A setting that is not in config.yaml, or a value it cannot take, stops with
+# the type and the setting named. The input paths, the output folder and the
+# run name are set by the job and cannot be set here.
+# Re-upload the folder; the app follows within 5 minutes (at once on a page reload).
+
+LTE: {}            # no settings of its own: the team's config.yaml
+
+Primary:
+  model:
+    include_intercept: true
+
+Secondary:
+  model:
+    include_intercept: false

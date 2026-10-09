@@ -112,3 +112,12 @@ mark_reported:
 edit_runs:
   - submitter
   - full_access
+
+# Who may DELETE a run (in the run's panel): its whole folder in ADLS - inputs,
+# outputs, note - for good; its name is never used again. Nobody unless this
+# lists them. Levels as above (and `submitter`). Never while the run runs, and
+# never the period's reported run (mark another one first).
+delete_runs:
+  - full_access
+  - config_full_access
+  - config_advanced_access

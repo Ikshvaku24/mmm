@@ -50,6 +50,18 @@ MAX_COLOURED = len(SERIES["light"])     # pillars past this many fold into "Othe
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
 
+def use_theme(font=None, surface=None):
+    """The lead company's font for every chart, and its page colours behind
+    the heatmap's cells ({"light": ..., "dark": ...}) - from src/brand.py.
+    The data colours stay the validated ones above."""
+    global FONT
+    if font:
+        FONT = font
+    for kind, colour in (surface or {}).items():
+        if kind in INK and colour:
+            INK[kind]["surface"] = colour
+
+
 def available() -> bool:
     try:
         import plotly.graph_objects  # noqa: F401

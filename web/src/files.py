@@ -230,6 +230,26 @@ def delete_file(file_path) -> bool:
         raise
 
 
+@perf.timed("adls.delete_dir", lambda path: path)
+def delete_dir(dir_path) -> bool:
+    """Delete a folder and everything in it - one call in ADLS Gen2 (the
+    delete is recursive). False when it was not there."""
+    if LOCAL_STORAGE_DIR:
+        import shutil
+        target = _local_path(dir_path)
+        if not os.path.isdir(target):
+            return False
+        shutil.rmtree(target)
+        return True
+    try:
+        _file_system().get_directory_client(dir_path).delete_directory()
+        return True
+    except Exception as e:
+        if is_not_found(e):
+            return False
+        raise
+
+
 @perf.timed("adls.move", lambda src, dst: f"{src} -> {dst}")
 def move_dir(src_path, dst_path):
     """Move a folder (with everything in it) to `dst_path` - one rename in

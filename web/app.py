@@ -1,19 +1,23 @@
 
+import os
+
 import streamlit as st
-from src import codebase, page_state
+from src import brand, charts, codebase, page_state
 from src.components.app_header import render_app_header
 from src.config_editor import init_config_state
 #from src.pages.feasibility_check_page import render_feasibility_check_page
-from src.pages.model_setup_page import navigation, render_sidebar_status
+from src.pages.model_setup_page import navigation, render_sidebar_status, render_top_bar
 #from src.pages.transformation_page import render_transformation_page
 from src.styles import inject_global_styles
-import html
 
 email = getattr(st.context, "headers", {}).get("X-Forwarded-Email", "Unknown User")
 username = email.split("@")[0]
 parts = username.split(".")
 name = "Hello " + f"{parts[0]} {parts[-1]}".title()
-st.set_page_config(page_title="Model App", page_icon="🧠", layout="wide")
+st.set_page_config(page_title="BRIDGE · Always-on MMM",
+                   page_icon=brand.AOMMM_LOGO if os.path.exists(brand.AOMMM_LOGO)
+                   else ":material/insights:",
+                   layout="wide")
 # once per app process (later calls do nothing): re-check codebase 1 in the
 # background instead of on someone's click, and start the worker processes
 # that run the heavy codebase 1 steps
@@ -27,46 +31,15 @@ if "_bridge_session" not in st.session_state:
     codebase.check_now()
 # count this run and keep what was chosen on the other pages (src/page_state.py)
 page_state.start_run()
+# the lead company's look (web/themes/*.toml, chosen by theme.base - src/brand.py):
+# the page's accents, AOMMM at the top of the side panel, the charts' font
 inject_global_styles()
-safe_email = html.escape(name) # Escape the email to prevent XSS attacks
-st.markdown(
-    f"""
-        <div class="top-header-email" title="{safe_email}">{safe_email}</div>
-        <style>
-            .top-header-email {{
-                position: fixed;
-                top: 0.46rem;
-                right: 3.8rem;
-                z-index: 9999;
-                color: #2f5567;
-                font-size: 0.82rem;
-                font-weight: 600;
-                line-height: 1.2;
-                padding: 0.1rem 0.25rem;
-                pointer-events: none;
-                white-space: nowrap;
-                max-width: min(34vw, 420px);
-                overflow: hidden;
-                text-overflow: ellipsis;
-            }}
-            @media (max-width: 1024px) {{
-                .top-header-email {{
-                    right: 3.45rem;
-                    max-width: 46vw;
-                }}
-            }}
-            @media (max-width: 768px) {{
-                .top-header-email {{
-                    font-size: 0.74rem;
-                    right: 3.1rem;
-                    top: 0.52rem;
-                    max-width: 52vw;
-                }}
-            }}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
+brand.render_logo()
+charts.use_theme(font=brand.tokens()["font"],
+                 surface={kind: brand.tokens(kind=kind)["surface"] for kind in ("light", "dark")})
+# top right on every page, where Streamlit's ⋮ menu was: who is signed in, and
+# the cluster with its Start button (the user's name is escaped there)
+render_top_bar(name)
 # the settings every page reads (Model settings, the datacube check, the run)
 init_config_state()
 # the pages, in the left-hand panel - each step of a new run, then the runs and
@@ -74,6 +47,7 @@ init_config_state()
 page = st.navigation(navigation(), position="sidebar", expanded=True)
 with st.sidebar:
     render_sidebar_status()
+    brand.render_cobrand()          # Haleon and Capgemini, at the foot of the panel
 render_app_header()
 # selected_page = st.radio(
 #     "Select page",

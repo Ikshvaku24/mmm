@@ -60,7 +60,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.2"   # must equal mmm.__version__
 
 import contextlib
 import copy
@@ -104,9 +104,10 @@ REPORTED_FOLDER = "Results Reported"
 ARCHIVED_FOLDER = "Archived"
 GROUP_FOLDERS = (REPORTED_FOLDER, ARCHIVED_FOLDER)
 
-# the standard names, one CSV each in this folder - the web app offers only these
+# the standard names in this folder - the web app offers only these: the BMC
+# names (one per line) and the modelling types, each with the settings it sets
 BMC_NAMES_FILE = "bmc_names.csv"
-MODELLING_TYPES_FILE = "modelling_types.csv"
+MODELLING_TYPES_FILE = "modelling_types.yaml"
 
 # A BMC or run name is ONE folder level: letters, digits, spaces, _ - and .,
 # starting with a letter or digit and not ending in a space or a dot (ADLS
@@ -249,8 +250,8 @@ def run_folder(base_path: str, bmc_name: str, run_name: str,
 
 
 def read_names(path: str, column: str) -> list:
-    """The standard names in a one-column CSV (`bmc_names.csv`,
-    `modelling_types.csv`): the `column` column (or the first one; a file
+    """The standard names in a one-column CSV (`bmc_names.csv`): the
+    `column` column (or the first one; a file
     without the header line is read as names only), in file order - blanks,
     repeats and lines starting with # dropped. Raises ValueError for a name
     that cannot be a folder name, so a bad list is caught where it is
@@ -281,9 +282,30 @@ def read_names(path: str, column: str) -> list:
     return names
 
 
+def read_modelling_types(path: str) -> list:
+    """The modelling types in modelling_types.yaml - its top-level names, in
+    file order. Raises ValueError for a name that cannot be a folder name (or
+    a file that is not names with sections under them), so a bad list is
+    caught where it is written."""
+    from mmm.core.settings import modelling_types_yaml
+    names, seen, problems = [], set(), []
+    for name in modelling_types_yaml(path):
+        if name.lower() in seen:
+            continue
+        problem = name_problem(name, "modelling type")
+        if problem:
+            problems.append(problem)
+            continue
+        seen.add(name.lower())
+        names.append(name)
+    if problems:
+        raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
+    return names
+
+
 def type_settings(run_group: str, config_dir: str) -> tuple[str, dict]:
     """(modelling type, the settings it sets) for a run group - from this
-    folder's modelling_types.csv (settings.modelling_type_settings). ("", {})
+    folder's modelling_types.yaml (settings.modelling_type_settings). ("", {})
     without a group, or for a type the file gives no settings."""
     parts = parse_group(run_group) if run_group else None
     if not parts:
@@ -552,7 +574,7 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
             print(f"[app_job] config   {cfg_src}")
             with open(cfg_src, encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}
-            # the modelling type's own settings (modelling_types.csv) sit
+            # the modelling type's own settings (modelling_types.yaml) sit
             # between the team's config.yaml and the run's: team < type < run
             kind, by_type = type_settings(p["run_group"], config_dir)
             if by_type:

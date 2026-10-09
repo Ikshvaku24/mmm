@@ -1,142 +1,186 @@
+"""The page's CSS - what Streamlit's theme (web/themes/*.toml) cannot do.
 
+The colours, fonts and corners come from the lead company's theme file; the
+accents here come from src/brand.py, so they follow the same choice. Kept to
+what the app needs: Streamlit's top bar made click-through and its ⋮ menu
+hidden (the cluster sits there - the top bar), the header's baseline, the
+page titles' marker, the text on primary buttons, the side panel's logos,
+the run counter and the run list's fade-in on the Runs and results page.
+"""
 import streamlit as st
+
+from src import brand
+
+_COMMON = """
+/* Streamlit's top bar: see-through, and it no longer catches clicks - a
+   button scrolled up under it could not be pressed. Its ⋮ menu and the
+   Deploy button are hidden: the cluster sits there instead (the top bar). */
+[data-testid="stHeader"] { background: transparent; }
+[data-testid="stHeader"],
+[data-testid="stHeader"] [data-testid="stToolbar"],
+[data-testid="stHeader"] [data-testid="stDecoration"] { pointer-events: none; }
+[data-testid="stHeader"] button,
+[data-testid="stHeader"] a,
+[data-testid="stHeader"] [role="button"],
+[data-testid="stHeader"] [data-testid="stToolbarActions"] > * { pointer-events: auto; }
+[data-testid="stMainMenu"],
+[data-testid="stAppDeployButton"] { display: none !important; }
+.block-container { padding-top: 2.6rem; padding-bottom: 2.5rem; }
+
+/* the top bar: who is signed in, and the cluster with its Start button -
+   top right on every page */
+.st-key-bridge_topbar {
+    position: fixed; top: 0.62rem; right: 1rem; z-index: 999991;
+    width: auto !important; flex-wrap: nowrap; align-items: center; gap: 0.6rem;
+}
+div:has(> .st-key-bridge_topbar) { min-height: 0; }
+.st-key-bridge_topbar [data-testid="stMarkdownContainer"] p { margin: 0; }
+.bridge-hello {
+    font-size: 0.8rem; font-weight: 600; color: var(--bridge-subtitle);
+    white-space: nowrap; display: inline-block; max-width: 30vw;
+    overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
+}
+.bridge-cluster {
+    display: inline-flex; align-items: center; gap: 0.42rem; white-space: nowrap;
+    padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
+    border: 1px solid var(--bridge-rule); background: var(--bridge-surface);
+    color: var(--bridge-ink); line-height: 1.35;
+}
+.bridge-cluster-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%;
+                      background: var(--bridge-off); flex: 0 0 auto; }
+.bridge-cluster--good .bridge-cluster-dot { background: var(--bridge-good); }
+.bridge-cluster--busy .bridge-cluster-dot { background: var(--bridge-busy);
+                                            animation: bridge-pulse 1.4s ease-in-out infinite; }
+.bridge-cluster--unknown .bridge-cluster-dot { background: transparent;
+                                               border: 1.5px dashed var(--bridge-off); }
+.bridge-cluster-note { font-size: 0.74rem; color: var(--bridge-subtitle); white-space: nowrap; }
+.st-key-start_cluster_button button {
+    min-height: 1.75rem; padding: 0 0.6rem; font-size: 0.78rem; white-space: nowrap;
+}
+@keyframes bridge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+
+/* the header: BRIDGE, what it stands for, and the baseline under it */
+.bridge-header { margin: 0 0 1.2rem; }
+.bridge-title { font-weight: 700; font-size: 2.05rem; line-height: 1.1;
+                letter-spacing: 0.06em; color: var(--bridge-title); }
+.bridge-subtitle { margin-top: 0.3rem; color: var(--bridge-subtitle); font-size: 0.9rem; }
+.bridge-baseline { margin-top: 0.85rem; height: 4px; width: 100%; background: var(--bridge-baseline); }
+
+/* the primary buttons' text - Streamlit always writes it white */
+[data-testid="stBaseButton-primary"]:not(:disabled),
+[data-testid="stBaseButton-primary"]:not(:disabled) p { color: var(--bridge-on-primary) !important; }
+/* deleting a run is red */
+[class*="st-key-delete_go_"] [data-testid="stBaseButton-primary"]:not(:disabled) {
+    background: var(--bridge-danger) !important; border-color: var(--bridge-danger) !important;
+}
+[class*="st-key-delete_go_"] [data-testid="stBaseButton-primary"]:not(:disabled),
+[class*="st-key-delete_go_"] [data-testid="stBaseButton-primary"]:not(:disabled) p {
+    color: #FFFFFF !important;
+}
+
+/* the side panel: AOMMM on top, the page list, the two companies at the foot */
+[data-testid="stSidebarHeader"] img { height: 2.7rem; max-width: 100%; }
+[data-testid="stNavSectionHeader"] { text-transform: uppercase; letter-spacing: 0.08em;
+                                     font-size: 0.72rem; }
+[data-testid="stSidebarNavLink"][aria-current="page"] { box-shadow: inset 3px 0 0 var(--bridge-accent); }
+/* in the flow after the status (it never covers a button), and held at the
+   foot of the panel when the panel scrolls */
+[data-testid="stSidebarContent"] .bridge-cobrand {
+    position: sticky; bottom: 0; z-index: 1; margin-top: 1.4rem;
+    display: flex; align-items: center; justify-content: center; gap: 0.85rem;
+    padding: 0.85rem 0.5rem 0.9rem; background: var(--bridge-sidebar-bg);
+    border-top: 1px solid var(--bridge-rule);
+}
+.bridge-cobrand-logo { display: block; width: auto; }
+.bridge-cobrand-logo--haleon { height: 0.85rem; }
+.bridge-cobrand-logo--capgemini { height: 1.3rem; }
+.bridge-cobrand-rule { width: 1px; height: 1.4rem; background: var(--bridge-rule); }
+
+/* Runs and results: the counter, and the list fading in on every new choice
+   (the list mounts under the other of two keys, so the animation restarts) */
+.bridge-count {
+    display: inline-block; padding: 0.12rem 0.6rem; margin-right: 0.6rem;
+    border-radius: 999px; font-size: 0.8rem; font-weight: 700;
+    background: var(--bridge-chip-bg); color: var(--bridge-chip-fg);
+}
+.bridge-count-note { color: var(--bridge-subtitle); font-size: 0.85rem; }
+/* room above the table for its hover toolbar (it would cover Refresh) */
+.st-key-rf_list_a [data-testid="stDataFrame"],
+.st-key-rf_list_b [data-testid="stDataFrame"] { margin-top: 1.1rem; }
+.st-key-rf_list_a { animation: bridge-in-a 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+.st-key-rf_list_b { animation: bridge-in-b 0.32s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
+@keyframes bridge-in-a { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@keyframes bridge-in-b { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce) {
+    .st-key-rf_list_a, .st-key-rf_list_b, .bridge-cluster--busy .bridge-cluster-dot { animation: none; }
+}
+
+/* No grey flash while the page refreshes: Streamlit dims "stale" elements
+   (element containers, expander and tab headers) while a rerun is in flight. */
+[data-stale="true"],
+[data-testid="stExpander"] summary,
+[data-baseweb="tab-list"],
+[data-baseweb="tab"] { opacity: 1 !important; transition: none !important; }
+
+/* The contribution tree: each pillar is a full-width button with its + / -
+   on the left - read like a list, not a button bar. */
+[class*="st-key-ctree_"] button { justify-content: flex-start; text-align: left; }
+[class*="st-key-ctree_"] button p { text-align: left; }
+
+/* No "Running... Stop" badge on every click - the slow steps show their own
+   spinner. */
+[data-testid="stStatusWidget"] { visibility: hidden; }
+"""
+
+# the company's own marks on top of the common rules
+_HALEON = """
+/* Haleon: page titles carry the green bar of the E (as Haleon's slides do) */
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] h3:not([data-testid="stExpander"] h3)::before {
+    content: ""; display: inline-block; width: 0.85em; height: 0.3em; margin-right: 0.55em;
+    vertical-align: 0.2em; background: var(--bridge-accent);
+}
+"""
+_CAPGEMINI = """
+/* Capgemini: page titles carry a Vibrant Blue rule */
+[data-testid="stMain"] [data-testid="stMarkdownContainer"] h3:not([data-testid="stExpander"] h3) {
+    border-left: 3px solid var(--bridge-accent); padding-left: 0.6rem;
+}
+"""
+
+
+def _variables(t) -> str:
+    dark = bool(t.get("dark"))
+    status = ({"good": "#3DD68C", "busy": "#F0B429", "off": "#8D979D"} if dark else
+              {"good": "#1E8E3E", "busy": "#C98500", "off": "#8D979D"})
+    baseline = (f"linear-gradient(90deg, {t['accent']} 0 7rem, {t['rule']} 7rem 100%)"
+                if t["key"] == "haleon" else
+                f"linear-gradient(90deg, #0070AD 0 6rem, {t['accent']} 6rem 11rem, "
+                f"{t['rule']} 11rem 100%)")
+    ink = "#F2F2F2" if dark else "#1B1819"
+    pairs = {"accent": t["accent"], "accent-ink": t["accent_ink"], "title": t["title"],
+             "subtitle": t["subtitle"], "rule": t["rule"], "on-primary": t["on_primary"],
+             "chip-bg": t["chip_bg"], "chip-fg": t["chip_fg"], "danger": t["danger"],
+             "sidebar-bg": t["sidebar_bg"], "surface": t["surface"], "ink": ink,
+             "baseline": baseline, "good": status["good"], "busy": status["busy"],
+             "off": status["off"]}
+    return ":root {\n" + "\n".join(f"    --bridge-{k}: {v};" for k, v in pairs.items()) + "\n}\n"
+
+
+def _logo_rules(t) -> str:
+    """AOMMM on a light panel blends into it (its file has a white ground);
+    on a dark panel it sits on a small white card."""
+    if t["sidebar_dark"]:
+        return ('[data-testid="stSidebarHeader"] img { background: #FFFFFF; '
+                "padding: 0.2rem 0.45rem; border-radius: 0.4rem; }\n")
+    return '[data-testid="stSidebarHeader"] img { mix-blend-mode: multiply; }\n'
+
+
+def global_css() -> str:
+    """The whole style sheet for the lead company and the viewer's mode."""
+    t = brand.tokens()
+    own = _HALEON if t["key"] == "haleon" else _CAPGEMINI
+    return _variables(t) + _logo_rules(t) + _COMMON + own
+
+
 def inject_global_styles():
-    st.markdown(
-        """
-        <style>
-            :root {
-                --ink: #123042;
-               --muted-ink: #3e5f70;
-               --glass: rgba(255, 255, 255, 0.28);
-               --glass-border: rgba(255, 255, 255, 0.46);
-           }
-           .stApp {
-               background:
-                   radial-gradient(circle at 8% 12%, rgba(146, 208, 224, 0.45), transparent 33%),
-                   radial-gradient(circle at 92% 18%, rgba(184, 214, 255, 0.5), transparent 31%),
-                   radial-gradient(circle at 46% 88%, rgba(252, 221, 186, 0.46), transparent 34%),
-                   linear-gradient(145deg, #f7fbfd 0%, #e8f2f8 44%, #dcecf4 100%);
-           }
-           [data-testid="stHeader"] {
-               background: transparent;
-           }
-           /* Streamlit's top bar is see-through but still caught every click,
-              so a button scrolled up under it could not be pressed. Clicks now
-              pass through the bar; only its own controls (the menu, the
-              toolbar buttons) still take them. */
-           [data-testid="stHeader"],
-           [data-testid="stHeader"] [data-testid="stToolbar"],
-           [data-testid="stHeader"] [data-testid="stDecoration"] {
-               pointer-events: none;
-           }
-           [data-testid="stHeader"] button,
-           [data-testid="stHeader"] a,
-           [data-testid="stHeader"] [role="button"],
-           [data-testid="stHeader"] [data-testid="stMainMenu"],
-           [data-testid="stHeader"] [data-testid="stToolbarActions"] > *,
-           [data-testid="stHeader"] [data-testid="stAppDeployButton"] {
-               pointer-events: auto;
-           }
-           [data-testid="stAppViewContainer"] {
-               background: transparent;
-           }
-           .block-container {
-               padding-top: 2rem;
-               padding-bottom: 2.5rem;
-           }
-           .app-header {
-               padding: 1.4rem 1.55rem;
-               border-radius: 20px;
-               background: transparent;
-               border: none;
-               box-shadow: none;
-               backdrop-filter: none;
-               -webkit-backdrop-filter: none;
-               margin-bottom: 1rem;
-           }
-           .app-header h1 {
-               margin: 0;
-               color: var(--ink);
-               font-weight: 700;
-               letter-spacing: 0.15px;
-           }
-           .app-header p {
-               margin: 0.42rem 0 0;
-               color: var(--muted-ink);
-               font-size: 0.98rem;
-           }
-           div[data-testid="stVerticalBlockBorderWrapper"] {
-               border-radius: 18px;
-               border: 1px solid rgba(131, 185, 214, 0.9) !important;
-               background: linear-gradient(145deg, rgba(255, 255, 255, 0.34), rgba(255, 255, 255, 0.2));
-               box-shadow: 0 10px 28px rgba(21, 54, 72, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.45);
-               backdrop-filter: blur(8px);
-               -webkit-backdrop-filter: blur(8px);
-               padding: 0.25rem;
-           }
-           [data-testid="stFileUploaderDropzone"] {
-               border-radius: 14px;
-               border: 1px dashed rgba(55, 91, 114, 0.45);
-               background: rgba(255, 255, 255, 0.28);
-               transition: border-color 0.2s ease, transform 0.2s ease;
-           }
-           [data-testid="stFileUploaderDropzone"]:hover {
-               border-color: rgba(33, 93, 126, 0.72);
-               transform: translateY(-1px);
-           }
-           [data-testid="stButton"] button {
-               border-radius: 999px;
-               border: 1px solid rgba(16, 75, 109, 0.2);
-               box-shadow: 0 8px 18px rgba(14, 62, 90, 0.17);
-               font-weight: 600;
-               padding-left: 1.25rem;
-               padding-right: 1.25rem;
-           }
-           [data-testid="stButton"] button[kind="secondary"] {
-               background: linear-gradient(135deg, rgba(216, 236, 246, 0.96), rgba(198, 225, 239, 0.96));
-               color: var(--ink);
-               border: 1px solid rgba(88, 142, 170, 0.5);
-           }
-           [data-testid="stButton"] button[kind="secondary"]:hover {
-               background: linear-gradient(135deg, rgba(204, 229, 242, 0.98), rgba(184, 216, 233, 0.98));
-               border-color: rgba(67, 121, 151, 0.62);
-               color: #0f2c3b;
-            }
-
-            [data-testid="stButton"] button:hover {
-                transform: translateY(-1px);
-                box-shadow: 0 10px 20px rgba(14, 62, 90, 0.2);
-            }
-
-            /* No grey flash while the page refreshes. Streamlit dims "stale"
-               elements (element containers, expander and tab headers) to 33%
-               while a rerun is in flight; keep everything at full opacity. */
-            [data-stale="true"],
-            [data-testid="stExpander"] summary,
-            [data-baseweb="tab-list"],
-            [data-baseweb="tab"] {
-                opacity: 1 !important;
-                transition: none !important;
-            }
-
-            /* The contribution tree: each pillar is a full-width button with
-               its + / - on the left - read like a list, not a button bar. */
-            [class*="st-key-ctree_"] button {
-                justify-content: flex-start;
-                text-align: left;
-            }
-            [class*="st-key-ctree_"] button p {
-                text-align: left;
-            }
-
-            /* No "Running... Stop" badge on every click - the slow steps
-               (reading the datacube, generating priors, uploading, running)
-               show their own spinner instead. */
-            [data-testid="stStatusWidget"] {
-                visibility: hidden;
-            }
-        </style>
-        """
-        ,
-        unsafe_allow_html=True,
-    )
+    st.markdown(f"<style>{global_css()}</style>", unsafe_allow_html=True)

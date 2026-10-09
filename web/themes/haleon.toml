@@ -1,0 +1,70 @@
+# Haleon - BRIDGE's lead theme by default (the app runs on Haleon's Databricks,
+# on Haleon's data, for Haleon's modellers).
+#
+# Haleon's identity: black and white, with restrained hits of Haleon Green -
+# the bar in the E of the logo (#30EA03) - used as bars, dividers and frames.
+# Verdana, as in Haleon's own presentation template; near-square corners.
+# Every colour below is from Haleon's template and logo (snapshots/company
+# theme/). Haleon Green is never text on white (1.6:1): it is a fill, a bar,
+# or text on black (12.9:1). Green text on white uses the dark green #1E7D00.
+#
+# Which theme leads is one setting - Streamlit's theme.base (app.yml on
+# Databricks, .streamlit/config.toml on a laptop); see src/brand.py.
+
+[theme]
+base = "light"
+font = "Verdana, Geneva, 'DejaVu Sans'"
+headingFont = "Verdana, Geneva, 'DejaVu Sans'"
+headingFontWeights = [700, 700, 700, 700, 700, 700]
+baseFontSize = 15
+baseRadius = "small"
+buttonRadius = "small"
+showWidgetBorder = true
+showSidebarBorder = true
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#1B1819"                 # black buttons (their text is green - src/brand.py)
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F3F3F5"
+textColor = "#1B1819"
+borderColor = "#D3D7DA"
+dataframeHeaderBackgroundColor = "#E7E7EB"
+linkColor = "#1E7D00"
+greenColor = "#30EA03"                   # success = Haleon Green, on its own pale tint
+greenBackgroundColor = "#E0FCD9"
+greenTextColor = "#1B6E00"
+blueColor = "#333F48"                    # information = Haleon's slate, not a blue
+blueBackgroundColor = "#EDEFF1"
+blueTextColor = "#2A363E"
+violetColor = "#FF29FF"
+codeBackgroundColor = "#F3F3F5"
+codeTextColor = "#2A363E"
+
+[theme.light.sidebar]
+backgroundColor = "#F3F3F5"
+secondaryBackgroundColor = "#FFFFFF"
+textColor = "#1B1819"
+borderColor = "#D3D7DA"
+
+[theme.dark]
+primaryColor = "#30EA03"                 # green buttons with black text
+backgroundColor = "#111213"
+secondaryBackgroundColor = "#1E2326"
+textColor = "#F2F2F2"
+borderColor = "#333F48"
+dataframeHeaderBackgroundColor = "#2A363E"
+linkColor = "#30EA03"
+greenColor = "#30EA03"
+greenTextColor = "#7DF55C"
+blueColor = "#8D979D"
+blueTextColor = "#C9D0D4"
+violetColor = "#FF29FF"
+codeBackgroundColor = "#1E2326"
+codeTextColor = "#C9D0D4"
+
+[theme.dark.sidebar]
+backgroundColor = "#000000"
+secondaryBackgroundColor = "#1B1819"
+textColor = "#F2F2F2"
+borderColor = "#2A363E"

@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.1"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.2"   # must equal mmm.__version__
 
 import copy
 import dataclasses
@@ -502,7 +502,8 @@ def config_schema() -> list[dict]:
 # --------------------------------------------------------------------------- #
 ACCESS_FILE = "app_access.yaml"
 _ACCESS_KEYS = ("full_access", "config_full_access", "config_advanced_access",
-                "editable", "advanced", "show_fixed", "mark_reported", "edit_runs")
+                "editable", "advanced", "show_fixed", "mark_reported", "edit_runs",
+                "delete_runs")
 # the four levels, most rights first; everyone not named in the file is the last
 ACCESS_LEVELS = ("full_access", "config_full_access", "config_advanced_access",
                  "editable_only")
@@ -512,6 +513,9 @@ DEFAULT_MARK_REPORTED = ("full_access", "config_full_access", "config_advanced_a
 # who may rename a finished run and edit its note: the levels, and "submitter"
 # = the person who started that run
 DEFAULT_EDIT_RUNS = ("submitter", "full_access")
+# who may delete a run (its whole folder, for good): nobody unless the file
+# lists the levels - deleting cannot be undone
+DEFAULT_DELETE_RUNS = ()
 
 
 def _level_list(raw: dict, key: str, default, unknown: list, extra=()) -> list:
@@ -593,6 +597,9 @@ def app_access(path: str | None = None) -> dict:
                                 the run a group's results were reported from
         edit_runs               who may rename a finished run and edit its note:
                                 levels, and "submitter" (the run's own author)
+        delete_runs             who may delete a run - its folder, for good:
+                                levels (and "submitter"); nobody when the file
+                                does not say
         unknown                 what the file names that does not exist (a
                                 setting, or a level under mark_reported) -
                                 ignored, for the UI to warn about
@@ -612,7 +619,8 @@ def app_access(path: str | None = None) -> dict:
         return {"full_access": [], "config_full_access": [], "config_advanced_access": [],
                 "editable": None, "advanced": [], "show_fixed": False,
                 "mark_reported": list(DEFAULT_MARK_REPORTED),
-                "edit_runs": list(DEFAULT_EDIT_RUNS), "unknown": [], "source": ""}
+                "edit_runs": list(DEFAULT_EDIT_RUNS),
+                "delete_runs": list(DEFAULT_DELETE_RUNS), "unknown": [], "source": ""}
     with open(path, encoding="utf-8") as fh:
         try:
             raw = yaml.safe_load(fh) or {}
@@ -631,80 +639,111 @@ def app_access(path: str | None = None) -> dict:
     advanced = [] if editable is None else sorted(set(advanced) - set(editable))
     mark = _level_list(raw, "mark_reported", DEFAULT_MARK_REPORTED, unknown)
     edit = _level_list(raw, "edit_runs", DEFAULT_EDIT_RUNS, unknown, extra=("submitter",))
+    delete = _level_list(raw, "delete_runs", DEFAULT_DELETE_RUNS, unknown,
+                         extra=("submitter",))
     return {"full_access": _emails(raw, "full_access"),
             "config_full_access": _emails(raw, "config_full_access"),
             "config_advanced_access": _emails(raw, "config_advanced_access"),
             "editable": editable, "advanced": advanced,
             "show_fixed": bool(raw.get("show_fixed", False)),
-            "mark_reported": mark, "edit_runs": edit,
+            "mark_reported": mark, "edit_runs": edit, "delete_runs": delete,
             "unknown": unknown, "source": path}
 
 
 # --------------------------------------------------------------------------- #
-# the settings each modelling type sets (modelling_types.csv)
+# the modelling types and the settings each one sets (modelling_types.yaml)
 # --------------------------------------------------------------------------- #
-def modelling_type_settings(path: str, job_owned=()) -> dict:
-    """{modelling type: {section: {key: value}}} - the settings each type
-    sets, from modelling_types.csv.
-
-    The file's first column names the types; every further column is a
-    setting, written "section.key" (e.g. model.include_intercept), and each
-    cell is that type's value - true/false, a number, a name - read as YAML.
-    A blank cell sets nothing: the type keeps the team's config.yaml value.
-    So "Primary models carry an intercept, Secondary ones do not" is one
-    column. The web app applies a type's settings when the type is chosen,
-    and the job lays them between the team's config.yaml and the run's own
-    settings. Raises ValueError (naming the cell) for a column that is not a
-    setting, a setting the job sets itself (`job_owned`), or a value the
-    setting cannot take. {} when there is no file or no setting column."""
-    import csv
-    import tempfile
-
+def modelling_types_yaml(path: str) -> dict:
+    """modelling_types.yaml as written: {modelling type: {section: {key:
+    value}}}, in file order - a type with nothing under it is {}. {} when
+    there is no file. Raises ValueError for a file that is not a mapping of
+    names to sections; the settings themselves are checked by
+    modelling_type_settings."""
     if not path or not os.path.exists(path):
         return {}
-    with open(path, encoding="utf-8-sig", newline="") as fh:
-        rows = [r for r in csv.reader(fh) if r and any(c.strip() for c in r)
-                and not r[0].strip().startswith("#")]
-    if not rows:
+    name = os.path.basename(path)
+    with open(path, encoding="utf-8-sig") as fh:
+        try:
+            raw = yaml.safe_load(fh)
+        except yaml.YAMLError as e:
+            raise ValueError(f"{name} is not valid YAML: {e}") from None
+    if raw is None:
         return {}
-    header = [h.strip() for h in rows[0]]
-    if header[0].lower() not in ("modelling_type", "modelling type", "name"):
-        return {}                                  # names only, no header: no settings
-    known = {(r["section"], r["key"]): r for r in config_schema()}
-    columns, problems = [], []
-    for j, name in enumerate(header[1:], start=1):
-        if not name:
+    if not isinstance(raw, dict):
+        raise ValueError(f"{name}: expected the modelling types at the top level "
+                         f"(Primary:, Secondary: ...), got {type(raw).__name__}")
+    out, problems = {}, []
+    for kind, block in raw.items():
+        if isinstance(kind, int) and not isinstance(kind, bool):
+            kind = str(kind)                       # 2025: is the name "2025"
+        if not isinstance(kind, str):
+            problems.append(f"the modelling type {kind!r} is read by YAML as "
+                            f"{type(kind).__name__} - write the name in quotes, "
+                            f"e.g. '{kind}':")
             continue
-        section, _, key = name.partition(".")
-        if (section, key) not in known:
-            near = difflib.get_close_matches(name, [f"{s}.{k}" for s, k in known], n=1)
-            problems.append(f"column '{name}' is not a setting"
-                            + (f" (did you mean '{near[0]}'?)" if near else ""))
-        elif name in set(job_owned):
-            problems.append(f"column '{name}' is set by the job itself - it cannot "
-                            "depend on the modelling type")
-        else:
-            columns.append((j, section, key))
+        if block is None:
+            block = {}
+        if not isinstance(block, dict) or any(
+                not isinstance(v, dict) and v is not None for v in block.values()):
+            problems.append(f"{kind}: expected sections with settings under it "
+                            "(model:, run:, sampler: ...), each with setting: value lines")
+            continue
+        out[kind] = {str(sec): dict(keys or {}) for sec, keys in block.items()}
     if problems:
-        raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
-    out = {}
-    for r in rows[1:]:
-        kind = r[0].strip()
-        if not kind:
-            continue
+        raise ValueError(f"{name}: " + "; ".join(problems))
+    return out
+
+
+def modelling_type_settings(path: str, job_owned=()) -> dict:
+    """{modelling type: {section: {key: value}}} - the settings each type
+    sets, from modelling_types.yaml. Only the types that set something.
+
+    The file names each type at the top level, then the sections of
+    config.yaml under it, then the settings and their values:
+
+        Primary:
+          model:
+            include_intercept: true
+
+    A setting the file does not name keeps the team's config.yaml value. The
+    web app applies a type's settings when the type is chosen, and the job
+    lays them between the team's config.yaml and the run's own settings.
+    Raises ValueError (naming the type and the setting) for a section or a
+    setting codebase 1 does not have, a setting the job sets itself
+    (`job_owned`), or a value the setting cannot take. {} when there is no
+    file or no type sets anything."""
+    import tempfile
+
+    every = modelling_types_yaml(path)
+    known = {(r["section"], r["key"]): r for r in config_schema()}
+    sections = sorted({s for s, _k in known})
+    owned = set(job_owned)
+    out, problems = {}, []
+    for kind, block in every.items():
         values = {}
-        for j, section, key in columns:
-            cell = r[j].strip() if j < len(r) else ""
-            if not cell:
+        for section, keys in block.items():
+            if section not in sections:
+                near = difflib.get_close_matches(section, sections, n=1)
+                problems.append(f"{kind}: '{section}' is not a section of config.yaml"
+                                + (f" (did you mean '{near[0]}'?)" if near else
+                                   f" ({', '.join(sections)})"))
                 continue
-            try:
-                value = yaml.safe_load(cell)
-            except yaml.YAMLError:
-                value = cell
-            if known[(section, key)]["kind"] in ("str", "choice", "str_or_null") \
-                    and value is not None and not isinstance(value, str):
-                value = cell                         # "1" for a text setting stays "1"
-            values.setdefault(section, {})[key] = value
+            for key, value in keys.items():
+                name = f"{section}.{key}"
+                if (section, str(key)) not in known:
+                    near = difflib.get_close_matches(
+                        name, [f"{s}.{k}" for s, k in known], n=1)
+                    problems.append(f"{kind}: {name} is not a setting"
+                                    + (f" (did you mean '{near[0]}'?)" if near else ""))
+                    continue
+                if name in owned:
+                    problems.append(f"{kind}: {name} is set by the job itself - it cannot "
+                                    "depend on the modelling type")
+                    continue
+                if known[(section, str(key))]["kind"] in ("str", "choice", "str_or_null") \
+                        and isinstance(value, (int, float)) and not isinstance(value, bool):
+                    value = str(value)              # "1" for a text setting stays "1"
+                values.setdefault(section, {})[str(key)] = value
         if not values:
             continue
         try:

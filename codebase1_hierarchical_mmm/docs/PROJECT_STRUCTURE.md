@@ -14,11 +14,11 @@ codebase1_hierarchical_mmm/
 ├── config.yaml               every setting at its default, with help text
 ├── app_access.yaml           who may do what in the web app: four levels (full
 │                             access, every setting, editable + advanced, editable
-│                             only), who may mark a reported run and who may
-│                             rename a run / edit its note (RBAC)
+│                             only), who may mark a reported run, who may
+│                             rename a run / edit its note, who may delete a run (RBAC)
 ├── bmc_names.csv             the standard BMC names the web app offers
-├── modelling_types.csv       the modelling types (LTE, Primary, Secondary ...)
-│                             and the settings each one sets (section.key columns)
+├── modelling_types.yaml      the modelling types (LTE, Primary, Secondary ...)
+│                             and the settings each one sets (type > section > setting)
 ├── feature_priors_*.csv      the prior table (one row per feature)
 │
 ├── mmm/                      the package
@@ -102,10 +102,11 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 | add a setting to the web app's editor | the dataclass field + its `HELP` line (enums in `settings.CHOICES`), then list it under `editable:` (or `advanced:`) in `app_access.yaml` so people may change it |
 | choose which settings people may change in the app | `app_access.yaml` → `editable:` for everyone, `advanced:` for `config_advanced_access` (allow-lists; the rest stay at `config.yaml`'s values) |
 | give someone every setting / the admin tools / the Advanced options | `app_access.yaml` → `config_full_access:` / `full_access:` / `config_advanced_access:` |
-| add a BMC name or a modelling type the app offers | `bmc_names.csv` / `modelling_types.csv` (one per line) |
+| add a BMC name or a modelling type the app offers | `bmc_names.csv` (one per line) / `modelling_types.yaml` (a top-level name) |
 | choose who may mark the reported run | `app_access.yaml` → `mark_reported:` |
-| make a modelling type set a setting (e.g. Primary with an intercept) | `modelling_types.csv` → a `section.key` column, one value per type (blank = `config.yaml`'s) |
+| make a modelling type set a setting (e.g. Primary with an intercept) | `modelling_types.yaml` → under the type, `section:` then `setting: value` (unnamed = `config.yaml`'s) |
 | choose who may rename a run or edit its note | `app_access.yaml` → `edit_runs:` (levels, and `submitter`) |
+| choose who may delete a run | `app_access.yaml` → `delete_runs:` (levels; nobody unless listed) |
 
 ## The web app is the frontend, this folder the backend
 
@@ -182,7 +183,7 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 
 ## Tests
 
-`../tests/run_all.py` — 2021 checks, ~1 min, no PyMC needed. They import the
+`../tests/run_all.py` — 2072 checks, ~1 min, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

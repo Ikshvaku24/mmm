@@ -72,13 +72,14 @@ import yaml
 
 from src import perf
 
-# the first version whose modelling_types.csv carries each type's settings
-# (applied by the app AND the job), with app_access.yaml's `edit_runs` and
-# 01_data/collinearity_matrix.csv; 2026.10.07.1 brought the run groups (the
-# job parameter run_group), the four access levels and the standard lists,
+# the first version with modelling_types.yaml (each type's name and the
+# settings it sets - applied by the app AND the job) and app_access.yaml's
+# `delete_runs`; 2026.10.09.1 brought `edit_runs` and
+# 01_data/collinearity_matrix.csv, 2026.10.07.1 the run groups (the job
+# parameter run_group), the four access levels and the standard lists,
 # 2026.09.30.1 app_access.yaml and the partial run configs, 2026.09.29.2 the
 # run folders
-MIN_CODEBASE = "2026.10.09.1"
+MIN_CODEBASE = "2026.10.09.2"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
@@ -103,10 +104,11 @@ _STATIC = frozenset({"schema", "layout", "base_config", "default_config",
                      "prior_columns", "sample_file", "standard_names"})
 
 # what the app needs from the backend folder (app_access.yaml: who may do what;
-# the two CSVs: the standard BMC names and modelling types - optional, and part
-# of the fingerprint, so editing one reaches the app like any other re-upload)
+# bmc_names.csv and modelling_types.yaml: the standard BMC names, and the
+# modelling types with the settings each one sets - optional, and part of the
+# fingerprint, so editing one reaches the app like any other re-upload)
 _NEEDED_FILES = ("config.yaml", "app_access.yaml", "bmc_names.csv",
-                 "modelling_types.csv")
+                 "modelling_types.yaml")
 _NEEDED_DIRS = ("mmm", "samples")
 _NEEDED_DOCS = ("CONFIG_GUIDE.md", "FEATURE_PRIOR_GUIDE.md")
 
@@ -820,7 +822,8 @@ def _impl_schema():
         access = {"full_access": [], "config_full_access": [],
                   "config_advanced_access": [], "editable": [], "advanced": [],
                   "show_fixed": True, "mark_reported": [], "edit_runs": [],
-                  "unknown": [], "source": access_file, "error": str(e)}
+                  "delete_runs": [], "unknown": [], "source": access_file,
+                  "error": str(e)}
     return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
             "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
             "sections": ["data"] + list(st_.SECTIONS),
@@ -852,12 +855,12 @@ def layout() -> Outcome:
 def _impl_standard_names():
     aj, st_ = _m("mmm.app_job"), _m("mmm.core.settings")
     out, problems = {}, []
-    for key, file_name, column in (("bmc_names", aj.BMC_NAMES_FILE, "bmc_name"),
-                                   ("modelling_types", aj.MODELLING_TYPES_FILE,
-                                    "modelling_type")):
+    for key, file_name, read in (
+            ("bmc_names", aj.BMC_NAMES_FILE, lambda p: aj.read_names(p, "bmc_name")),
+            ("modelling_types", aj.MODELLING_TYPES_FILE, aj.read_modelling_types)):
         path = os.path.join(_STATE["dir"], file_name)
         try:
-            out[key] = aj.read_names(path, column) if os.path.exists(path) else []
+            out[key] = read(path) if os.path.exists(path) else []
             if not os.path.exists(path):
                 problems.append(f"{file_name} is not in codebase 1's folder")
         except (OSError, ValueError) as e:
@@ -876,7 +879,7 @@ def _impl_standard_names():
 
 def standard_names() -> Outcome:
     """The standard BMC names and modelling types - codebase 1's
-    bmc_names.csv and modelling_types.csv: {bmc_names, modelling_types,
+    bmc_names.csv and modelling_types.yaml: {bmc_names, modelling_types,
     type_settings ({type: {section: {key: value}}} - what each type sets),
     problems}."""
     return _call("standard_names")

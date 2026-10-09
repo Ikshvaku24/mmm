@@ -17,8 +17,9 @@ New run
   run name, note                                                                      paste          cluster / run time,
                                                                                                      results, log, zip
 Results
-Runs and results:  a BMC's runs by period and type - results, log, zip, reuse, note, rename,
-                   mark the reported one; every recent run of the model job
+Runs and results:  every run, filtered by BMC, from / to quarter and year and modelling type
+                   (each optional) - results, log, zip, reuse, note, rename, delete, mark the
+                   reported one; every recent run of the model job
 ```
 
 Every run lives in `Secondary Modelling/<BMC>/<period> <modelling type>/<run
@@ -59,14 +60,15 @@ The app does not need redeploying.
 The config editor, the prior table and the run-folder layout come from
 codebase 1 itself (its schema, and `mmm/app_job.py`'s folder names and name
 rule), so a new setting or a new allowed value appears in the app by itself.
-The app needs codebase 1 **2026.10.09.1 or later** (`MIN_CODEBASE` in
+The app needs codebase 1 **2026.10.09.2 or later** (`MIN_CODEBASE` in
 `src/codebase.py`): 2026.09.29.2 brought the run folders (`bmc_name` /
 `run_name`), 2026.09.30.1 `app_access.yaml` (who may do what), the partial
 run config and the live job log, 2026.10.07.1 the period folders (the job
 parameter `run_group`), the four access levels and the standard names
 (`bmc_names.csv`, `modelling_types.csv`), 2026.10.09.1 each modelling type's
-settings (`modelling_types.csv`'s setting columns), `edit_runs` and
-`01_data/collinearity_matrix.csv`.
+settings, `edit_runs` and `01_data/collinearity_matrix.csv`, 2026.10.09.2
+`modelling_types.yaml` (the types and their settings, replacing the CSV) and
+`delete_runs`.
 It says so plainly if the workspace copy is older.
 
 ---
@@ -169,8 +171,9 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
       Archived/<run name>/             the group's other runs, once one is marked
       reporting.json                   who marked which run, when (with the history)
       renames.json                     a renamed run's old names -> its name now
+      deleted.json                     the runs deleted from the group: who, when
     <run name>/                        runs from before the period folders - left as they were
-    renames.json                       the same, for those runs
+    renames.json  deleted.json         the same, for those runs
 ```
 
 - The files are saved when **Run Model** is pressed, never page by page. A
@@ -205,6 +208,18 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 - Both are for the people `edit_runs` in `app_access.yaml` names: levels, and
   `submitter` (the person who started the run). By default `submitter` and
   `full_access`.
+- **Deleting a run** (`projects.delete_run`): one recursive ADLS delete of the
+  run's folder, wherever it sits (`files.delete_dir`) - its inputs, `Outputs/`
+  and note, for good. Refused while it runs, and for the group's reported run
+  (mark another first). `deleted.json` (next to `renames.json`) records who
+  and when; `projects.deleted_record` turns the Jobs API's record of it into
+  a "deleted" notice. For the people `delete_runs` in `app_access.yaml` names
+  - nobody unless it lists levels; shipped: `config_advanced_access` and
+  above.
+- **A name is never used twice** (`projects.retired_names`): no new run, and
+  no rename, may take a renamed or deleted run's name - the Jobs API keeps the
+  name a run ran under, and a new run under it would make the old record open
+  the wrong run (`unavailable_names` = the runs there now + the retired names).
 - **Runs from before the run folders** stay where they were: inputs in the
   shared `Secondary Modelling/Data/`, `Prior/`, `Config/`, `Mapping/`,
   `Share/` (names with a `_YYYYmmdd-HHMMSS` suffix), outputs in
@@ -218,23 +233,28 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 
 The steps are pages in the left-hand panel; a step's title gets ✅ once it
 is done (④ only when a mapping or share file was added). Under the list: the
-backend's version and the cluster. What is chosen on a page stays chosen when
-you move to another (see "Pages, and how they refresh").
+backend's version; at the foot, the two companies' logos. Top right on every
+page, where Streamlit's ⋮ menu was (it is hidden): who is signed in, and the
+cluster - a dot and a word - with **Start cluster** when it is stopped. What
+is chosen on a page stays chosen when you move to another (see "Pages, and
+how they refresh"). The look is the lead company's (see "The look: two
+company themes").
 
 1. **① BMC, period and run.**
    - **BMC name**: the team's names (codebase 1's `bmc_names.csv`) and the BMC
      folders that already have runs. Only `full_access` may type a new name
      (its folder is created with the first run).
    - **From / To quarter and year**, and the **modelling type** (codebase 1's
-     `modelling_types.csv`): the run group, `2025Q1-2025Q4 Secondary`. Once a
+     `modelling_types.yaml`): the run group, `2025Q1-2025Q4 Secondary`. Once a
      datacube is loaded the page says which quarters it covers, with **Use
      the datacube's period**. Choosing a type applies its settings (③) and
      says which changed.
    - **Run name (optional)**: left empty, the run is named when Run Model is
      pressed (`run_20261007-1430`). **📝 Add note** opens the run's note.
 
-   The page says where the run will be saved, and how many runs the BMC has
-   (and which is reported), with a link to them on **Runs and results** (7).
+   The page says where the run will be saved and how many runs the BMC has
+   (and which is reported); **See the runs and their results** opens Runs and
+   results filtered by what is chosen here (7).
 2. **② Input data.** Choose the datacube (xlsx or csv), or keep a reused one
    (the page says which run it came from). Nothing in the file is renamed.
    Only what would stop the run is shown:
@@ -247,10 +267,10 @@ you move to another (see "Pages, and how they refresh").
    writes them to `00_warnings`.
 3. **③ Model settings.** codebase 1's `config.yaml`, with one widget per key
    and dropdowns for the allowed values, shown as soon as the page opens.
-   - **Each modelling type's settings** (codebase 1's `modelling_types.csv`:
-     one column per setting, `section.key`, e.g. `model.include_intercept` -
-     Primary `true`, Secondary `false`, LTE blank; a blank cell sets
-     nothing) lie over the team's `config.yaml`. That is the **base**
+   - **Each modelling type's settings** (codebase 1's `modelling_types.yaml`:
+     each type, the config.yaml sections under it, the settings and values
+     under those - e.g. `Primary:` / `model:` / `include_intercept: true`;
+     `LTE: {}` sets nothing) lie over the team's `config.yaml`. That is the **base**
      (`cfg_base` = team + type): what the page starts from, what ● and Reset
      compare with, and where a fixed setting is held. Choosing another type in
      ① sets every setting either type names to the new base value
@@ -262,17 +282,19 @@ you move to another (see "Pages, and how they refresh").
      the viewer's login e-mail, from the `X-Forwarded-Email` header) - four
      levels:
 
-     | Level | Settings | Admin tools* | New BMC name | Mark reported** | Rename / note*** |
-     |---|---|---|---|---|---|
-     | `full_access` | every setting | yes | yes | yes | any run |
-     | `config_full_access` | every setting | no | no | yes | own runs |
-     | `config_advanced_access` | `editable:` + `advanced:` behind the **Advanced options** switch | no | no | yes | own runs |
-     | everyone else (`editable_only`) | only those under `editable:` - no switch | no | no | no | own runs |
+     | Level | Settings | Admin tools* | New BMC name | Mark reported** | Rename / note*** | Delete**** |
+     |---|---|---|---|---|---|---|
+     | `full_access` | every setting | yes | yes | yes | any run | yes |
+     | `config_full_access` | every setting | no | no | yes | own runs | yes |
+     | `config_advanced_access` | `editable:` + `advanced:` behind the **Advanced options** switch | no | no | yes | own runs | yes |
+     | everyone else (`editable_only`) | only those under `editable:` - no switch | no | no | no | own runs | no |
 
      *Reload codebase 1, the backend's folder path, Open in Databricks.
      **The default; `mark_reported:` lists the levels.
      ***The default; `edit_runs:` lists the levels, and `submitter` = the
      person who started the run.
+     ****As shipped; `delete_runs:` lists the levels - nobody when it is not
+     in the file.
 
      For the last two levels every other setting is fixed at the team's
      `config.yaml` value, and `config_editor.enforce_fixed` puts it back when
@@ -282,8 +304,11 @@ you move to another (see "Pages, and how they refresh").
      be read fixes every setting and grants nobody full access. The file is
      part of the backend's fingerprint, so a re-upload that only edits it
      still reaches open sessions.
-   - A changed value is marked ● (changed from the base), and a table under
-     the settings lists every change: *setting · base config · now*.
+   - An edited value is marked orange ● (it differs from the base), a value
+     the modelling type set blue ●. The table under the settings lists every
+     setting that differs from the **team's** `config.yaml` - so the type's
+     settings too: *setting · team's config.yaml · the type's value · now ·
+     changed by* (*modelling type Primary* or *edited here*).
    - You can load or download a `config.yaml`, and reset to the base. A
      loaded file, or a reused run's settings, shows where the settings came
      from; its ✕ goes back to the base.
@@ -386,7 +411,8 @@ you move to another (see "Pages, and how they refresh").
      of a group that has a reported run, **Make this the reported run**;
    - **📝 Edit note** (any time) and **✏️ Rename** (not while it runs), each
      in a small pop-up, for the people `edit_runs` names (see "Where the
-     files go");
+     files go"); **🗑️ Delete** (not while it runs, never the reported run),
+     for those `delete_runs` names - typing the run's name enables it;
    - then **Download run (zip)** (the run folder: the inputs, `Outputs/` and
      `run_request.json` - built on click, on Streamlit's download thread, and
      cached on the app's disk; `trace.nc` is its own download), the complete **Job
@@ -418,14 +444,26 @@ you move to another (see "Pages, and how they refresh").
    (listed as *not started*), the error is shown and a new run name is
    proposed.
 7. **Runs and results** (its own page).
-   - **Runs in <BMC>** - the BMC chosen in ①, or any other - by default those
-     of the chosen period and type (**Show the runs of** picks another, all of
-     them, or the runs from *before the period folders*), newest first, with
-     ⭐ Reported / Archived, status (queued / cluster starting / running
-     *since*), the notebook's **run time**, when, by whom, the **note**,
-     **reused from** and **changed**. The list is re-read at most every 30 s;
-     **↻ Refresh list** re-reads it now. Select a run to open its panel (as in
-     ⑥); it stays open when you come back to the page (**Close** closes it).
+   - **Six filters** - BMC, From quarter, From year, To quarter, To year,
+     Modelling type - each optional and independent (`filter_runs`: a year
+     alone keeps every run whose period starts / ends in it, across every
+     BMC; runs from before the period folders have no period or type, so any
+     of those filters leaves them out). Each follows ① (`follow_project_choices`:
+     a filter takes ①'s value whenever that changes; one changed here keeps
+     its value until ① changes); **See the runs and their results** on ①
+     copies them all. **Clear filters** empties them.
+   - The list, newest first - every BMC when none is chosen (a BMC column
+     appears), the newest 200 at once - with ⭐ Reported / Archived, status
+     (queued / cluster starting / running *since*), the notebook's **run
+     time**, when, by whom, the **note**, **reused from** and **changed**. The
+     counter says how many match and which filters are on; the list fades in
+     on every new choice (it is drawn under one of two keys, `rf_list_a` /
+     `rf_list_b`, swapped on each change, so the CSS animation restarts; none
+     with reduced motion). It is re-read at most every 30 s; **↻ Refresh**
+     re-reads it now. Select a run to open its panel (as in ⑥); it stays open
+     when you come back to the page (**Close** closes it). A delete draws the
+     table under a new key, so its selection (a row number) cannot open the
+     run that moved up into that row.
    - **Reuse inputs** loads its datacube, settings and prior file (and
      mapping/share files) into the pages, with its BMC, period and type, and
      opens ①; a typed run name gets the next free name (`baseline` →
@@ -464,7 +502,7 @@ Streamlit deletes the value of every widget a run does not draw, so leaving
 ① would lose its BMC and period. `src/page_state.py` keeps them:
 - `start_run()`, at the top of every full run, writes the value of each
   widget in `KEEP` (BMC, period, type, run name, note, Advanced options, the
-  runs list's period, the results page's BMC, ...) and `KEEP_PREFIXES` (each
+  results page's six filters, ...) and `KEEP_PREFIXES` (each
   run's chosen region, period, category, ...) back into the session, which
   makes Streamlit keep it.
 - Upload boxes and selectable tables cannot be written that way (Streamlit
@@ -500,6 +538,30 @@ own buttons take them) - a button scrolled under it used to be unclickable.
 Downloads use `on_click="ignore"`, so they don't rerun anything. A new session
 (opening or reloading the page) calls `codebase.check_now()` once, from
 `app.py`.
+
+### The look: two company themes
+
+BRIDGE is co-branded: **one company leads the look, both are always shown**.
+Haleon leads by default (the app runs on Haleon's Databricks, on Haleon's
+data, for Haleon's modellers); Capgemini's theme is complete and one setting
+away.
+
+| Piece | Where | What |
+|---|---|---|
+| Streamlit's theme | `themes/haleon.toml`, `themes/capgemini.toml` | colours, fonts, corners - `[theme.light]` and `[theme.dark]`, each with its side panel. Streamlit follows each person's system light / dark setting |
+| Which leads | `app.yml`: `STREAMLIT_THEME_BASE` (on a laptop: `.streamlit/config.toml`'s `base`) | `themes/haleon.toml` or `themes/capgemini.toml` - one setting |
+| What the theme cannot do | `src/brand.py` (tokens), `src/styles.py` (CSS) | the green or blue baseline under the header, the page titles' marker, the current page's bar, the text on primary buttons (Streamlit always writes it white - unreadable on Haleon Green), the run counter, a red Delete, the logos; `brand.key()` reads the same setting (Streamlit replaces `theme.base` with "light" once it has read the file) |
+| The logos | `assest/aommm.png` (copied in - top of the side panel, `st.logo`); `brand/` (the companies, at its foot) | the companies' own artwork with white copies for dark panels; PNG because Streamlit will not show an SVG data: image (`haleon*.png` are `haleon*.svg` drawn by a browser) |
+| The charts | `charts.use_theme` | the lead company's font; the data colours stay the validated ones |
+
+Haleon: black and white with restrained hits of Haleon Green `#30EA03`,
+Verdana, near-square corners, a light grey side panel (black in dark mode).
+Capgemini: Capgemini Blue `#0070AD` and Vibrant Blue `#12ABDB` on white, a navy
+side panel, Ubuntu (from Google Fonts; the browser's sans-serif without them).
+Every colour is from the two companies' templates and logos in
+`snapshots/company theme/`. Haleon Green and Vibrant Blue are never text on
+white (1.6:1 and 2.7:1) - they are bars, fills, or text on black / navy; v21
+checks every text-on-colour pairing the themes make at 4.5:1 or better.
 
 ### Speed: worker processes, shared caches, zips
 
@@ -549,12 +611,14 @@ every call slower than `BRIDGE_TIMING_MIN` (0.3 s) - the app's Logs tab.
 ```bash
 python tests/run_all.py        # from "updating production code/" - includes:
 #   test_v19_config_schema.py  codebase 1's schema, YAML writer, app_job (run folders, run groups,
-#                              the standard-name CSVs and each modelling type's settings - team <
-#                              type < run -, demo.ipynb), app_access.yaml's four levels, edit_runs
+#                              bmc_names.csv, modelling_types.yaml and each type's settings - team <
+#                              type < run -, demo.ipynb), app_access.yaml's four levels, edit_runs,
+#                              delete_runs
 #   test_v20_web_app.py        src/codebase.py (live loading from a fake workspace; a page reload
 #                              re-checks it), src/projects.py (run folders and groups, run lists,
 #                              notes, marking the reported run, renaming a run and editing its note,
-#                              reuse, change detection), the speed parts:
+#                              deleting a run and the names never reused, reuse, change detection),
+#                              the speed parts:
 #                              perf.SharedCache, the background refresh, the worker pool (in a child
 #                              Streamlit-style __main__); v22 runs the whole app with the workers ON
 #   test_v21_web_ui_smoke.py   the whole app.py flow against a scripted streamlit stand-in:
@@ -564,10 +628,13 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #                              "nothing changed", the four access levels, every ✕, the chart data,
 #                              (step 19) the shared caches and the zip disk cache, (step 20) marking
 #                              the reported run, (step 21) the pages and what they keep, (step 22)
-#                              the modelling types' settings, (step 23) rename and note
+#                              the modelling types' settings and the difference table, (step 23)
+#                              rename and note, (24) the filters on Runs and results, (25) deleting a
+#                              run, (26) the top bar and Start cluster, (27) the co-branding - both
+#                              themes, the switch, the logos, every colour pairing's contrast
 #   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest), page by page, with a
-#                              round trip between pages - the charts too, with plotly; SKIPs
-#                              without streamlit
+#                              round trip between pages, the filters, a delete, the top bar and the
+#                              logos - the charts too, with plotly; SKIPs without streamlit
 #   fixture_run_outputs.py     (not a suite) a synthetic Outputs/ tree in codebase 1's formats
 ```
 
@@ -601,26 +668,31 @@ Everything works except the job itself: **Run Model** needs Databricks.
 
 ```
 web/
-├── app.py                 the page list (st.navigation), the left-hand panel, the header
-├── app.yml                Databricks App config (env vars from app resources)
+├── app.py                 the page list (st.navigation), the left-hand panel, the top bar, the header
+├── app.yml                Databricks App config (env vars from app resources; the lead theme)
 ├── requirements.txt
-├── assest/aommm.png       the logo (copy it in)
+├── .streamlit/config.toml the lead theme and no ⋮ menu, for a run on a laptop
+├── themes/                haleon.toml, capgemini.toml - each company's Streamlit theme, light and dark
+├── brand/                 the companies' logos (and white copies) for the side panel
+├── assest/aommm.png       the AOMMM logo, top of the side panel (copy it in)
 ├── views/                 one file per page (1_project.py ... 7_results.py), each calling a page_* function
 ├── src/
 │   ├── codebase.py        the ONLY module that imports codebase 1 (no Streamlit): cache, worker pool
 │   ├── perf.py            shared caches (one copy for every session) and the timing log (no Streamlit)
-│   ├── projects.py        run folders and groups: paths, names, run lists, notes, the reported run, renames, a run's inputs, what changed (no Streamlit)
+│   ├── projects.py        run folders and groups: paths, names, run lists, notes, the reported run, renames, deletes, a run's inputs, what changed (no Streamlit)
 │   ├── page_state.py      what is kept across pages (re-saved widget values; a real ✕ told from a new upload box)
 │   ├── config_editor.py   Model settings, the modelling types' settings, who may do what
 │   ├── app_functions.py   prior editor dialog, paste from Excel
-│   ├── runs.py            the run panel (status, cancel, live/complete job log, results, zip, reuse, note, rename) and All recent runs
+│   ├── runs.py            the run panel (status, cancel, live/complete job log, results, zip, reuse, note, rename, delete) and All recent runs
+│   ├── brand.py           which company leads the look, its accents, the logos (no theme logic elsewhere)
+│   ├── styles.py          the page's CSS: the top bar, the baseline, the markers, the fade-in
 │   ├── charts.py          the result charts: data from the output CSVs (pandas) + Plotly figures
 │   ├── pages/model_setup_page.py   the pages (one fragment each), the page list, reuse, Run Model
 │   ├── generate_prior.py  hands generation to codebase 1
 │   ├── validation.py      shows the datacube checks
 │   ├── files.py           ADLS (or LOCAL_STORAGE_DIR): read, write, list; one cached client
 │   ├── jobs.py            Jobs API: run-now, status, output, cancel, the job's parameters
-│   └── ...                clusters, styles, header; feasibility pages (disabled)
+│   └── ...                clusters, header; feasibility pages (disabled)
 └── _reference/            git-ignored: screenshots, OCR originals, OCR_FIXES.md
 ```
 
@@ -628,6 +700,9 @@ web/
 
 - **Pages**: the steps are pages in a left-hand panel instead of one long
   page.
+- **Look**: co-branded - the lead company's theme (Haleon by default,
+  Capgemini one setting away), AOMMM and both company logos in the side panel,
+  the cluster top right.
 - **Run folders**: every run lives in `Secondary Modelling/<BMC>/<period>
   <modelling type>/<run name>/` with its inputs, outputs and note, and can be
   reused; the run a period's results were reported from is marked. The

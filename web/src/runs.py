@@ -62,8 +62,8 @@ import pandas as pd
 import streamlit as st
 
 from src import charts, page_state, perf, projects
-from src.config_editor import (has_full_access, may_edit_run, may_mark_reported,
-                               viewer_email)
+from src.config_editor import (has_full_access, may_delete_run, may_edit_run,
+                               may_mark_reported, viewer_email)
 from src.files import download_from_adls, is_not_found, list_tree_meta
 from src.jobs import cancel_run, get_run_output, get_run_status, list_runs
 
@@ -451,11 +451,30 @@ def render_run_panel(ref, where, on_reuse=None):
     `on_reuse(ref)`, when given, adds a "Reuse inputs" button. A ref with a
     run's old name (it was renamed since) opens the run under its new one."""
     ref = projects.resolve_ref(ref)
+    gone = projects.deleted_record(ref)
+    if gone:
+        _deleted_panel(ref, where, gone)
+        return
     run = fetch_run(ref.get("job_run_id"))
     if _known(run) and not is_done(run):
         _live_panel(ref, where, on_reuse)
     else:
         _static_panel(ref, where, on_reuse)
+
+
+def _deleted_panel(ref, where, gone):
+    """A run that was deleted - its folder and files are gone; who and when."""
+    key = projects.ref_key(ref)
+    with st.container(border=True):
+        when = str(gone.get("at") or "").replace("T", " ").rstrip("Z")
+        st.markdown(f"**{projects.ref_label(ref)}** · 🗑️ deleted")
+        st.caption("Deleted" + (f" by {gone['by']}" if gone.get("by") else "")
+                   + (f" on {when} UTC" if when else "")
+                   + " - its folder, its inputs and its outputs are gone, and its name is "
+                     "not used again.")
+        if where == "current" and st.button("Dismiss", key=f"dismiss_{key}"):
+            st.session_state.pop("current_run", None)
+            st.rerun()
 
 
 @st.fragment(run_every="5s")
@@ -538,7 +557,7 @@ def _panel_body(ref, where, run, on_reuse):
                                                      "its BMC's run list."):
                 st.session_state.pop("current_run", None)
                 st.rerun()
-        _render_edit_controls(ref, where, running, request)
+        _render_edit_controls(ref, where, running, request, reported)
         if not running and _succeeded(run, info):
             _render_mark_reported(ref, where, reported)
 
@@ -571,15 +590,38 @@ def _follow_rename(ref, new):
             ss[key] = dict(held, run=new)
 
 
-def _render_edit_controls(ref, where, running, request):
+def _forget_deleted(ref):
+    """The page no longer remembers a deleted run as the current one or the
+    one open in the results."""
+    ss = st.session_state
+    for key in ("current_run", "results_selected"):
+        held = ss.get(key)
+        if (held and held.get("bmc") == ref.get("bmc") and held.get("run") == ref.get("run")
+                and str(held.get("group") or "") == projects.ref_group(ref)):
+            ss.pop(key, None)
+    # the run list's rows moved up by one: draw it under a new key, so its
+    # selection (a row number) does not land on another run
+    ss["_rf_version"] = int(ss.get("_rf_version", 0)) + 1
+
+
+def _render_edit_controls(ref, where, running, request, reported=False):
     """📝 Note (any time) and ✏️ Rename (once the run has finished) - for the
     people app_access.yaml `edit_runs` names (by default the run's author and
-    full_access)."""
-    if not projects.has_folder(ref) or not may_edit_run(request):
+    full_access) - and 🗑️ Delete, for those `delete_runs` names (nobody unless
+    the file lists them; shipped: config_advanced_access and above)."""
+    if not projects.has_folder(ref):
+        return
+    can_edit, can_delete = may_edit_run(request), may_delete_run(request)
+    if not (can_edit or can_delete):
         return
     key = projects.ref_key(ref)
     group = projects.ref_group(ref)
-    note_col, name_col, _rest = st.columns([1, 1, 3])
+    note_col, name_col, delete_col, _rest = st.columns([1, 1, 1, 2])
+    if can_delete:
+        with delete_col:
+            _render_delete(ref, where, running, reported, key, group)
+    if not can_edit:
+        return
     with note_col:
         with st.popover("📝 Edit note",
                         help="Why the run was made - and, now that you have seen its "
@@ -616,6 +658,51 @@ def _render_edit_controls(ref, where, running, request):
                 _follow_rename(ref, new)
                 st.toast(f"Renamed to {new}.", icon="✏️")
                 st.rerun()
+
+
+def _delete_now(ref, group, running, text_key):
+    """Delete Run's callback - it runs BEFORE the page is drawn again, so the
+    page is drawn once, without the deleted run's panel."""
+    ss = st.session_state
+    if str(ss.get(text_key) or "").strip() != ref["run"]:
+        return
+    try:
+        projects.delete_run(ref["bmc"], group, ref["run"], user=viewer_email(),
+                            running=running)
+    except Exception as e:  # noqa: BLE001 - shown in the popover, nothing was deleted
+        ss["delete_error"] = (projects.ref_key(ref), f"Could not delete it: {e}")
+        return
+    _LISTINGS.invalidate()
+    _forget_files(ref)
+    _forget_deleted(ref)
+    st.toast(f"Deleted {ref['run']}.", icon="🗑️")
+
+
+def _render_delete(ref, where, running, reported, key, group):
+    """🗑️ Delete: the whole run folder, for good - after typing its name."""
+    with st.popover("🗑️ Delete", disabled=running,
+                    help="Delete this run for good: its folder in ADLS - inputs, outputs "
+                         "and note. Not while it runs."):
+        failed = st.session_state.get("delete_error")
+        if failed and failed[0] == key:
+            st.session_state.pop("delete_error", None)
+            st.error(failed[1])
+        # the same widgets whether or not it may go (a reported run: disabled), so
+        # marking a run reported never leaves a stale widget behind
+        if reported:
+            st.warning(f"This is the run the results of {group} were reported from - mark "
+                       "another run as reported first, then delete it.")
+        else:
+            st.markdown(f"Deletes **{ref['run']}** for good: its folder in ADLS - the "
+                        "inputs, the outputs and the note. It cannot be undone, and its "
+                        "name is never used again.")
+        text_key = f"delete_text_{where}_{key}"
+        typed = st.text_input("Type the run's name to confirm", key=text_key,
+                              placeholder=ref["run"], disabled=reported)
+        st.button("Delete this run", key=f"delete_go_{where}_{key}", type="primary",
+                  disabled=reported or typed.strip() != ref["run"],
+                  on_click=_delete_now, args=(ref, group, running, text_key),
+                  help="Enabled once the run's name is typed above.")
 
 
 def _succeeded(run, info):
@@ -1310,9 +1397,12 @@ def _recent_row(r):
     if bmc and name:
         try:
             now = projects.current_run_name(bmc, group, name)
+            gone = now in projects.deleted_runs(bmc, group)
         except Exception:  # noqa: BLE001 - the name it ran under will do
-            now = name
+            now, gone = name, False
         name = name if now == name else f"{now} (was {name})"
+        if gone:
+            name += " (deleted)"
     return {"run_id": str(r.get("run_id")),
             "started": local_time(r.get("start_time")),
             "status": _status_label(r),
@@ -1320,7 +1410,9 @@ def _recent_row(r):
             "waited": fmt_seconds(waited / 1000) if waited else "",
             "bmc": bmc, "period · type": group, "run name": name,
             "reported": (projects.REPORTED_BADGE
-                         if _reported_in_group(bmc, group, name.split(" (was ")[0]) else ""),
+                         if _reported_in_group(bmc, group,
+                                               name.split(" (was ")[0].split(" (deleted)")[0])
+                         else ""),
             "data_file": _param(r, "data_file")}
 
 

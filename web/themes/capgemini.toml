@@ -1,0 +1,68 @@
+# Capgemini - BRIDGE's alternative lead theme (a Capgemini-led deployment).
+#
+# Capgemini's identity: Capgemini Blue (#0070AD, "heritage") and Vibrant Blue
+# (#12ABDB, "energy") - the two blues of the spade - on white, with a deep
+# navy (#272936) for text and dark panels; Ubuntu, as in Capgemini's own
+# presentation template; square corners. Every colour below is from
+# Capgemini's template and logo (snapshots/company theme/). Vibrant Blue is
+# never text on white (2.7:1): it is an accent, or text on navy (5.4:1).
+#
+# Which theme leads is one setting - Streamlit's theme.base (app.yml on
+# Databricks, .streamlit/config.toml on a laptop); see src/brand.py.
+
+[theme]
+base = "light"
+font = "Ubuntu:https://fonts.googleapis.com/css2?family=Ubuntu:ital,wght@0,400;0,500;0,700;1,400&display=swap"
+headingFont = "Ubuntu"
+headingFontWeights = [700, 700, 500, 500, 500, 500]
+baseRadius = "small"
+buttonRadius = "small"
+showWidgetBorder = true
+showSidebarBorder = false
+linkUnderline = false
+
+[theme.light]
+primaryColor = "#0070AD"
+backgroundColor = "#FFFFFF"
+secondaryBackgroundColor = "#F2F3F7"
+textColor = "#272936"
+borderColor = "#D3D5E0"
+dataframeHeaderBackgroundColor = "#E7E8EE"
+linkColor = "#0070AD"
+blueColor = "#12ABDB"                    # information = Vibrant Blue, text in Capgemini Blue
+blueBackgroundColor = "#E5F5FB"
+blueTextColor = "#0070AD"
+violetColor = "#2B0A3D"
+codeBackgroundColor = "#F2F3F7"
+codeTextColor = "#0070AD"
+
+[theme.light.sidebar]                    # the navy side panel of Capgemini's templates
+backgroundColor = "#272936"
+secondaryBackgroundColor = "#383B4E"
+textColor = "#FFFFFF"
+primaryColor = "#12ABDB"
+borderColor = "#383B4E"
+linkColor = "#12ABDB"
+codeBackgroundColor = "#383B4E"
+codeTextColor = "#C2C5D3"
+
+[theme.dark]
+primaryColor = "#0070AD"
+backgroundColor = "#15161E"
+secondaryBackgroundColor = "#232533"
+textColor = "#E7E8EE"
+borderColor = "#383B4E"
+dataframeHeaderBackgroundColor = "#272936"
+linkColor = "#12ABDB"
+blueColor = "#12ABDB"
+blueTextColor = "#7FD3EE"
+violetColor = "#868AA8"
+codeBackgroundColor = "#232533"
+codeTextColor = "#7FD3EE"
+
+[theme.dark.sidebar]
+backgroundColor = "#0E0F15"
+secondaryBackgroundColor = "#232533"
+textColor = "#E7E8EE"
+primaryColor = "#12ABDB"
+borderColor = "#272936"

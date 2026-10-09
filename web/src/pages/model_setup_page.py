@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import html
 import os
 import re
 import time
@@ -96,7 +97,7 @@ def _sentence(text):
 
 
 # --------------------------------------------------------------------------- #
-# header: cluster and backend status
+# the top bar (the cluster) and the backend status
 # --------------------------------------------------------------------------- #
 def _cluster_state():
     """The cluster's state - asked of the Clusters API at most once per 5 s
@@ -104,104 +105,56 @@ def _cluster_state():
     return cluster_state()
 
 
+CLUSTER_TEXT = {"RUNNING": "running", "PENDING": "starting", "RESTARTING": "restarting",
+                "RESIZING": "resizing", "TERMINATING": "stopping", "TERMINATED": "stopped"}
+CLUSTER_TONE = {"RUNNING": "good", "TERMINATED": "off"}
+
+
 @st.fragment(run_every="5s")
 def render_cluster_status_controls():
-    cluster_state = _cluster_state()
-    cluster_state_color = {
-        "TERMINATED": "#dc2626",
-        "PENDING": "#eab308",
-        "RUNNING": "#16a34a",
-    }.get(cluster_state, "#64748b")
-    st.markdown(
-        f"""
-        <style>
-            .cluster-status-wrap {{
-                display: flex;
-                justify-content: flex-start;
-                margin-bottom: 0.4rem;
-            }}
-            .cluster-status-radio {{
-                display: inline-flex;
-                align-items: center;
-                gap: 0.45rem;
-                padding: 0.25rem 0.5rem;
-                border-radius: 999px;
-                border: 1px solid color-mix(in srgb, {cluster_state_color} 35%, transparent);
-                background: var(--background-color, transparent);
-                font-size: 0.82rem;
-                color: #0f172a;
-                line-height: 1;
-            }}
-            .cluster-status-dot {{
-                width: 0.68rem;
-                height: 0.68rem;
-                border-radius: 50%;
-                border: 1px solid color-mix(in srgb, {cluster_state_color} 70%, #0f172a 30%);
-                background: {cluster_state_color};
-                box-shadow: 0 0 2px color-mix(in srgb, {cluster_state_color} 15%, transparent);
-                flex: 0 0 auto;
-            }}
-            .cluster-status-label {{
-                font-weight: 600;
-                color: #334155;
-            }}
-            .cluster-status-value {{
-                font-weight: 700;
-                color: {cluster_state_color};
-            }}
-            .st-key-start_cluster_button button {{
-                padding: 0.15rem 0.55rem;
-                min-height: 1.8rem;
-                font-size: 0.78rem;
-                line-height: 1.1;
-            }}
-            .cluster-start-note {{
-                display: flex;
-                justify-content: flex-start;
-                font-size: 0.75rem;
-                color: #475569;
-                margin: 0.2rem 0 0.4rem 0;
-            }}
-        </style>
-        <div class="cluster-status-wrap">
-            <label class="cluster-status-radio">
-                <span class="cluster-status-dot" aria-hidden="true"></span>
-                <span class="cluster-status-label">Cluster</span>
-                <span class="cluster-status-value">{cluster_state}</span>
-            </label>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    start_requested_key = "cluster_start_requested"
-    if cluster_state != "TERMINATED":
-        st.session_state[start_requested_key] = False
-    show_start_button = cluster_state == "TERMINATED" and not st.session_state.get(
-        start_requested_key, False
-    )
-    if show_start_button:
-        if st.button(
-            "Start Cluster",
-            type="secondary",
-            key="start_cluster_button",
-            use_container_width=False,
-        ):
-            st.session_state[start_requested_key] = True
+    """The model cluster's state - a dot and a word - and, when it is
+    stopped, Start cluster. Lives in the top bar on every page."""
+    ss = st.session_state
+    state = _cluster_state()
+    tone = CLUSTER_TONE.get(state, "busy" if state in CLUSTER_TEXT else "unknown")
+    label = CLUSTER_TEXT.get(state, str(state or "unknown").lower())
+    st.markdown(f'<span class="bridge-cluster bridge-cluster--{tone}" '
+                f'title="The cluster the model job runs on: {html.escape(str(state))}">'
+                f'<span class="bridge-cluster-dot" aria-hidden="true"></span>'
+                f"Cluster {html.escape(label)}</span>", unsafe_allow_html=True)
+    requested = "cluster_start_requested"
+    if state != "TERMINATED":
+        ss[requested] = False
+    if state == "TERMINATED" and not ss.get(requested, False):
+        if st.button("Start cluster", key="start_cluster_button", type="secondary",
+                     icon=":material/play_arrow:",
+                     help="Start the cluster now, so the next run does not wait for it."):
+            ss[requested] = True
             try:
                 status_code = start_cluster()
                 if status_code in {200, 202}:
-                    st.success(
-                        "Cluster start requested. Status refreshes every 5 seconds."
-                    )
+                    st.toast("Cluster start requested - the status refreshes every 5 "
+                             "seconds.", icon="▶️")
                 else:
-                    st.error(f"Failed to start cluster. Status code: {status_code}")
-            except Exception as e:
-                st.error(f"Unable to start cluster: {e}")
-    elif cluster_state == "TERMINATED":
-        st.markdown(
-            '<div class="cluster-start-note">Start request submitted.</div>',
-            unsafe_allow_html=True,
-        )
+                    st.toast(f"Failed to start the cluster: status code {status_code}",
+                             icon="⚠️")
+            except Exception as e:  # noqa: BLE001 - told, the button comes back
+                ss[requested] = False
+                st.toast(f"Unable to start the cluster: {e}", icon="⚠️")
+    elif state == "TERMINATED":
+        st.markdown('<span class="bridge-cluster-note">start requested</span>',
+                    unsafe_allow_html=True)
+
+
+def render_top_bar(greeting=""):
+    """Top right on every page, where Streamlit's ⋮ menu was (it is hidden):
+    who is signed in, and the cluster with its Start button."""
+    with st.container(key="bridge_topbar", horizontal=True, vertical_alignment="center",
+                      gap="small", width="content"):
+        if greeting:
+            st.markdown(f'<span class="bridge-hello" title="{html.escape(greeting)}">'
+                        f"{html.escape(greeting)}</span>", unsafe_allow_html=True)
+        render_cluster_status_controls()
 
 
 def render_backend_status():
@@ -236,10 +189,10 @@ def render_backend_status():
 
 
 def render_sidebar_status():
-    """Under the page list: the backend (codebase 1's version - and, for full
-    access, its folder, the worker processes and Reload) and the cluster."""
+    """Under the page list: the backend - codebase 1's version (and, for full
+    access, its folder, the worker processes and Reload). The cluster is in
+    the top bar (render_top_bar)."""
     render_backend_status()
-    render_cluster_status_controls()
 
 
 # --------------------------------------------------------------------------- #
@@ -317,14 +270,12 @@ def page_results():
 # 1. BMC, period and run - where the run is saved
 # --------------------------------------------------------------------------- #
 QUARTERS = (1, 2, 3, 4)
-ALL_GROUPS = "All periods and types"
-NO_GROUP = "Before the period folders"
 PERIOD_KEYS = ("period_start_q", "period_start_y", "period_end_q", "period_end_y",
                "modelling_type")
 
 
 def _standard_names():
-    """codebase 1's standard names - bmc_names.csv and modelling_types.csv."""
+    """codebase 1's standard names - bmc_names.csv and modelling_types.yaml."""
     out = codebase.standard_names()
     if out.ok and out.value:
         return out.value
@@ -402,8 +353,19 @@ def _run_target():
         problem = projects.run_name_problem(run)
         if not problem and run in {r["run"] for r in _bmc_runs(bmc)[0] if r["group"] == group}:
             problem = f"'{run}' already exists in {bmc} / {group} - choose another run name"
+        if not problem and run in _retired(bmc, group):
+            problem = (f"'{run}' was the name of a renamed or deleted run of {bmc} / {group} - "
+                       "choose another run name")
     out["problem"] = problem
     return out
+
+
+def _retired(bmc, group):
+    """The names no new run of the group may take (renamed and deleted runs')."""
+    try:
+        return projects.retired_names(bmc, group)
+    except Exception:  # noqa: BLE001 - the save checks again
+        return set()
 
 
 def _target_path(t):
@@ -443,8 +405,9 @@ def _render_period_row(names):
         st.selectbox("Modelling type", kinds, index=None, key="modelling_type",
                      placeholder="Choose a type",
                      help="The kind of model - the team's list (codebase 1's "
-                          "modelling_types.csv). The run is saved under <period> "
-                          "<modelling type>, e.g. 2025Q1-2025Q4 Secondary.")
+                          "modelling_types.yaml), each with the settings it sets. The run "
+                          "is saved under <period> <modelling type>, e.g. 2025Q1-2025Q4 "
+                          "Secondary.")
     covered = _datacube_period()
     if covered:
         sy, sq, ey, eq = covered
@@ -517,7 +480,7 @@ def _project_fragment():
                              "that already have runs; the team adds new ones."))
         _render_period_row(names)
         # a modelling type brings its own settings (codebase 1's
-        # modelling_types.csv) - switched the moment the type is chosen
+        # modelling_types.yaml) - switched the moment the type is chosen
         kind = ss.get("modelling_type")
         if kind != ss.get("_type_applied"):
             ss["type_note"] = (kind, apply_modelling_type(kind))
@@ -526,7 +489,8 @@ def _project_fragment():
             st.info(f"Modelling type **{kind or '(none)'}**: the model settings switched - "
                     + "; ".join(f"`{name}` {before} → {after}"
                                 for name, before, after in type_note[1])
-                    + " (codebase 1's modelling_types.csv).")
+                    + " (codebase 1's modelling_types.yaml) - the difference table on "
+                      "③ Model settings lists them.")
         name_col, note_col = st.columns([5, 1.3], vertical_alignment="bottom")
         with name_col:
             st.text_input("Run name (optional)", key="new_run_name",
@@ -560,10 +524,16 @@ def _project_fragment():
         bmc = target["bmc"]
         if bmc and not projects.bmc_problem(bmc):
             _render_runs_summary(bmc, target["group"])
+        if st.button("See the runs and their results", key="see_results",
+                     icon=":material/insights:", type="tertiary",
+                     help="Opens Runs and results, filtered by what is chosen here - the "
+                          "BMC, the period and the modelling type, each on its own."):
+            follow_project_choices(force=True)
+            st.switch_page(PAGES["results"])
 
 
 def _render_runs_summary(bmc, group):
-    """One line about the BMC's runs, and the way to them."""
+    """One line about the BMC's runs."""
     rows, _errors = _bmc_runs(bmc)
     if not rows:
         st.caption(f"No runs in {bmc} yet - this run will be its first.")
@@ -574,38 +544,258 @@ def _render_runs_summary(bmc, group):
                + (f", {len(in_group)} of them in {group}" if group else "")
                + (f" - {projects.REPORTED_BADGE}: **{reported['run']}**" if reported else "")
                + ".")
-    st.page_link(PAGES["results"], label="See the runs and their results",
-                 icon=":material/insights:")
+
+
+# The Runs and results page's filters - each optional, each independent of the
+# others (a year alone, a type alone, a BMC alone ...). Each takes page ①'s
+# choice whenever that choice changes there, and all of them when "See the runs
+# and their results" is pressed on ①; changed here, a filter keeps its value
+# until ① changes.
+RESULT_FILTERS = (("bmc_name", "rf_bmc"), ("period_start_q", "rf_start_q"),
+                  ("period_start_y", "rf_start_y"), ("period_end_q", "rf_end_q"),
+                  ("period_end_y", "rf_end_y"), ("modelling_type", "rf_type"))
+MAX_LISTED = 200            # the newest runs listed at once - narrow the filters for more
+
+
+def follow_project_choices(force=False):
+    """Copy page ①'s BMC, period and type into the results filters: each one
+    whose value on ① changed since it was last copied - or all (`force`)."""
+    ss = st.session_state
+    for src, dst in RESULT_FILTERS:
+        value = ss.get(src)
+        value = None if value in ("", None) else value
+        if force or ss.get(f"_follow_{dst}", "<unset>") != value:
+            ss[f"_follow_{dst}"] = value
+            ss[dst] = value
+
+
+def _clear_filters():
+    for _src, dst in RESULT_FILTERS:
+        st.session_state[dst] = None
+
+
+def filter_runs(rows, bmc=None, start_q=None, start_y=None, end_q=None, end_y=None,
+                kind=None):
+    """The rows every chosen filter allows. Each filter is optional and
+    independent: start year 2025 alone keeps every run whose period starts in
+    2025, whatever its BMC, quarters or type. A run from before the period
+    folders has no period or type, so any of those filters leaves it out."""
+    wanted = {"start_quarter": start_q, "start_year": start_y, "end_quarter": end_q,
+              "end_year": end_y, "modelling_type": kind}
+    wanted = {k: v for k, v in wanted.items() if v not in (None, "")}
+    out = []
+    for r in rows:
+        if bmc and r.get("bmc") != bmc:
+            continue
+        if wanted:
+            parts = projects.parse_group(r.get("group")) if r.get("group") else None
+            if not parts or any(parts[k] != v for k, v in wanted.items()):
+                continue
+        out.append(r)
+    return out
+
+
+def _all_runs(bmcs, force=False):
+    """(every run of the BMCs - each row with its "bmc" -, read errors) newest
+    first; the BMCs are read in parallel, each BMC's list shared for 30 s."""
+    if not bmcs:
+        return [], []
+
+    def one(bmc):
+        rows, errors = _bmc_runs(bmc, force=force)
+        return [dict(r, bmc=bmc) for r in rows], errors
+
+    with ThreadPoolExecutor(max_workers=min(8, len(bmcs))) as pool:
+        listed = list(pool.map(one, bmcs))
+    rows = [r for got, _errors in listed for r in got]
+    errors = [e for _got, errs in listed for e in errs]
+    rows.sort(key=lambda r: (r["submitted_ms"] or 0, r["bmc"], r["run"]), reverse=True)
+    return rows, errors
+
+
+def _filters_text(filters):
+    """'Retailer US · from 2025Q1 · Secondary' - the filters in use."""
+    f = filters
+    start = (f"{f['rf_start_y'] or ''}{'Q' + str(f['rf_start_q']) if f['rf_start_q'] else ''}")
+    end = (f"{f['rf_end_y'] or ''}{'Q' + str(f['rf_end_q']) if f['rf_end_q'] else ''}")
+    bits = [f["rf_bmc"] or "", f"from {start}" if start else "", f"to {end}" if end else "",
+            f["rf_type"] or ""]
+    bits = [b for b in bits if b]
+    return " · ".join(bits) if bits else "every BMC, period and modelling type"
+
+
+def _pinned_group(filters):
+    """The one run group the filters name (all four period parts and the
+    type chosen) - "" otherwise."""
+    f = filters
+    if any(f[k] in (None, "") for k in ("rf_start_q", "rf_start_y", "rf_end_q", "rf_end_y",
+                                       "rf_type")):
+        return ""
+    try:
+        return projects.group_name(f["rf_start_y"], f["rf_start_q"], f["rf_end_y"],
+                                   f["rf_end_q"], f["rf_type"])
+    except ValueError:
+        return ""
 
 
 @st.fragment
 def _results_fragment():
-    """The BMC's runs - the BMC of ① until another is picked here."""
+    """Every run, filtered by BMC, period and modelling type - each filter
+    optional and independent - newest first; select one for its panel."""
     ss = st.session_state
-    options, problem = _bmc_options(_standard_names())
-    chosen = ss.get("bmc_name")
-    if ss.get("_results_follow") != chosen:
-        ss["_results_follow"] = chosen
-        if chosen:
-            ss["results_bmc"] = chosen
-    current = ss.get("results_bmc")
-    if current and current not in options:
-        options = [current] + options
-    st.selectbox("BMC", options, index=None, key="results_bmc", placeholder="Choose a BMC",
-                 help="The BMC chosen in ① - or any other, to look at its runs.")
+    follow_project_choices()
+    names = _standard_names()
+    bmcs, problem = _bmc_options(names)
+    kinds = list(names.get("modelling_types") or [])
+    years = set(_year_options())
+    for key, options in (("rf_bmc", bmcs), ("rf_type", kinds)):
+        current = ss.get(key)
+        if current not in (None, "") and current not in options:
+            options.insert(0, current)
+    years |= {ss.get(k) for k in ("rf_start_y", "rf_end_y") if isinstance(ss.get(k), int)}
+    years = sorted(years, reverse=True)
+    c = st.columns([2.2, 0.95, 1.1, 0.95, 1.1, 1.7], vertical_alignment="bottom")
+    with c[0]:
+        st.selectbox("BMC", bmcs, index=None, key="rf_bmc", placeholder="Any BMC",
+                     help="Follows the BMC chosen in ① - or pick any other. Every filter "
+                          "is optional and works on its own.")
+    with c[1]:
+        st.selectbox("From quarter", QUARTERS, index=None, key="rf_start_q",
+                     format_func=lambda q: f"Q{q}", placeholder="Any")
+    with c[2]:
+        st.selectbox("From year", years, index=None, key="rf_start_y", placeholder="Any")
+    with c[3]:
+        st.selectbox("To quarter", QUARTERS, index=None, key="rf_end_q",
+                     format_func=lambda q: f"Q{q}", placeholder="Any")
+    with c[4]:
+        st.selectbox("To year", years, index=None, key="rf_end_y", placeholder="Any")
+    with c[5]:
+        st.selectbox("Modelling type", kinds, index=None, key="rf_type",
+                     placeholder="Any type")
     if problem:
         st.warning(problem)
-    bmc = ss.get("results_bmc")
-    if not bmc or projects.bmc_problem(bmc):
-        st.caption("Choose a BMC to see its runs.")
+    filters = {dst: ss.get(dst) for _src, dst in RESULT_FILTERS}
+    bmc = filters["rf_bmc"]
+    if bmc and projects.bmc_problem(bmc):
+        st.caption(_sentence(projects.bmc_problem(bmc)))
         return
-    _render_bmc_runs(bmc, _chosen_group()[0] if bmc == ss.get("bmc_name") else "")
+    try:
+        listed = [bmc] if bmc else projects.list_bmcs_shared()
+    except Exception as e:  # noqa: BLE001 - shown, the filters still work
+        listed = []
+        st.warning(f"Could not list the BMC folders: {e}")
+    rows, errors = _all_runs(listed)
+    shown = filter_runs(rows, bmc, filters["rf_start_q"], filters["rf_start_y"],
+                        filters["rf_end_q"], filters["rf_end_y"], filters["rf_type"])
+    # a new choice re-mounts the list under another key, so it fades in again;
+    # a deleted run bumps _rf_version: a new table key, so the old selection (a
+    # row number) cannot open the run that moved into that row
+    signature = _sha(repr((sorted(filters.items(), key=str),
+                           ss.get("_rf_version", 0))).encode())[:10]
+    if ss.get("_rf_sig") != signature:
+        ss["_rf_sig"] = signature
+        ss["_rf_flip"] = not ss.get("_rf_flip", False)
+    with st.container(key="rf_list_a" if ss.get("_rf_flip") else "rf_list_b"):
+        chosen, picked = _render_run_list(shown, filters, errors, signature)
+    if chosen is None:
+        return
+    if not picked:
+        left, right = st.columns([6, 1], vertical_alignment="center")
+        with left:
+            st.caption(f"Showing **{chosen['run']}** - opened before; select another row "
+                       "to switch.")
+        with right:
+            if st.button("Close", key="results_close", use_container_width=True):
+                ss.pop("results_selected", None)
+                st.rerun()
+    render_run_panel(projects.make_ref(chosen["job_run_id"], chosen["bmc"], chosen["run"],
+                                       chosen["group"]), "bmc", on_reuse=reuse_run)
 
 
-def _group_sort_key(name):
-    p = projects.parse_group(name) or {}
-    return (p.get("end_year", 0), p.get("end_quarter", 0), p.get("start_year", 0),
-            p.get("start_quarter", 0), name)
+def _render_run_list(shown, filters, errors, signature):
+    """The count, the table and the selection. Returns (the run to open or
+    None, whether it was picked in this run)."""
+    ss = st.session_state
+    head, clear, refresh = st.columns([5, 1.25, 1.25], vertical_alignment="center")
+    n = len(shown)
+    with head:
+        st.markdown(f'<span class="bridge-count">{n} run{"s" if n != 1 else ""}</span>'
+                    f'<span class="bridge-count-note">{html.escape(_filters_text(filters))}'
+                    "</span>", unsafe_allow_html=True)
+    with clear:
+        st.button("Clear filters", key="rf_clear", on_click=_clear_filters,
+                  disabled=not any(v not in (None, "") for v in filters.values()),
+                  use_container_width=True,
+                  help="Every BMC, period and modelling type. A change on page ① "
+                       "sets the filter again.")
+    with refresh:
+        st.button("↻ Refresh", key="bmc_runs_refresh", on_click=projects.forget_runs,
+                  use_container_width=True,
+                  help="Read the runs and their status again. The list is otherwise "
+                       "re-read at most every 30 s; the panel of a running run updates "
+                       "itself every 5 s.")
+    for error in errors[:3]:
+        st.warning(error)
+    group = _pinned_group(filters)
+    if group and filters["rf_bmc"] and shown:
+        reported = next((r for r in shown if r["reported"]), None)
+        if reported:
+            by = (f" - marked by {reported['reported_by']}" if reported["reported_by"] else "")
+            st.caption(f"{projects.REPORTED_BADGE}: the results of {group} were reported "
+                       f"from **{reported['run']}**{by}. The other runs are in its "
+                       f"{projects.archived_folder()} folder.")
+        else:
+            st.caption(f"No run of {group} is marked as reported yet - open a finished "
+                       "run below to mark it.")
+    if not shown:
+        st.caption("No runs match these filters - change or clear one."
+                   if any(v not in (None, "") for v in filters.values())
+                   else "No runs yet.")
+        return None, False
+    total = len(shown)
+    shown = shown[:MAX_LISTED]
+    times = _run_times(shown)
+    one_bmc = bool(filters["rf_bmc"])
+    table = pd.DataFrame([{
+        **({} if one_bmc else {"BMC": r["bmc"]}),
+        "period · type": r["group"] or "–",
+        "run": r["run"],
+        "reported": (projects.REPORTED_BADGE if r["reported"]
+                     else projects.ARCHIVED_BADGE if r["archived"] else ""),
+        "status": r["status"],
+        "run time": fmt_seconds(seconds),
+        "submitted": local_time(r["submitted_ms"]),
+        "by": r["submitted_by"],
+        "note": r["note"],
+        "reused from": r["source"],
+        "changed": ", ".join(r["changed"]),
+    } for r, seconds in zip(shown, times)])
+    table_key = f"rf_table_{signature}"
+    event = st.dataframe(table, use_container_width=True, hide_index=True,
+                         on_select="rerun", selection_mode="single-row", key=table_key,
+                         column_config={"note": st.column_config.TextColumn(
+                             "note", help="The modeller's note - why the run was made, what "
+                                          "changed. Open the run to read all of it.")})
+    st.caption("Run time = the notebook's own time (not the time queued or starting the "
+               "cluster)."
+               + (f" Showing the newest {MAX_LISTED} of {total} runs - narrow the filters "
+                  "to see the rest." if total > MAX_LISTED else ""))
+    picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+    if page_state.emptied(table_key, picked):
+        ss.pop("results_selected", None)          # the person cleared the selection
+    if picked:
+        sel = shown[picked[0]]
+        ss["results_selected"] = {"bmc": sel["bmc"], "group": sel["group"], "run": sel["run"],
+                                  "job_run_id": sel["job_run_id"]}
+    # the run open before the page was left stays open on the way back
+    held = ss.get("results_selected") or {}
+    chosen = next((r for r in shown if r["bmc"] == held.get("bmc")
+                   and r["run"] == held.get("run")
+                   and r["group"] == str(held.get("group") or "")), None)
+    if chosen is None:
+        st.caption("Select a run to see its results, job log and zip - to reuse its inputs, "
+                   "mark it as the reported run, rename it, add a note or delete it.")
+    return chosen, bool(picked)
 
 
 def _run_times(rows):
@@ -621,104 +811,6 @@ def _run_times(rows):
         return []
     with ThreadPoolExecutor(max_workers=min(8, len(rows))) as pool:
         return list(pool.map(one, rows))
-
-
-def _render_bmc_runs(bmc, group=""):
-    ss = st.session_state
-    rows, errors = _bmc_runs(bmc)
-    head, refresh = st.columns([5, 1], vertical_alignment="center")
-    with head:
-        st.markdown(f"**Runs in {bmc}**")
-    with refresh:
-        if st.button("↻ Refresh list", key="bmc_runs_refresh",
-                     help="Read this BMC's runs and their status again. The list is "
-                          "otherwise re-read at most every 30 s; the panel of a running "
-                          "run updates itself every 5 s."):
-            _bmc_runs(bmc, force=True)
-            st.rerun(scope="fragment")
-    for error in errors[:3]:
-        st.warning(error)
-    if not rows:
-        st.caption(f"No runs in {bmc} yet - this run will be its first.")
-        return
-    options = ([ALL_GROUPS]
-               + sorted({r["group"] for r in rows if r["group"]}, key=_group_sort_key,
-                        reverse=True)
-               + ([NO_GROUP] if any(not r["group"] for r in rows) else []))
-    # the list follows the period and type chosen above (until you pick another)
-    if ss.get("_bmc_runs_follow") != (bmc, group):
-        ss["_bmc_runs_follow"] = (bmc, group)
-        ss["bmc_runs_group"] = group if group in options else ALL_GROUPS
-    if ss.get("bmc_runs_group") not in options:
-        ss["bmc_runs_group"] = ALL_GROUPS
-    shown_group = st.selectbox(
-        "Show the runs of", options, key="bmc_runs_group",
-        help="One period and modelling type - its reported run is marked "
-             f"{projects.REPORTED_BADGE} - or all of them. '{NO_GROUP}' lists the runs "
-             "saved directly under the BMC, before runs were sorted by period.")
-    shown = [r for r in rows if shown_group == ALL_GROUPS
-             or (shown_group == NO_GROUP and not r["group"]) or r["group"] == shown_group]
-    if shown_group not in (ALL_GROUPS, NO_GROUP):
-        reported = next((r for r in shown if r["reported"]), None)
-        if reported:
-            by = (f" - marked by {reported['reported_by']}" if reported["reported_by"] else "")
-            st.caption(f"{projects.REPORTED_BADGE}: the results of {shown_group} were reported "
-                       f"from **{reported['run']}**{by}. The other runs are in its "
-                       f"{projects.archived_folder()} folder.")
-        elif shown:
-            st.caption(f"No run of {shown_group} is marked as reported yet - open a finished "
-                       "run below to mark it.")
-    if not shown:
-        st.caption(f"No runs in {shown_group} yet - this run will be its first.")
-        return
-    times = _run_times(shown)
-    table = pd.DataFrame([{
-        "period · type": r["group"] or "–",
-        "run": r["run"],
-        "reported": (projects.REPORTED_BADGE if r["reported"]
-                     else projects.ARCHIVED_BADGE if r["archived"] else ""),
-        "status": r["status"],
-        "run time": fmt_seconds(seconds),
-        "submitted": local_time(r["submitted_ms"]),
-        "by": r["submitted_by"],
-        "note": r["note"],
-        "reused from": r["source"],
-        "changed": ", ".join(r["changed"]),
-    } for r, seconds in zip(shown, times)])
-    table_key = f"bmc_runs_table_{_sha(f'{bmc}|{shown_group}'.encode())[:8]}"
-    event = st.dataframe(table, use_container_width=True, hide_index=True,
-                         on_select="rerun", selection_mode="single-row", key=table_key,
-                         column_config={"note": st.column_config.TextColumn(
-                             "note", help="The modeller's note - why the run was made, what "
-                                          "changed. Open the run to read all of it.")})
-    st.caption("Run time = the notebook's own time (not the time queued or starting the "
-               "cluster).")
-    picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])
-    if page_state.emptied(table_key, picked):
-        ss.pop("results_selected", None)          # the person cleared the selection
-    if picked:
-        sel = shown[picked[0]]
-        ss["results_selected"] = {"bmc": bmc, "group": sel["group"], "run": sel["run"],
-                                  "job_run_id": sel["job_run_id"]}
-    # the run open before the page was left stays open on the way back
-    held = ss.get("results_selected") or {}
-    chosen = next((r for r in shown if held.get("bmc") == bmc and r["run"] == held.get("run")
-                   and r["group"] == str(held.get("group") or "")), None)
-    if chosen is None:
-        st.caption("Select a run to see its results, job log and zip - to reuse its inputs, "
-                   "mark it as the reported run, rename it or add a note.")
-        return
-    if not picked:
-        left, right = st.columns([6, 1], vertical_alignment="center")
-        with left:
-            st.caption(f"Showing **{chosen['run']}** - opened before; select another row "
-                       "to switch.")
-        with right:
-            if st.button("Close", key="results_close", use_container_width=True):
-                ss.pop("results_selected", None)
-                st.rerun()
-    render_run_panel(projects.make_ref(chosen["job_run_id"], bmc, chosen["run"], chosen["group"]),
-                     "bmc", on_reuse=reuse_run)
 
 
 def _fingerprints():
@@ -837,7 +929,8 @@ def reuse_run(ref):
         if projects.is_auto_run_name(ref["run"]):
             ss["_pending_new_run_name"] = ""            # named when Run Model is pressed
         else:
-            taken = {r["run"] for r in _bmc_runs(ref["bmc"])[0] if r["group"] == group}
+            taken = ({r["run"] for r in _bmc_runs(ref["bmc"])[0] if r["group"] == group}
+                     | _retired(ref["bmc"], group))
             ss["_pending_new_run_name"] = projects.next_free_name(ref["run"], taken)
     ss["_pending_run_note"] = ""            # a new run, a new note
     ss.pop("gen_result", None)              # a generated file belongs to other inputs
@@ -1594,14 +1687,15 @@ def _start_run():
     note = projects.clean_note(ss.get("run_note"))
     with projects.group_lock(bmc, group):
         try:
-            taken = projects.taken_run_names(bmc, group)
+            taken = projects.unavailable_names(bmc, group)
             # an empty name is the moment of this click (run_<date>-<time>)
             run = target["run"] or projects.free_run_name(
                 projects.default_run_name(_now_local()), taken)
             where = f"{bmc} / {group} / {run}"
             if run in taken:
                 _forget_bmc_runs()
-                st.error(f"{where} already exists - choose another run name.")
+                st.error(f"{where} already exists, or was the name of a renamed or deleted "
+                         "run - choose another run name.")
                 return None
             with st.spinner(f"Saving the inputs to Secondary Modelling/{bmc}/{group}/{run}/ ..."):
                 names = projects.save_inputs(bmc, run, files, group=group)

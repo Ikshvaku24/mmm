@@ -50,6 +50,7 @@ top of this `config.yaml`.
 | `show_fixed:` | levels 3 and 4 | `true` lists the settings they may not change, read-only |
 | `mark_reported:` | levels | which levels may mark the run a period's results were reported from (moves run folders): `full_access`, `config_full_access`, `config_advanced_access`, `editable_only`. Default: the first three |
 | `edit_runs:` | levels, and `submitter` | who may rename a run and edit its note once it has run; `submitter` = the person who started that run. Default: `submitter` and `full_access` |
+| `delete_runs:` | levels (and `submitter`) | who may delete a run - its whole folder, for good; never while it runs, never the period's reported run. **Nobody unless listed**; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
 
 `editable` and `advanced` are allow-lists. Every other setting is fixed at
 its value in `config.yaml` - also when someone uploads another config.yaml
@@ -64,22 +65,40 @@ codebase 1 - within 5 minutes, at once for anyone who reloads the page - no
 redeploy.
 
 Two more files next to it hold the **standard names** the app offers:
-`bmc_names.csv` (the BMC names - only `full_access` may type another) and
-`modelling_types.csv` (LTE, Primary, Secondary ...). One name per line under
-the header; lines starting with `#` are ignored; a name that cannot be a
-folder name stops the list with a message (`app_job.read_names`).
+`bmc_names.csv` (the BMC names, one per line under the header - only
+`full_access` may type another; lines starting with `#` are ignored; a name
+that cannot be a folder name stops the list, `app_job.read_names`) and
+`modelling_types.yaml` - the modelling types, in the order the app offers
+them, each with the settings it sets (`app_job.read_modelling_types`).
 
-**Each modelling type's settings** (2026.10.09.1). Every column of
-`modelling_types.csv` after `modelling_type` is a setting, written
-`section.key`, and each cell is that type's value, read as YAML (`true`, `4`,
-`mean`). A blank cell sets nothing: the type keeps this `config.yaml`'s value.
-The shipped file has one column:
+**Each modelling type's settings** (`modelling_types.yaml`, since
+2026.10.09.2 - it replaced `modelling_types.csv`). Each type at the top level;
+under it, the sections of this `config.yaml`; under those, the settings and
+their values - written exactly as in `config.yaml`. A setting the file does
+not name keeps this `config.yaml`'s value; a type with nothing under it
+(`LTE: {}`) is just a name. The shipped file:
 
+```yaml
+LTE: {}            # no settings of its own: the team's config.yaml
+
+Primary:
+  model:
+    include_intercept: true
+
+Secondary:
+  model:
+    include_intercept: false
 ```
-modelling_type,model.include_intercept
-LTE,
-Primary,true
-Secondary,false
+
+A type fixing more settings:
+
+```yaml
+Primary:
+  model:
+    include_intercept: true
+    fourier_order: 3
+  sampler:
+    draws: 2000
 ```
 
 The job lays a type's settings between this `config.yaml` and the run's own:
@@ -89,10 +108,13 @@ records them). The app applies them as soon as the type is chosen, and they
 are the base its editor starts from and resets to - also for a setting the
 person may not change, which is then held at the type's value. They are the
 team's settings, like `config.yaml`, so `app_access.yaml` does not limit them.
-`settings.modelling_type_settings()` reads the file and stops, naming the cell,
-on a column that is not a setting (with the closest spelling), a setting the
-job sets itself, or a value the setting cannot take. Add a setting by adding a
-column; re-upload the folder.
+`settings.modelling_type_settings()` reads the file and stops, naming the type
+and the setting, on a section or setting this `config.yaml` does not have
+(with the closest spelling), a setting the job sets itself, or a value the
+setting cannot take; a name YAML would read as true / false needs quotes
+(`'On':`). In the app, the Model settings page lists a type's settings in its
+difference table (changed by: the modelling type). Re-upload the folder after
+editing it.
 
 **Two rules that save time:**
 
