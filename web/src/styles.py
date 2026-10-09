@@ -1,11 +1,18 @@
 """The page's CSS - what Streamlit's theme (web/themes/*.toml) cannot do.
 
-The colours, fonts and corners come from the lead company's theme file; the
-accents here come from src/brand.py, so they follow the same choice. Kept to
-what the app needs: Streamlit's top bar made click-through and its ⋮ menu
-hidden (the cluster sits there - the top bar), the header's baseline, the
-page titles' marker, the text on primary buttons, the side panel's logos,
-the run counter and the run list's fade-in on the Runs and results page.
+The colours, fonts and corners come from the company theme the viewer sees;
+the accents here come from src/brand.py, so they follow the same choice. Kept
+to what the app needs: Streamlit's top bar made click-through and its ⋮ menu
+hidden (the cluster and the light / dark button sit there - the top bar), the
+header's baseline, the page titles' marker, the text on primary buttons, the
+side panel's logos (the company logos are buttons), the run counter and the
+run list's fade-in on the Runs and results page.
+
+Both modes' accents are in the sheet. The server knows the viewer's mode only
+when the app runs, and Streamlit does not rerun on a theme change - so the
+light / dark button's script marks the page (`<html data-bridge-mode="dark">`)
+from the colour Streamlit actually painted, and the rules follow that mark at
+once. Until the script has run, the server's guess applies.
 """
 import streamlit as st
 
@@ -35,6 +42,9 @@ _COMMON = """
 }
 div:has(> .st-key-bridge_topbar) { min-height: 0; }
 .st-key-bridge_topbar [data-testid="stMarkdownContainer"] p { margin: 0; }
+/* Streamlit pulls every markdown block up by -1rem; in a row that only offsets
+   the greeting and the cluster from the light / dark button */
+.st-key-bridge_topbar [data-testid="stMarkdownContainer"] { margin-bottom: 0; }
 .bridge-hello {
     font-size: 0.8rem; font-weight: 600; color: var(--bridge-subtitle);
     white-space: nowrap; display: inline-block; max-width: 30vw;
@@ -57,6 +67,23 @@ div:has(> .st-key-bridge_topbar) { min-height: 0; }
 .st-key-start_cluster_button button {
     min-height: 1.75rem; padding: 0 0.6rem; font-size: 0.78rem; white-space: nowrap;
 }
+/* the light / dark button - a pill like the cluster's */
+.st-key-bridge_topbar [data-testid="stHtml"] { width: auto; }
+.st-key-bridge_topbar [data-testid="stElementContainer"] { align-self: center; }
+.st-key-bridge_topbar [data-testid="stHtml"] { display: flex; align-items: center; }
+.bridge-theme-toggle {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 1.95rem; height: 1.6rem; padding: 0; cursor: pointer;
+    border-radius: 999px; border: 1px solid var(--bridge-rule);
+    background: var(--bridge-surface); color: var(--bridge-ink);
+}
+.bridge-theme-toggle::before {
+    content: ""; width: 1rem; height: 1rem; background-color: currentColor;
+    -webkit-mask: var(--bridge-toggle-icon) center / contain no-repeat;
+    mask: var(--bridge-toggle-icon) center / contain no-repeat;
+}
+.bridge-theme-toggle:hover { border-color: var(--bridge-accent-ink); }
+.bridge-theme-toggle:focus-visible { outline: 2px solid var(--bridge-accent-ink); outline-offset: 2px; }
 @keyframes bridge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* the header: BRIDGE, what it stands for, and the baseline under it */
@@ -83,18 +110,29 @@ div:has(> .st-key-bridge_topbar) { min-height: 0; }
 [data-testid="stNavSectionHeader"] { text-transform: uppercase; letter-spacing: 0.08em;
                                      font-size: 0.72rem; }
 [data-testid="stSidebarNavLink"][aria-current="page"] { box-shadow: inset 3px 0 0 var(--bridge-accent); }
-/* in the flow after the status (it never covers a button), and held at the
-   foot of the panel when the panel scrolls */
-[data-testid="stSidebarContent"] .bridge-cobrand {
+/* the two companies: in the flow after the status (they never cover a
+   button), held at the foot of the panel when it scrolls; each logo is a
+   button that switches the viewer's page to that company's theme */
+.st-key-bridge_cobrand {
     position: sticky; bottom: 0; z-index: 1; margin-top: 1.4rem;
-    display: flex; align-items: center; justify-content: center; gap: 0.85rem;
-    padding: 0.85rem 0.5rem 0.9rem; background: var(--bridge-sidebar-bg);
-    border-top: 1px solid var(--bridge-rule);
+    padding: 0.85rem 0.25rem 0.9rem; background: var(--bridge-sidebar-bg);
+    border-top: 1px solid var(--bridge-rule); flex-wrap: nowrap;
 }
-.bridge-cobrand-logo { display: block; width: auto; }
-.bridge-cobrand-logo--haleon { height: 0.85rem; }
-.bridge-cobrand-logo--capgemini { height: 1.3rem; }
-.bridge-cobrand-rule { width: 1px; height: 1.4rem; background: var(--bridge-rule); }
+.st-key-bridge_cobrand [data-testid="stMarkdownContainer"] p { margin: 0; }
+.st-key-bridge_brand_haleon button, .st-key-bridge_brand_capgemini button {
+    width: 5.6rem; min-height: 0; padding: 0; border: none; border-radius: 0;
+    background: transparent no-repeat center / contain; cursor: pointer;
+}
+.st-key-bridge_brand_haleon button p, .st-key-bridge_brand_capgemini button p {
+    position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0);
+}
+.st-key-bridge_brand_haleon button:hover, .st-key-bridge_brand_capgemini button:hover {
+    opacity: 0.85;
+}
+.st-key-bridge_brand_haleon button:focus-visible, .st-key-bridge_brand_capgemini button:focus-visible {
+    outline: 2px solid var(--bridge-accent-ink); outline-offset: 3px;
+}
+.bridge-cobrand-rule { display: block; width: 1px; height: 1.4rem; background: var(--bridge-rule); }
 
 /* Runs and results: the counter, and the list fading in on every new choice
    (the list mounts under the other of two keys, so the animation restarts) */
@@ -148,7 +186,8 @@ _CAPGEMINI = """
 """
 
 
-def _variables(t) -> str:
+def _pairs(t) -> dict:
+    """The CSS variables for one company and one mode."""
     dark = bool(t.get("dark"))
     status = ({"good": "#3DD68C", "busy": "#F0B429", "off": "#8D979D"} if dark else
               {"good": "#1E8E3E", "busy": "#C98500", "off": "#8D979D"})
@@ -157,26 +196,53 @@ def _variables(t) -> str:
                 f"linear-gradient(90deg, #0070AD 0 6rem, {t['accent']} 6rem 11rem, "
                 f"{t['rule']} 11rem 100%)")
     ink = "#F2F2F2" if dark else "#1B1819"
-    pairs = {"accent": t["accent"], "accent-ink": t["accent_ink"], "title": t["title"],
-             "subtitle": t["subtitle"], "rule": t["rule"], "on-primary": t["on_primary"],
-             "chip-bg": t["chip_bg"], "chip-fg": t["chip_fg"], "danger": t["danger"],
-             "sidebar-bg": t["sidebar_bg"], "surface": t["surface"], "ink": ink,
-             "baseline": baseline, "good": status["good"], "busy": status["busy"],
-             "off": status["off"]}
-    return ":root {\n" + "\n".join(f"    --bridge-{k}: {v};" for k, v in pairs.items()) + "\n}\n"
+    return {"toggle-icon": brand.icon_url(brand.SUN_SVG if dark else brand.MOON_SVG),
+            "accent": t["accent"], "accent-ink": t["accent_ink"], "title": t["title"],
+            "subtitle": t["subtitle"], "rule": t["rule"], "on-primary": t["on_primary"],
+            "chip-bg": t["chip_bg"], "chip-fg": t["chip_fg"], "danger": t["danger"],
+            "sidebar-bg": t["sidebar_bg"], "surface": t["surface"], "ink": ink,
+            "baseline": baseline, "good": status["good"], "busy": status["busy"],
+            "off": status["off"]}
+
+
+def _block(selector, pairs) -> str:
+    return selector + " {\n" + "\n".join(f"    --bridge-{k}: {v};"
+                                          for k, v in pairs.items()) + "\n}\n"
+
+
+def _variables(t) -> str:
+    """The server's guess (the viewer's mode as the app last knew it), then
+    each mode's variables under the page's light / dark mark."""
+    which = t["key"]
+    return (_block(":root", _pairs(t))
+            + "".join(_block(f':root[data-bridge-mode="{kind}"]',
+                             _pairs(brand.tokens(which, kind)))
+                      for kind in ("light", "dark")))
+
+
+def _aommm_rule(dark_panel: bool, scope: str) -> str:
+    """AOMMM blends into a light panel (its file has a white ground) and sits
+    on a small white card on a dark one."""
+    logo = f'{scope}[data-testid="stSidebarHeader"] img'
+    if dark_panel:
+        return (f"{logo} {{ background: #FFFFFF; padding: 0.2rem 0.45rem; "
+                "border-radius: 0.4rem; mix-blend-mode: normal; }\n")
+    return f"{logo} {{ mix-blend-mode: multiply; background: none; padding: 0; }}\n"
 
 
 def _logo_rules(t) -> str:
-    """AOMMM on a light panel blends into it (its file has a white ground);
-    on a dark panel it sits on a small white card."""
-    if t["sidebar_dark"]:
-        return ('[data-testid="stSidebarHeader"] img { background: #FFFFFF; '
-                "padding: 0.2rem 0.45rem; border-radius: 0.4rem; }\n")
-    return '[data-testid="stSidebarHeader"] img { mix-blend-mode: multiply; }\n'
+    """AOMMM for the server's guess, then for each mode under the page's
+    light / dark mark; then the company logo buttons (src/brand.py)."""
+    which = t["key"]
+    out = _aommm_rule(bool(t["sidebar_dark"]), "")
+    for kind in ("light", "dark"):
+        out += _aommm_rule(bool(brand.tokens(which, kind)["sidebar_dark"]),
+                           f':root[data-bridge-mode="{kind}"] ')
+    return out + brand.logo_css(which)
 
 
 def global_css() -> str:
-    """The whole style sheet for the lead company and the viewer's mode."""
+    """The whole style sheet for the company the viewer sees - both modes."""
     t = brand.tokens()
     own = _HALEON if t["key"] == "haleon" else _CAPGEMINI
     return _variables(t) + _logo_rules(t) + _COMMON + own

@@ -42,15 +42,15 @@ top of this `config.yaml`.
 
 | Key | Who | What they get |
 |---|---|---|
-| `full_access:` | login e-mails | every setting, the admin tools ("Reload codebase 1", the backend folder, "Open in Databricks" on a run), and naming a NEW BMC (everyone else picks one from `bmc_names.csv`) |
-| `config_full_access:` | login e-mails | every setting (no admin tools) |
-| `config_advanced_access:` | login e-mails | the `editable:` settings, plus the `advanced:` ones behind the app's **Advanced options** switch |
+| `full_access:` | login e-mails, or `all` | every setting, the admin tools ("Reload codebase 1", the backend folder, "Open in Databricks" on a run), and naming a NEW BMC (everyone else picks one from `bmc_names.csv`) |
+| `config_full_access:` | login e-mails, or `all` | every setting (no admin tools) |
+| `config_advanced_access:` | login e-mails, or `all` | the `editable:` settings, plus the `advanced:` ones behind the app's **Advanced options** switch |
 | `editable:` | everyone (levels 3 and 4) | the settings listed here get a widget; for everyone not named above ("editable only") that is all - no Advanced options switch |
 | `advanced:` | `config_advanced_access` | the settings needed once in a while; same format as `editable:` (one listed in both counts as editable) |
 | `show_fixed:` | levels 3 and 4 | `true` lists the settings they may not change, read-only |
-| `mark_reported:` | levels | which levels may mark the run a period's results were reported from (moves run folders): `full_access`, `config_full_access`, `config_advanced_access`, `editable_only`. Default: the first three |
-| `edit_runs:` | levels, and `submitter` | who may rename a run and edit its note once it has run; `submitter` = the person who started that run. Default: `submitter` and `full_access` |
-| `delete_runs:` | levels (and `submitter`) | who may delete a run - its whole folder, for good; never while it runs, never the period's reported run. **Nobody unless listed**; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
+| `mark_reported:` | levels, or `all` | which levels may mark the run a period's results were reported from (moves run folders): `full_access`, `config_full_access`, `config_advanced_access`, `editable_only`. Default: the first three |
+| `edit_runs:` | levels, and `submitter` - or `all` | who may rename a run and edit its note once it has run; `submitter` = the person who started that run. Default: `submitter` and `full_access` |
+| `delete_runs:` | levels (and `submitter`) - or `all` | who may delete a run - its whole folder, for good; never while it runs, never the period's reported run. **Nobody unless listed**; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
 
 `editable` and `advanced` are allow-lists. Every other setting is fixed at
 its value in `config.yaml` - also when someone uploads another config.yaml
@@ -60,7 +60,25 @@ with a run holds only the settings they may change. `sampler: all` opens a
 section and `editable: all` opens everything. A setting added to codebase 1
 later stays fixed until it is listed. `settings.app_access()` reads the file;
 a misspelt setting (or level) is reported, and a broken file fixes every
-setting and grants nobody any level. The app re-reads it with the rest of
+setting and grants nobody any level.
+
+**`all`** (since 2026.10.09.3) works wherever it is written, for what it is
+written under - never above it:
+
+| Written | Means |
+|---|---|
+| `config_advanced_access: all` (or `- all` in the list, any case) | everyone signed in has that level - but not `config_full_access` or `full_access`: whoever is named in a level above keeps it, nobody else is lifted. Someone not signed in is never "everyone" |
+| `config_full_access: all` | every setting for everyone signed in - still no admin tools |
+| `full_access: all` | everything for everyone signed in |
+| `mark_reported: all`, `edit_runs: all`, `delete_runs: all` | every level |
+| `editable: all` / `advanced: all` | every setting; `sampler: all` (or `sampler: [all]`) under either opens that section only |
+
+`all` is read in any case (`ALL`), on its own or in a list. Another bare
+word under a level (`config_full_access: everyone`) is an error - and an
+error stops the whole file: every setting fixed, nobody any level. In a
+list, anything else is taken as an e-mail, so `- everyone` matches nobody.
+
+The app re-reads it with the rest of
 codebase 1 - within 5 minutes, at once for anyone who reloads the page - no
 redeploy.
 

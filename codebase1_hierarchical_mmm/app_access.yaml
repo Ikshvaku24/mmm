@@ -23,6 +23,14 @@
 # only the settings that person may change, and the job fills the rest in from
 # this folder's config.yaml.
 #
+# `all` works wherever it is written, for what it is written under - never
+# above it:
+#   config_advanced_access: all   everyone signed in gets this level - but not
+#                                 config_full_access or full_access; whoever is
+#                                 named in a level above keeps it
+#   delete_runs: all              every level (the lists further down)
+#   editable: all                 every setting;  sampler: all  that section only
+#
 # The app reads this file with the rest of codebase 1: re-upload the folder
 # and the app follows within 5 minutes - or at once for anyone who reloads the
 # page. No app redeploy.

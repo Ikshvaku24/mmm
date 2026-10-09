@@ -183,7 +183,7 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 
 ## Tests
 
-`../tests/run_all.py` — 2072 checks, ~1 min, no PyMC needed. They import the
+`../tests/run_all.py` — 2089 checks, ~1 min, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

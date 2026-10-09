@@ -65,7 +65,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-__codebase__ = "2026.10.09.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.3"   # must equal mmm.__version__
 
 # Every threshold lives on config.AssumptionConfig so a modeller can widen or
 # narrow it from config.yaml without editing code (e.g. pair_warn: 0 dumps the

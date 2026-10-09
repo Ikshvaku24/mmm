@@ -72,14 +72,16 @@ import yaml
 
 from src import perf
 
-# the first version with modelling_types.yaml (each type's name and the
-# settings it sets - applied by the app AND the job) and app_access.yaml's
-# `delete_runs`; 2026.10.09.1 brought `edit_runs` and
+# the first version whose app_access.yaml takes `all` under a level (everyone
+# signed in has that level, never a higher one) and in the lists of levels;
+# 2026.10.09.2 brought modelling_types.yaml (each type's name and the settings
+# it sets - applied by the app AND the job) and `delete_runs`, 2026.10.09.1
+# `edit_runs` and
 # 01_data/collinearity_matrix.csv, 2026.10.07.1 the run groups (the job
 # parameter run_group), the four access levels and the standard lists,
 # 2026.09.30.1 app_access.yaml and the partial run configs, 2026.09.29.2 the
 # run folders
-MIN_CODEBASE = "2026.10.09.2"
+MIN_CODEBASE = "2026.10.09.3"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))

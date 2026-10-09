@@ -3,11 +3,12 @@
 # things and win over this file.
 
 [client]
-# no ⋮ menu in the top-right corner - the cluster sits there (the top bar)
-toolbarMode = "minimal"
+# the ⋮ menu's developer items off; the page hides the menu itself (the cluster
+# sits there) but needs it: the light / dark button uses its Settings
+toolbarMode = "viewer"
 
 [theme]
-# the company theme that leads: "themes/haleon.toml" (default) or
+# the company theme shown until a viewer picks the other one (the logos in
+# the side panel switch it, per person): "themes/haleon.toml" (default) or
 # "themes/capgemini.toml" - colours, fonts and corners, light and dark
-# (src/brand.py follows the same setting for the logos and accents)
 base = "themes/haleon.toml"

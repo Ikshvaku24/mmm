@@ -22,6 +22,7 @@ into the surface and strong correlations are the bright cells).
 from __future__ import annotations
 
 import math
+import threading
 
 import numpy as np
 import pandas as pd
@@ -50,16 +51,27 @@ MAX_COLOURED = len(SERIES["light"])     # pillars past this many fold into "Othe
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
 
 
+_THEME = threading.local()
+
+
 def use_theme(font=None, surface=None):
-    """The lead company's font for every chart, and its page colours behind
-    the heatmap's cells ({"light": ..., "dark": ...}) - from src/brand.py.
-    The data colours stay the validated ones above."""
-    global FONT
-    if font:
-        FONT = font
-    for kind, colour in (surface or {}).items():
-        if kind in INK and colour:
-            INK[kind]["surface"] = colour
+    """The viewer's company font for every chart, and its page colours
+    behind the heatmap's cells ({"light": ..., "dark": ...}) - from
+    src/brand.py. Per thread: Streamlit runs each viewer's session in its own
+    thread, and each viewer may see another company. The data colours stay
+    the validated ones above."""
+    _THEME.font = font or None
+    _THEME.surface = dict(surface or {})
+
+
+def _font():
+    return getattr(_THEME, "font", None) or FONT
+
+
+def _ink(mode):
+    """_ink(mode), with this viewer's page colour as the surface."""
+    surface = (getattr(_THEME, "surface", None) or {}).get(mode)
+    return dict(INK[mode], surface=surface) if surface else INK[mode]
 
 
 def available() -> bool:
@@ -206,7 +218,7 @@ def colour_map(pillars: list, mode: str = "light") -> dict:
     """{pillar: colour}: the first MAX_COLOURED pillars take the categorical
     slots in order; the rest - and "Other" and "Unassigned" - share the muted
     grey; the baseline core is the recessive neutral."""
-    slots, ink = SERIES[mode], INK[mode]
+    slots, ink = SERIES[mode], _ink(mode)
     named = [p for p in pillars if p not in (OTHER, UNASSIGNED)]
     out = {BASELINE_CORE: ink["neutral"], OTHER: ink["muted"], UNASSIGNED: ink["muted"]}
     for i, p in enumerate(named):
@@ -524,13 +536,13 @@ def _alpha(hex_colour: str, a: float) -> str:
 
 
 def _style(fig, mode, height, y_title="", x_title="", legend=True):
-    ink = INK[mode]
+    ink = _ink(mode)
     fig.update_layout(
         template="none", height=height,
         margin=dict(l=8, r=16, t=40 if legend else 12, b=8),
         paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family=FONT, color=ink["secondary"], size=12),
-        hoverlabel=dict(font=dict(family=FONT, size=12)),
+        font=dict(family=_font(), color=ink["secondary"], size=12),
+        hoverlabel=dict(font=dict(family=_font(), size=12)),
         showlegend=legend,
         legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0,
                     font=dict(color=ink["secondary"]), bgcolor="rgba(0,0,0,0)"))
@@ -544,7 +556,7 @@ def _style(fig, mode, height, y_title="", x_title="", legend=True):
 
 def fit_figure(frame: pd.DataFrame, holdout, mode: str = "light"):
     import plotly.graph_objects as go
-    ink, blue = INK[mode], SERIES[mode][0]
+    ink, blue = _ink(mode), SERIES[mode][0]
     fig = go.Figure()
     if holdout is not None:
         fig.add_vrect(x0=holdout[0], x1=holdout[1], fillcolor=ink["neutral"],
@@ -581,7 +593,7 @@ def contribution_figure(bars: pd.DataFrame, colours: dict, mode: str = "light"):
     """Horizontal bars, one per driver (or pillar), coloured by pillar; the
     legend lists the pillars in their fixed order."""
     import plotly.graph_objects as go
-    ink = INK[mode]
+    ink = _ink(mode)
     fig = go.Figure()
     present = list(dict.fromkeys(bars["pillar"]))
     pillars = [p for p in colours if p in present] + [p for p in present if p not in colours]
@@ -616,7 +628,7 @@ def contribution_tree_figure(tree: pd.DataFrame, colours: dict, mode: str = "lig
     its variables (when open) under it in a lighter shade of the same colour.
     The y labels name every bar, so there is no legend."""
     import plotly.graph_objects as go
-    ink = INK[mode]
+    ink = _ink(mode)
     fig = go.Figure()
     order = list(tree["label"])
     for pillar in dict.fromkeys(tree["pillar"]):
@@ -650,7 +662,7 @@ def contribution_tree_figure(tree: pd.DataFrame, colours: dict, mode: str = "lig
 def decomposition_figure(wide: pd.DataFrame, actual: pd.Series, colours: dict,
                          mode: str = "light"):
     import plotly.graph_objects as go
-    ink = INK[mode]
+    ink = _ink(mode)
     fig = go.Figure()
     for g in wide.columns:
         fig.add_trace(go.Bar(x=wide.index, y=wide[g], name=g,
@@ -700,7 +712,7 @@ def correlation_heatmap_figure(labels: list, grid, mode: str = "light", mark: fl
     red. Only the cells at |r| >= `mark` carry their number (the rest have a
     hover), and the diagonal - a column with itself - is left blank."""
     import plotly.graph_objects as go
-    ink = INK[mode]
+    ink = _ink(mode)
     z = np.array(grid, dtype=float)
     n = len(labels)
     if n:
@@ -735,7 +747,7 @@ def vif_figure(points: pd.DataFrame, mode: str = "light", warn: float = VIF_WARN
     the top, with the 5 and 10 guides. One series, so one colour and no
     legend; the value is in the hover and the table."""
     import plotly.graph_objects as go
-    ink, blue = INK[mode], SERIES[mode][0]
+    ink, blue = _ink(mode), SERIES[mode][0]
     d = points.dropna(subset=["vif"])
     d = d[d["vif"] > 0]
     fig = go.Figure()

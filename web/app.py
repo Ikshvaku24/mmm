@@ -29,10 +29,15 @@ codebase.start_background_refresh()
 if "_bridge_session" not in st.session_state:
     st.session_state["_bridge_session"] = True
     codebase.check_now()
+# the company theme this viewer chose (the logos at the foot of the panel):
+# a new session starts with the person's last choice - one rerun when the
+# theme already sent for this run was the other company's (src/brand.py)
+if brand.sync_session(email):
+    st.rerun()
 # count this run and keep what was chosen on the other pages (src/page_state.py)
 page_state.start_run()
-# the lead company's look (web/themes/*.toml, chosen by theme.base - src/brand.py):
-# the page's accents, AOMMM at the top of the side panel, the charts' font
+# the viewer's company look (web/themes/*.toml - src/brand.py): the page's
+# accents, AOMMM at the top of the side panel, the charts' font
 inject_global_styles()
 brand.render_logo()
 charts.use_theme(font=brand.tokens()["font"],
@@ -47,7 +52,7 @@ init_config_state()
 page = st.navigation(navigation(), position="sidebar", expanded=True)
 with st.sidebar:
     render_sidebar_status()
-    brand.render_cobrand()          # Haleon and Capgemini, at the foot of the panel
+    brand.render_cobrand(email)     # Haleon and Capgemini: each logo switches the look
 render_app_header()
 # selected_page = st.radio(
 #     "Select page",

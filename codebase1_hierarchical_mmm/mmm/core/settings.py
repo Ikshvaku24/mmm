@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.3"   # must equal mmm.__version__
 
 import copy
 import dataclasses
@@ -516,18 +516,33 @@ DEFAULT_EDIT_RUNS = ("submitter", "full_access")
 # who may delete a run (its whole folder, for good): nobody unless the file
 # lists the levels - deleting cannot be undone
 DEFAULT_DELETE_RUNS = ()
+# `all` - in a level's e-mail list: everyone signed in has that level; in a
+# list of levels: every level
+EVERYONE = "all"
+
+
+def _is_all(value) -> bool:
+    return isinstance(value, str) and value.strip().lower() == EVERYONE
+
+
+def _has_all(value) -> bool:
+    """`all` - on its own or in a list, in any case."""
+    return _is_all(value) or (isinstance(value, list) and any(_is_all(v) for v in value))
 
 
 def _level_list(raw: dict, key: str, default, unknown: list, extra=()) -> list:
     """A list of levels (ACCESS_LEVELS, plus `extra` words) - unknown names go
-    to `unknown`, the rest are kept in a fixed order."""
+    to `unknown`, the rest are kept in a fixed order. `all` (on its own, or in
+    the list) is every level - everyone."""
     levels = raw.get(key, list(default))
     if levels is None:
         levels = []
+    known = tuple(extra) + ACCESS_LEVELS
+    if _has_all(levels):
+        return list(known)
     if not isinstance(levels, list):
         raise ValueError(f"{ACCESS_FILE}: `{key}` must be a list of levels "
-                         f"({', '.join(tuple(extra) + ACCESS_LEVELS)}), got {levels!r}")
-    known = tuple(extra) + ACCESS_LEVELS
+                         f"({', '.join(known)}) or `all`, got {levels!r}")
     named = []
     for level in levels:
         name = str(level).strip()
@@ -539,24 +554,31 @@ def _level_list(raw: dict, key: str, default, unknown: list, extra=()) -> list:
 
 
 def _emails(raw: dict, key: str) -> list:
+    """A level's people: sorted lower-case e-mails - or ["all"] for `all` (on
+    its own, or in the list): everyone signed in has this level. `all` gives
+    THIS level only - never one above it: someone named higher keeps the
+    higher level, nobody else is lifted."""
     people = raw.get(key) or []
+    if _has_all(people):
+        return [EVERYONE]
     if not isinstance(people, list):
-        raise ValueError(f"{ACCESS_FILE}: `{key}` must be a list of e-mails")
+        raise ValueError(f"{ACCESS_FILE}: `{key}` must be a list of e-mails, or `all`")
     return sorted({str(p).strip().lower() for p in people if str(p).strip()})
 
 
 def _setting_names(raw: dict, key: str, known: list, unknown: list):
     """`editable:` / `advanced:` -> sorted ["section.key", ...], or None for
-    `all` (every setting). Names codebase 1 does not have go to `unknown`."""
+    `all` (every setting); `<section>: all` = that section's settings. Names
+    codebase 1 does not have go to `unknown`."""
     wanted = raw.get(key, {})
-    if wanted == "all":
+    if _has_all(wanted):
         return None
     if not (isinstance(wanted, dict) or wanted is None):
         raise ValueError(f"{ACCESS_FILE}: `{key}` must map sections to lists of "
                          f"settings, or be `all` - got {wanted!r}")
     names = []
     for section, keys in (wanted or {}).items():
-        if keys == "all":
+        if _has_all(keys):
             keys = [k for s, k in known if s == section]
             if not keys:
                 unknown.append(f"{section}.*")
@@ -582,10 +604,16 @@ def app_access(path: str | None = None) -> dict:
         config_advanced_access   the `editable` settings and the `advanced` ones
         everyone else            `editable_only`: the `editable` settings
 
+    `all` works wherever it is written, for what it is written under -
+    never above it: a level's people list `all` = everyone signed in has that
+    level (not a higher one); a list of levels `all` = every level; under
+    `editable` / `advanced`, `all` opens every setting, and `<section>: all`
+    that section only.
+
     Returns
-        full_access             lower-case e-mails (level 1)
-        config_full_access      lower-case e-mails (level 2)
-        config_advanced_access  lower-case e-mails (level 3)
+        full_access             lower-case e-mails (level 1), or ["all"]
+        config_full_access      lower-case e-mails (level 2), or ["all"]
+        config_advanced_access  lower-case e-mails (level 3), or ["all"]
         editable                what levels 3 and 4 may change: sorted
                                 ["section.key", ...], or None = every setting
         advanced                what level 3 may change on top: sorted

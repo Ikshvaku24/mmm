@@ -60,7 +60,7 @@ The app does not need redeploying.
 The config editor, the prior table and the run-folder layout come from
 codebase 1 itself (its schema, and `mmm/app_job.py`'s folder names and name
 rule), so a new setting or a new allowed value appears in the app by itself.
-The app needs codebase 1 **2026.10.09.2 or later** (`MIN_CODEBASE` in
+The app needs codebase 1 **2026.10.09.3 or later** (`MIN_CODEBASE` in
 `src/codebase.py`): 2026.09.29.2 brought the run folders (`bmc_name` /
 `run_name`), 2026.09.30.1 `app_access.yaml` (who may do what), the partial
 run config and the live job log, 2026.10.07.1 the period folders (the job
@@ -68,7 +68,7 @@ parameter `run_group`), the four access levels and the standard names
 (`bmc_names.csv`, `modelling_types.csv`), 2026.10.09.1 each modelling type's
 settings, `edit_runs` and `01_data/collinearity_matrix.csv`, 2026.10.09.2
 `modelling_types.yaml` (the types and their settings, replacing the CSV) and
-`delete_runs`.
+`delete_runs`, 2026.10.09.3 `all` under an access level (below).
 It says so plainly if the workspace copy is older.
 
 ---
@@ -233,12 +233,13 @@ Secondary Modelling/                   ADLS, container-relative (the job: <base_
 
 The steps are pages in the left-hand panel; a step's title gets ✅ once it
 is done (④ only when a mapping or share file was added). Under the list: the
-backend's version; at the foot, the two companies' logos. Top right on every
-page, where Streamlit's ⋮ menu was (it is hidden): who is signed in, and the
-cluster - a dot and a word - with **Start cluster** when it is stopped. What
-is chosen on a page stays chosen when you move to another (see "Pages, and
-how they refresh"). The look is the lead company's (see "The look: two
-company themes").
+backend's version; at the foot, the two companies' logos - press one to see
+the app in that company's look, just for you. Top right on every page, where
+Streamlit's ⋮ menu was (it is hidden): who is signed in, the ☾ / ☀ button
+(light / dark), and the cluster - a dot and a word - with **Start cluster**
+when it is stopped. What is chosen on a page stays chosen when you move to
+another (see "Pages, and how they refresh"). See "The look: two company
+themes, light and dark".
 
 1. **① BMC, period and run.**
    - **BMC name**: the team's names (codebase 1's `bmc_names.csv`) and the BMC
@@ -295,6 +296,15 @@ company themes").
      person who started the run.
      ****As shipped; `delete_runs:` lists the levels - nobody when it is not
      in the file.
+
+     **`all`** works wherever it is written, for what it is written under -
+     never above it. `config_advanced_access: all` (or `- all` in its list)
+     gives that level to everyone signed in, but not `config_full_access` or
+     `full_access`: whoever is named in a level above keeps it, nobody else
+     is lifted (`config_editor.access()` asks each level apart, from the top;
+     an unsigned viewer is never "everyone"). `all` in `mark_reported`,
+     `edit_runs` or `delete_runs` means every level; under `editable:` /
+     `advanced:` it opens every setting, and `sampler: all` that section only.
 
      For the last two levels every other setting is fixed at the team's
      `config.yaml` value, and `config_editor.enforce_fixed` puts it back when
@@ -539,20 +549,47 @@ Downloads use `on_click="ignore"`, so they don't rerun anything. A new session
 (opening or reloading the page) calls `codebase.check_now()` once, from
 `app.py`.
 
-### The look: two company themes
+### The look: two company themes, light and dark
 
-BRIDGE is co-branded: **one company leads the look, both are always shown**.
-Haleon leads by default (the app runs on Haleon's Databricks, on Haleon's
-data, for Haleon's modellers); Capgemini's theme is complete and one setting
-away.
+BRIDGE is co-branded: **one company's look at a time, both companies always
+shown**. Everyone starts in the deployment's company - Haleon (the app runs
+on Haleon's Databricks, on Haleon's data, for Haleon's modellers). Pressing
+a company's logo at the foot of the side panel shows the app in that
+company's look **for that person only** - at once, no redeploy; the shown
+company is underlined. The ☾ / ☀ button top right switches light and dark.
 
 | Piece | Where | What |
 |---|---|---|
-| Streamlit's theme | `themes/haleon.toml`, `themes/capgemini.toml` | colours, fonts, corners - `[theme.light]` and `[theme.dark]`, each with its side panel. Streamlit follows each person's system light / dark setting |
-| Which leads | `app.yml`: `STREAMLIT_THEME_BASE` (on a laptop: `.streamlit/config.toml`'s `base`) | `themes/haleon.toml` or `themes/capgemini.toml` - one setting |
-| What the theme cannot do | `src/brand.py` (tokens), `src/styles.py` (CSS) | the green or blue baseline under the header, the page titles' marker, the current page's bar, the text on primary buttons (Streamlit always writes it white - unreadable on Haleon Green), the run counter, a red Delete, the logos; `brand.key()` reads the same setting (Streamlit replaces `theme.base` with "light" once it has read the file) |
-| The logos | `assest/aommm.png` (copied in - top of the side panel, `st.logo`); `brand/` (the companies, at its foot) | the companies' own artwork with white copies for dark panels; PNG because Streamlit will not show an SVG data: image (`haleon*.png` are `haleon*.svg` drawn by a browser) |
-| The charts | `charts.use_theme` | the lead company's font; the data colours stay the validated ones |
+| Streamlit's theme | `themes/haleon.toml`, `themes/capgemini.toml` | colours, fonts, corners - `[theme.light]` and `[theme.dark]`, each with its side panel |
+| The deployment's company | `app.yml`: `STREAMLIT_THEME_BASE` (on a laptop: `.streamlit/config.toml`'s `base`) | what everyone sees until they press a logo, and the logo shown first; `brand.deployed_key()` reads the setting itself (Streamlit replaces `theme.base` with "light" once it has read the file) |
+| A viewer's company | `brand.render_cobrand` (each logo is an `st.button`), `brand.choose`, `brand.sync_session` | kept in the session (`bridge_brand`) and, while the app runs, by login e-mail (`brand.BRAND_BY_EMAIL`), so a new tab of theirs starts with it; a restart forgets it (back to the deployment's company) |
+| The session-theme hook | `brand._install_session_themes` (runs at import, once per process) | Streamlit sends each session its theme at the start of every run (`AppSession._create_new_session_message`), from the server's config - one theme for everyone. The hook wraps that one method: for a session that chose the other company it refills the theme from that company's file, by Streamlit's own code (`_populate_theme_msg`, compiled once more against that file - the real one is untouched). The browser applies a changed theme on that run and keeps the person's light / dark choice |
+| Light / dark | `brand.render_theme_toggle` (an `st.html` button and script) | Streamlit has no Python call for it; its own switch is ⋮ → Settings → *Choose app theme*. The button works that switch out of sight, marks the page light or dark, then presses the menu's Rerun so the charts and the CSS follow (Streamlit does not rerun on a theme change). Live - nothing on the pages is lost; the browser keeps the choice |
+| What the theme cannot do | `src/brand.py` (tokens), `src/styles.py` (CSS) | the green or blue baseline under the header, the page titles' marker, the current page's bar, the text on primary buttons (Streamlit always writes it white - unreadable on Haleon Green), the run counter, a red Delete, the logos, the button's sun and moon. The CSS carries both modes; `<html data-bridge-mode>`, which the button's script sets from the page's background, picks one at once |
+| The logos | `assest/aommm.png` (copied in - top of the side panel, `st.logo`); `brand/` (the companies, at its foot - each the picture of its button) | the companies' own artwork with white copies for dark panels; PNG because Streamlit will not show an SVG data: image (`haleon*.png` are `haleon*.svg` drawn by a browser) |
+| The charts | `charts.use_theme` | the shown company's font and chart surface - per session thread, as two people may see two companies at once; the data colours stay the validated ones |
+
+**What the light / dark button needs** - each found the hard way:
+- the ⋮ menu in the page: `client.toolbarMode = "viewer"` (`app.yml`:
+  `STREAMLIT_CLIENT_TOOLBAR_MODE`). `minimal` removes the menu, and with it
+  the only switch. The page's CSS hides the menu; the script still reaches
+  it.
+- `st.html` cleans its HTML (DOMPurify): it drops SVG - so the sun and moon
+  are CSS masks (`--bridge-toggle-icon`) - and drops a whole `<script>`
+  whose text looks like markup (a `<` before a letter or `/`) - so the
+  script has none (v21 checks it).
+- A menu item shows its shortcut too ("Rerun" and "R"), so the script
+  matches an item by its label alone.
+- The menu, the dialog and the dropdown stay invisible throughout; if a step
+  fails the script closes them and logs "BRIDGE: the light / dark switch
+  failed" in the browser console.
+
+**If the hook stops working** - it reaches into Streamlit's internals, which
+is why `requirements.txt` pins `streamlit~=1.54.0` - nothing breaks: the
+session keeps the deployment's theme, and a press on the other logo changes
+only the accents, the logos and the charts' font. `brand._HOOK["error"]`
+says why; v22 checks the hook against the real Streamlit. Check it after any
+Streamlit upgrade.
 
 Haleon: black and white with restrained hits of Haleon Green `#30EA03`,
 Verdana, near-square corners, a light grey side panel (black in dark mode).
@@ -613,7 +650,7 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #   test_v19_config_schema.py  codebase 1's schema, YAML writer, app_job (run folders, run groups,
 #                              bmc_names.csv, modelling_types.yaml and each type's settings - team <
 #                              type < run -, demo.ipynb), app_access.yaml's four levels, edit_runs,
-#                              delete_runs
+#                              delete_runs, `all` under a level (never above it)
 #   test_v20_web_app.py        src/codebase.py (live loading from a fake workspace; a page reload
 #                              re-checks it), src/projects.py (run folders and groups, run lists,
 #                              notes, marking the reported run, renaming a run and editing its note,
@@ -630,11 +667,16 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #                              the reported run, (step 21) the pages and what they keep, (step 22)
 #                              the modelling types' settings and the difference table, (step 23)
 #                              rename and note, (24) the filters on Runs and results, (25) deleting a
-#                              run, (26) the top bar and Start cluster, (27) the co-branding - both
-#                              themes, the switch, the logos, every colour pairing's contrast
+#                              run, (26) the top bar, the light / dark button and Start cluster, (27)
+#                              the co-branding - both themes, a logo press switching this viewer's
+#                              look (and remembered by e-mail), the deployment's company, the
+#                              markup-free toggle script, every colour pairing's contrast, (28)
+#                              `all` in app_access.yaml - everyone at that level, never above
 #   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest), page by page, with a
 #                              round trip between pages, the filters, a delete, the top bar and the
-#                              logos - the charts too, with plotly; SKIPs without streamlit
+#                              logos, a logo press switching the look, the session-theme hook against
+#                              Streamlit's own theme code, the light / dark button - the charts too,
+#                              with plotly; SKIPs without streamlit
 #   fixture_run_outputs.py     (not a suite) a synthetic Outputs/ tree in codebase 1's formats
 ```
 
@@ -669,9 +711,9 @@ Everything works except the job itself: **Run Model** needs Databricks.
 ```
 web/
 ├── app.py                 the page list (st.navigation), the left-hand panel, the top bar, the header
-├── app.yml                Databricks App config (env vars from app resources; the lead theme)
+├── app.yml                Databricks App config (env vars from app resources; the deployment's theme, the menu)
 ├── requirements.txt
-├── .streamlit/config.toml the lead theme and no ⋮ menu, for a run on a laptop
+├── .streamlit/config.toml the deployment's theme and the menu (viewer; the page hides it), for a run on a laptop
 ├── themes/                haleon.toml, capgemini.toml - each company's Streamlit theme, light and dark
 ├── brand/                 the companies' logos (and white copies) for the side panel
 ├── assest/aommm.png       the AOMMM logo, top of the side panel (copy it in)
@@ -684,7 +726,7 @@ web/
 │   ├── config_editor.py   Model settings, the modelling types' settings, who may do what
 │   ├── app_functions.py   prior editor dialog, paste from Excel
 │   ├── runs.py            the run panel (status, cancel, live/complete job log, results, zip, reuse, note, rename, delete) and All recent runs
-│   ├── brand.py           which company leads the look, its accents, the logos (no theme logic elsewhere)
+│   ├── brand.py           each company's look: the deployment's, a viewer's choice by logo, the session-theme hook, the accents, the logos, the light / dark button
 │   ├── styles.py          the page's CSS: the top bar, the baseline, the markers, the fade-in
 │   ├── charts.py          the result charts: data from the output CSVs (pandas) + Plotly figures
 │   ├── pages/model_setup_page.py   the pages (one fragment each), the page list, reuse, Run Model
@@ -700,9 +742,9 @@ web/
 
 - **Pages**: the steps are pages in a left-hand panel instead of one long
   page.
-- **Look**: co-branded - the lead company's theme (Haleon by default,
-  Capgemini one setting away), AOMMM and both company logos in the side panel,
-  the cluster top right.
+- **Look**: co-branded - Haleon's theme by default, Capgemini's a logo press
+  away (per person, no redeploy), light or dark by a button; AOMMM and both
+  company logos in the side panel, the cluster top right.
 - **Run folders**: every run lives in `Secondary Modelling/<BMC>/<period>
   <modelling type>/<run name>/` with its inputs, outputs and note, and can be
   reused; the run a period's results were reported from is marked. The

@@ -118,7 +118,10 @@ def access():
     email = viewer_email()
 
     def named(key):
-        return bool(email) and email in (policy.get(key) or [])
+        # "all" (app_access.yaml: `<level>: all`) = everyone signed in has that
+        # level; it never lifts anyone above it (each level is asked apart)
+        people = policy.get(key) or []
+        return bool(email) and (email in people or "all" in people)
 
     full = named("full_access")
     config_full = full or named("config_full_access")

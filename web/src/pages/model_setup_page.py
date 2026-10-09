@@ -10,7 +10,7 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
-from src import codebase, page_state, projects
+from src import brand, codebase, page_state, projects
 from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
                                prepare_prior_table, read_file_bytes_as_table,
                                read_uploaded_file_as_table, render_prior_editor,
@@ -121,7 +121,7 @@ def render_cluster_status_controls():
     st.markdown(f'<span class="bridge-cluster bridge-cluster--{tone}" '
                 f'title="The cluster the model job runs on: {html.escape(str(state))}">'
                 f'<span class="bridge-cluster-dot" aria-hidden="true"></span>'
-                f"Cluster {html.escape(label)}</span>", unsafe_allow_html=True)
+                f"Cluster {html.escape(label)}</span>", unsafe_allow_html=True, width="content")
     requested = "cluster_start_requested"
     if state != "TERMINATED":
         ss[requested] = False
@@ -143,17 +143,20 @@ def render_cluster_status_controls():
                 st.toast(f"Unable to start the cluster: {e}", icon="⚠️")
     elif state == "TERMINATED":
         st.markdown('<span class="bridge-cluster-note">start requested</span>',
-                    unsafe_allow_html=True)
+                    unsafe_allow_html=True, width="content")
 
 
 def render_top_bar(greeting=""):
     """Top right on every page, where Streamlit's ⋮ menu was (it is hidden):
-    who is signed in, and the cluster with its Start button."""
+    who is signed in, the light / dark button, and the cluster with its Start
+    button."""
     with st.container(key="bridge_topbar", horizontal=True, vertical_alignment="center",
                       gap="small", width="content"):
         if greeting:
             st.markdown(f'<span class="bridge-hello" title="{html.escape(greeting)}">'
-                        f"{html.escape(greeting)}</span>", unsafe_allow_html=True)
+                        f"{html.escape(greeting)}</span>", unsafe_allow_html=True,
+                        width="content")
+        brand.render_theme_toggle()
         render_cluster_status_controls()
 
 

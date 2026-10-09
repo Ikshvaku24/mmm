@@ -19,6 +19,30 @@ needs no redeploy.
 
 ---
 
+## Update 11 - the light / dark button, each company's look by its logo, `all` in app_access.yaml (2026.10.09.3)
+
+| You asked | Now |
+|---|---|
+| 1. Keep the light / dark switch | A **☾ / ☀ button** sits top right on every page, between your name and the cluster. One press switches the page between light and dark - live: nothing on the pages is lost, and the browser remembers the choice for next time. It uses Streamlit's own light / dark setting (in the hidden ⋮ menu's Settings) out of sight, then redraws the page once so the charts follow |
+| 2. `all` in app_access.yaml works for everyone at that level - not above it | `config_advanced_access: all` (or `config_full_access: all`, or `- all` in the list) gives **that** level to everyone signed in - never a level above it: people named in a higher level keep theirs, nobody else is lifted. `all` in `mark_reported`, `edit_runs` or `delete_runs` means every level. Under `editable` / `advanced`, `all` opens every setting and `sampler: all` that section only (as before - now also as `ALL` or inside a list). Until now, `config_advanced_access: all` made the whole file unreadable - and an unreadable file fixes every setting and grants nobody any level |
+| 3. Click a company's logo to switch its theme - no redeploy | The **Haleon** and **Capgemini** logos at the foot of the left-hand panel are buttons. Press Capgemini's and the app turns Capgemini - colours, font, side panel, in light or dark - **for you only**, at once; press Haleon's to go back. The shown company is underlined. Your choice is remembered for you (by login e-mail) while the app runs; everyone else keeps the deployment's company (`app.yml`, Haleon). How: Streamlit sends each session its theme on every run; the app now fills that theme from the company file the person chose (`src/brand.py`) |
+
+**Codebase 1 2026.10.09.3** (needed - the app refuses an older one):
+`settings.app_access` takes `all` under a level and in the lists of levels
+(and, in any case or inside a list, under `editable` / `advanced`);
+`app_access.yaml` says how.
+
+**To get these changes:**
+1. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3).
+2. **Copy `web/` to the app's source folder and press Deploy.** `app.yml`'s
+   menu line is now `value: "viewer"` (was `minimal`): the ⋮ menu stays hidden
+   by the page, but the light / dark button uses its Settings. No new library,
+   no new job parameter.
+3. Open the app: ☾ top right; press Capgemini's logo at the foot of the
+   panel.
+
+---
+
 ## Update 10 - YAML modelling types, filters on Runs and results, deleting a run, the cluster top right, Haleon × Capgemini co-branding (2026.10.09.2)
 
 The eight points, in order:
@@ -31,7 +55,7 @@ The eight points, in order:
 | 4. ①'s choices carried over to Runs and results | Each filter follows ①: when the BMC, a quarter, a year or the type changes on ①, the filter takes the new value; a filter you change on Runs and results keeps yours until ① changes again. **See the runs and their results**, on ①, copies all of ①'s choices and opens the page. Nothing needs anything else: no BMC is needed for a year, no year for a BMC |
 | 5. A slight animation as it filters | The list redraws the moment a filter is chosen and fades in - a third of a second, rising a few pixels; the counter beside it says how many runs match and which filters are on. Anyone who switched animations off in their system settings gets none |
 | 6. Delete a run - for config_advanced_access and above, and only when app_access.yaml allows it | A run's panel has **🗑️ Delete**: type the run's name to enable it. It deletes the run's folder in ADLS - inputs, outputs, note - for good, records who and when in the period's `deleted.json`, and the name is never used again (an old link to the run opens a "deleted" notice). Never while the run runs, never the period's reported run (mark another one first). Who: `app_access.yaml` `delete_runs` - nobody unless it lists levels; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
-| 7. Start cluster top right, where the ⋮ is - and no ⋮ | The top-right corner of every page shows who is signed in and the cluster - a dot and a word (running, starting, stopped) - with **Start cluster** when it is stopped. Streamlit's ⋮ menu is gone (`client.toolbarMode = minimal`, and hidden by the page's CSS). Without it there is no switch for light and dark in the app: it follows each person's system setting |
+| 7. Start cluster top right, where the ⋮ is - and no ⋮ | The top-right corner of every page shows who is signed in and the cluster - a dot and a word (running, starting, stopped) - with **Start cluster** when it is stopped. Streamlit's ⋮ menu is gone (`client.toolbarMode = minimal`, and hidden by the page's CSS). Without it there is no switch for light and dark in the app: it follows each person's system setting. *(Update 11: the menu is `viewer` again - still hidden - and a ☾ / ☀ button top right switches light and dark)* |
 | 8. Co-branding: AOMMM in the side panel, and the two company themes | Below |
 
 **How the two company themes are kept** - my recommendation, and what is built:
@@ -43,7 +67,8 @@ The eight points, in order:
   as the marker of the page titles and of the current page. **Capgemini's theme**
   is complete and one setting away, for a Capgemini-led deployment: Capgemini
   Blue `#0070AD` and Vibrant Blue `#12ABDB` on white, a navy side panel, Ubuntu
-  as in Capgemini's template.
+  as in Capgemini's template. *(Update 11: anyone can now see it by pressing
+  Capgemini's logo - for themselves, no redeploy.)*
 - Mixing both palettes on one screen - a blue panel beside a green-and-black
   page - would look like two apps stitched together, with the brands
   competing. The usual co-branding rule is one host brand plus a partner
@@ -61,7 +86,8 @@ The eight points, in order:
   checks them).
 - **To switch the lead**: in `app.yml`, set `STREAMLIT_THEME_BASE` to
   `themes/capgemini.toml` and redeploy (on a laptop: `base` in
-  `.streamlit/config.toml`).
+  `.streamlit/config.toml`). Since Update 11 this picks only the look that
+  everyone starts with; each person can switch by pressing a logo.
 - The charts keep their validated, colour-blind-safe data colours and take
   the lead company's font.
 
@@ -583,10 +609,10 @@ client instead of logging in again for every file.
   year, and modelling type - each filter optional and independent, each
   following ① (Update 10). A run's panel can rename it, edit its note and
   delete it, as `app_access.yaml` allows.
-- **The top bar and the look.** Top right: who is signed in, and the cluster
-  with **Start cluster**. The lead company's theme - Haleon by default,
-  Capgemini one setting away - with both logos in the left-hand panel
-  (Update 10).
+- **The top bar and the look.** Top right: who is signed in, the light /
+  dark button and the cluster with **Start cluster**. Each company's theme -
+  Haleon for everyone by default; press a company's logo in the left-hand
+  panel to see the app in its look, just for you (Updates 10 and 11).
 - **Run panel, the BMC's runs, All recent runs.** Described under "2. Run
   Model button" above. The **job log** is `job_log.txt`, in the run's
   `Outputs/` in ADLS: everything the job printed. The job copies it there
@@ -728,12 +754,13 @@ permissions are the ones that count.
 
 Upload the **whole** `codebase1_hierarchical_mmm` folder to
 `/Workspace/Modelling/Backend/mmm_v5/`. Leave `mmm_v4` alone: the old job uses
-it. The app needs version **2026.10.09.2** or later: it refuses an older one
+it. The app needs version **2026.10.09.3** or later: it refuses an older one
 (2026.09.29.2 brought the run folders, 2026.09.30.1 `app_access.yaml` and the
 live job log, 2026.10.07.1 the period folders - the job's `run_group` - the
 four access levels and the standard-name CSVs, 2026.10.09.1 the modelling
 types' settings, `edit_runs` and the collinearity matrix, 2026.10.09.2
-`modelling_types.yaml` and `delete_runs`).
+`modelling_types.yaml` and `delete_runs`, 2026.10.09.3 `all` under an access
+level).
 
 For a later update, upload the whole folder again the same way, while no run
 is in progress. If only some files get replaced, the app's header warns that
@@ -807,8 +834,8 @@ why. Fix that before you create the app.
    | App telemetry | optional; `model-app` has none |
 
 4. Under **Resources** → **Add resource**, add one per `app.yml` entry with
-   `valueFrom` (the two with `value:` - the theme and the menu - are plain
-   settings). Each *resource key* must match the `valueFrom` name exactly. The secrets are in
+   `valueFrom` (the two with `value:` - the default company theme and the
+   menu - are plain settings). Each *resource key* must match the `valueFrom` name exactly. The secrets are in
    the scope `am03-mmm…`, or your own scope for a new token:
 
    | Resource key | Type | Points to | Permission |
@@ -845,8 +872,10 @@ On the app's page:
 
 Then open the app's URL.
 - The look is Haleon's (black and white, green bars), with AOMMM at the top of
-  the left-hand panel and the two company logos at its foot.
-- Under the page list on the left: *Backend: codebase 1 2026.10.09.2* - and, for the
+  the left-hand panel and the two company logos at its foot - press
+  Capgemini's to see its look (just for you). Top right: your name, ☾ / ☀
+  (light / dark) and the cluster.
+- Under the page list on the left: *Backend: codebase 1 2026.10.09.3* - and, for the
   people under `full_access` in `app_access.yaml`, *from the workspace
   `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
   codebase 1**. If it says codebase 1 could not be loaded, check two things:
@@ -916,7 +945,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (2072 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2089 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.
