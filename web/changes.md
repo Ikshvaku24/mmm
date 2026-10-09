@@ -19,6 +19,45 @@ needs no redeploy.
 
 ---
 
+## Update 9 - pages, collinearity, readable warnings, renaming runs, type settings (2026.10.09.1)
+
+The nine points from the team, in order:
+
+| You asked | Now |
+|---|---|
+| 1. Pages in a left-hand panel instead of one long page - and keep what was chosen when switching. Is Streamlit up to it, or React? | Streamlit does it natively (`st.navigation`), with no lag beyond an ordinary click - each page draws only its own section. The panel lists **① BMC, period and run · ② Input data · ③ Model settings · ④ Mapping and share files · ⑤ Prior file · ⑥ Run**, then **Runs and results**; a step gets ✅ once it is done. The backend version and the cluster sit under the list. Everything chosen on a page is still there after a visit to another: Streamlit forgets a widget it does not draw, so the app keeps the values itself (`src/page_state.py`); an upload box comes back empty - Streamlit's doing - and the file stays in use, named "(uploaded earlier)" with its own ✕. No React needed |
+| 2. No "Edit settings" switch | Opening ③ Model settings shows the settings at once |
+| 3. Rename a run and add a note after seeing its results | A run's panel has **📝 Edit note** (any time) and **✏️ Rename** (once it has finished). Renaming moves its folder where it sits (also in Results Reported / Archived); the old name is kept in its `run_request.json`, and in `renames.json`, so the Jobs API's record of the run - which keeps the name it ran under - still opens it (All recent runs shows *new name (was old name)*). A name another run had before can never be reused, so an old link never opens the wrong run. The note keeps every version in `run_request.json`; `note.txt` holds the latest. Who may: `edit_runs` in `app_access.yaml` - by default the person who started the run and full access |
+| 4. One button in the prior editor: Remove all, and a tick = keep | The first column is now **Keep**, ticked on every row. **Remove all** unticks them all - then tick the rows to keep and Save. (Untick one row to drop just that one.) Keep all is gone |
+| 5. Replace prior-vs-posterior with collinearity (heatmap) and VIF | The view **Collinearity**, per region: the condition number, the largest VIF, the worst variable and the verdict as tiles; a **heatmap** of the correlation between every pair of the model's columns (red = move together, blue = opposite, grey = unrelated; cells at \|r\| ≥ 0.8 carry their number; the 25 most correlated columns, or all; with or without seasonality and trend), the most correlated pairs as its table; each variable's **VIF** as a dot on a log scale with the 5 and 10 lines, and the VIF table (what explains each). Prior vs posterior is gone from the app (its file is still in the run's zip) |
+| 6. A warning said "1" but showed no variable | The warnings file names a variable only when the warning is about one; for the others the old table showed an empty row - and never what the warning SAID (that text lives in `warning_texts.csv`). Now each category shows its message first, and a warning about no single variable is listed as "(not about one variable)" |
+| 7. "174 variables" for one warning | That was 174 ROWS - one per variable × region. The table now counts **variables** once whatever the number of regions, with **regions** and **warnings** beside it; a chosen category lists each variable once, with the regions it was warned in |
+| 8. The aggregate R² on the fit chart | The tiles follow the chart: with **All regions** they are the **aggregate** - every region summed per date, one national series (codebase 1's `__aggregate__` row) - R² training and holdout, holdout MAPE and band coverage; with one region chosen, that region's own |
+| 9. Settings per modelling type (e.g. Primary with an intercept, Secondary without) | `modelling_types.csv` takes one column per setting - `model.include_intercept` now: Primary `true`, Secondary `false`, LTE blank (the team's config.yaml). Choosing a type in ① switches those settings at once (① says what changed), they become the base the Model settings page starts from and Reset returns to, and **the job applies them too**: config.yaml < the type's settings < what the modeller changed. Add a setting by adding a column; a blank cell sets nothing |
+
+**Codebase 1 2026.10.09.1** (needed - the app refuses an older one):
+- `modelling_types.csv`: the setting columns, read by
+  `settings.modelling_type_settings` (a column that is not a setting, a
+  setting the job sets itself, or a value the setting cannot take stops with
+  the cell named); `app_job` lays the type's settings between the team's
+  config.yaml and the run's own, prints them in the job log and records them in
+  `run_info.json`.
+- `app_access.yaml`: `edit_runs` (levels, and `submitter`).
+- `01_data/collinearity_matrix.csv`: the full correlation matrix of the
+  model's columns per region (the heatmap PNG's numbers, uncapped), for the
+  app's heatmap. Runs made before it show codebase 1's heatmap PNG instead.
+
+**To get these changes:**
+1. Check `modelling_types.csv` - add a column for any other setting a type
+   should fix - and `edit_runs` in `app_access.yaml`.
+2. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3).
+3. **Copy `web/` to the app's source folder and press Deploy** - it now has a
+   `views/` folder (one small file per page) and `src/page_state.py`. No new
+   library, no new job parameter.
+4. Open the app: the pages are in the left-hand panel.
+
+---
+
 ## Update 8 - period folders, the reported run, notes, four access levels (2026.10.07.1)
 
 Your 12 points, in order:
@@ -368,12 +407,13 @@ folder, `Secondary Modelling/<bmc_name>/<run_name>/`.
 | Sent the files straight to the job | First saves the datacube, the settings (a config file with the settings you may change - the job fills in the rest from the team's `config.yaml`) and the prior file (and mapping/share files) into the run's folder, and writes `run_request.json`. Then it starts the job. If nothing changed since the run you reused, it asks first |
 | A popup showed the run; closing it lost the run | A panel under **Run Model** shows the run and stays until you press **Dismiss**: the status every 5 seconds, **Cancel run**, the job log as it grows (and **Open in Databricks** for full access) |
 | The popup only knew Pending / Running / Success / Terminated | Also handles Queued, Failed and Internal error, and shows why a run failed |
-| After the run: a Download button | After the run: the run's zip, the complete **job log**, and the results as charts - fit, contributions, decomposition, prior vs posterior - with the convergence report and the warnings (Update 5) |
+| After the run: a Download button | After the run: the run's zip, the complete **job log**, and the results as charts - fit, contributions, decomposition, collinearity - with the convergence report and the warnings (Updates 5 and 9); a note and a new name can be added afterwards |
 
-A BMC's runs are listed in block ①, and **All recent runs**, at the bottom of
-the page, lists every run of the job: every BMC, runs started by other people
-or in other sessions, and runs from before the run folders. Click one (or type
-its job run ID) to open the same panel.
+A BMC's runs are listed on the **Runs and results** page (① says how many
+there are and links to it), and **All recent runs**, below them, lists every
+run of the job: every BMC, runs started by other people or in other sessions,
+and runs from before the run folders. Click one (or type its job run ID) to
+open the same panel.
 
 ### 3. ADLS upload (`src/files.py`, `src/projects.py`)
 
@@ -402,17 +442,22 @@ client instead of logging in again for every file.
 
 ## New in the app
 
-- **BMC and run (①).** Pick a BMC folder, or type a new name, and name the
-  run. The page says where it will be saved:
-  `Secondary Modelling/<BMC>/<run name>/`. Below: the BMC's runs, each with its
-  results, job log, zip and **Reuse inputs**.
+- **Pages.** Each step is a page in the left-hand panel, ① to ⑥, then **Runs
+  and results**; a done step gets ✅, and what was chosen on a page stays
+  chosen when you move to another (Update 9).
+- **BMC and run (①).** Pick a BMC folder, or type a new name, the period and
+  the modelling type, and name the run. The page says where it will be saved:
+  `Secondary Modelling/<BMC>/<period> <type>/<run name>/`, and how many runs
+  the BMC has, with a link to them on **Runs and results** - each with its
+  results, job log, zip, **Reuse inputs**, a note and a rename.
 - **Reuse a run.** Its datacube, settings and prior file (and mapping/share
-  files) are loaded, and each block says which run its file came from. Change
+  files) are loaded, and each page says which run its file came from. Change
   what you need and run it as a new run. If nothing changed, **Run Model** asks
   first.
 - **Model settings.** Edit codebase 1's `config.yaml` in the app.
-  - Switch on **Edit settings** to show them. Dropdowns list the allowed
-    values; hovering shows the help.
+  - The page shows them at once, starting from the team's `config.yaml` with
+    the modelling type's settings (`modelling_types.csv`) on top. Dropdowns
+    list the allowed values; hovering shows the help.
   - You can load, download or reset the file.
   - You see and change the settings `app_access.yaml` gives you; the rest
     are the team's. The job fills in the file paths and the run name.
@@ -421,7 +466,7 @@ client instead of logging in again for every file.
   - Choose the file; it is checked, and saved with the run.
 - **Prior file**, in 3 steps. The old app built its own `b0/B0` table; now
   codebase 1 builds the prior file.
-  1. **Generate.** Before you press it, the block says which case your files
+  1. **Generate.** Before you press it, the page says which case your files
      lead to:
 
      | Case | You gave | The means come from |
@@ -450,9 +495,10 @@ client instead of logging in again for every file.
      sits next to it. It is checked, and the run can start only once codebase 1
      says it is valid.
 
-  **Preview / Edit** has dropdown columns, **Paste cells from Excel**, **Fill a
-  column** and **Fill blanks with the defaults**. For why Ctrl+V straight onto
-  the grid can do nothing, see Update 2.
+  **Preview / Edit** has a **Keep** column (untick a row to drop it; **Remove
+  all** unticks every row), dropdown columns, **Paste cells from Excel**,
+  **Fill a column** and **Fill blanks with the defaults**. For why Ctrl+V
+  straight onto the grid can do nothing, see Update 2.
 - **Datacube check.**
   - It uses the column names from Model settings and never renames anything.
     The old check lower-cased the first 3 columns.
@@ -464,8 +510,8 @@ client instead of logging in again for every file.
   `Outputs/` in ADLS: everything the job printed. The job copies it there
   every 30 seconds while it runs, so the panel shows it live.
 - **Results.** Six views of a finished run - Fit, Contributions,
-  Decomposition, Prior vs posterior, Convergence, Warnings - each chart with
-  its numbers in a table underneath (Update 5).
+  Decomposition, Collinearity, Convergence, Warnings - each chart with
+  its numbers in a table underneath (Updates 5 and 9).
 
 ## Changes in the job notebook (`codebase1_hierarchical_mmm/demo.ipynb`)
 
@@ -600,10 +646,11 @@ permissions are the ones that count.
 
 Upload the **whole** `codebase1_hierarchical_mmm` folder to
 `/Workspace/Modelling/Backend/mmm_v5/`. Leave `mmm_v4` alone: the old job uses
-it. The app needs version **2026.10.07.1** or later: it refuses an older one
+it. The app needs version **2026.10.09.1** or later: it refuses an older one
 (2026.09.29.2 brought the run folders, 2026.09.30.1 `app_access.yaml` and the
 live job log, 2026.10.07.1 the period folders - the job's `run_group` - the
-four access levels and the standard-name CSVs).
+four access levels and the standard-name CSVs, 2026.10.09.1 the modelling
+types' settings, `edit_runs` and the collinearity matrix).
 
 For a later update, upload the whole folder again the same way, while no run
 is in progress. If only some files get replaced, the app's header warns that
@@ -711,7 +758,7 @@ On the app's page:
   do there.
 
 Then open the app's URL.
-- The header should say *Backend: codebase 1 2026.10.07.1* - and, for the
+- Under the page list on the left: *Backend: codebase 1 2026.10.09.1* - and, for the
   people under `full_access` in `app_access.yaml`, *from the workspace
   `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
   codebase 1**. If it says codebase 1 could not be loaded, check two things:
@@ -723,24 +770,26 @@ Then open the app's URL.
   change that ID.
 
 ### Every run
+The steps are pages in the left-hand panel; a step gets ✅ once it is done,
+and everything chosen on a page stays chosen when you move to another.
 1. **① BMC, period and run** - pick the BMC (full access may type a new one),
-   the From and To quarter and year, and the modelling type. Leave the run
-   name empty to have it named when you press Run Model, or type one; add a
-   **📝 note** (why this run, what changed). To start from an earlier run:
-   select it in the BMC's run list and press **Reuse inputs** - its datacube,
-   settings and prior (and mapping/share) files fill the blocks below, with
-   its BMC, period and type.
+   the From and To quarter and year, and the modelling type (its settings
+   switch with it). Leave the run name empty to have it named when you press
+   Run Model, or type one; add a **📝 note** (why this run, what changed). To
+   start from an earlier run: on **Runs and results**, select it and press
+   **Reuse inputs** - its datacube, settings and prior (and mapping/share)
+   files are loaded, with its BMC, period and type, and you land on ①.
 2. **② Input data** - choose the datacube (or keep the reused one). Only
    problems that would stop the run are listed.
-3. **③ Model settings** - switch on **Edit settings** and change what you
-   need (**Advanced options** for more, if your level has them), or **Load** a
-   `config.yaml`. Only the settings codebase 1's `app_access.yaml` opens for
-   you can change - a loaded config.yaml gives only those - and the rest keep
-   the team's values. The ✕ next to a loaded or reused config goes back to the
-   team's.
+3. **③ Model settings** - change what you need (**Advanced options** for
+   more, if your level has them), or **Load** a `config.yaml`. Only the
+   settings codebase 1's `app_access.yaml` opens for you can change - a loaded
+   config.yaml gives only those - and the rest keep the team's values (with
+   the modelling type's on top). The ✕ next to a loaded or reused config goes
+   back to them.
 4. **④ Mapping / share file** *(optional)* - choose each; it is checked.
 5. **⑤ Prior file**:
-   1. **Generate** - the block says beforehand which case (a-d) applies;
+   1. **Generate** - the page says beforehand which case (a-d) applies;
    2. for `feature_priors_national.csv` (pooling hierarchical) or
       `feature_priors_regional.csv` (pooling independent): **Download** it and
       fill in the blanks in Excel; or **Preview / Edit** it here, then **Use
@@ -753,11 +802,13 @@ Then open the app's URL.
    and starts the job. If nothing changed since the run you reused, it asks
    first. The run's panel stays on the page - queued / cluster pending /
    running, with the time - **Cancel run** stops it, **Dismiss** hides it.
-7. When the run ends, the same panel shows the results and the job log, and
+7. When the run ends, the same panel shows the results (fit, contributions,
+   decomposition, collinearity, convergence, warnings) and the job log, and
    **Download run (zip)** gives the inputs and the outputs in one file
-   (**Download trace.nc** gives the raw posterior on its own). Every
-   run stays in its BMC's list; **All recent runs**, at the bottom of the
-   page, also has runs from before the run folders.
+   (**Download trace.nc** gives the raw posterior on its own). **📝 Edit note**
+   and **✏️ Rename** record what you made of it. Every run stays on **Runs and
+   results**, in its BMC's list; **All recent runs**, below it, also has runs
+   from before the run folders.
 8. When a period's results are reported, open the run they came from and
    press **⭐ Mark as reported**: it moves to `Results Reported/`, the period's
    other runs to `Archived/`.
@@ -775,7 +826,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (1957 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2021 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.

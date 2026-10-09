@@ -9,16 +9,17 @@ from datetime import datetime, timedelta, timezone
 
 import pandas as pd
 import streamlit as st
-from src import codebase, projects
+from src import codebase, page_state, projects
 from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
                                prepare_prior_table, read_file_bytes_as_table,
                                read_uploaded_file_as_table, render_prior_editor,
                                show_prior_file_popup, show_prior_validation,
                                to_serial_index_table, validate_prior)
 from src.clusters import cluster_state, start_cluster
-from src.config_editor import (access, enforce_fixed, has_full_access, init_config_state,
-                               job_owned_keys, live_config, load_config,
-                               render_settings_section, role)
+from src.config_editor import (access, apply_modelling_type, config_valid, enforce_fixed,
+                               has_full_access, init_config_state, job_owned_keys,
+                               live_config, load_config, render_settings_section, role,
+                               set_type_base)
 from src.generate_prior import generate_prior
 from src.jobs import job_parameter_names_cached, run_model_job
 from src.runs import (fetch_run, fmt_seconds, job_params, job_state_label, local_time,
@@ -28,11 +29,16 @@ from src.validation import show_input_check, validate_input_data
 
 uuid = str(uuid.uuid4())
 
-# How the page stays smooth: every block below is an st.fragment, so a click
-# or an upload inside it refreshes that block only. A block refreshes the
-# WHOLE page (st.rerun()) only when it changed something another block reads
-# - the BMC or run name, a new datacube, a new prior file, a reused run - never
-# on ordinary clicks.
+# The app is PAGES (st.navigation, the left-hand panel - app.py): ① BMC,
+# period and run · ② input data · ③ model settings · ④ mapping and share files
+# · ⑤ prior file · ⑥ run · runs and results. Each page is one block below (an
+# st.fragment, so a click inside it refreshes that block only); everything a
+# block holds lives in the session, so it is all still there after a visit to
+# another page (src/page_state.py keeps the widgets' values, and an upload
+# box that comes back empty does not drop its file). A block refreshes the
+# whole page (st.rerun()) only when it changed something the page titles or
+# another block read - the BMC or run name, a new datacube, a new prior file,
+# a reused run - never on ordinary clicks.
 #
 # Where files go: nothing is uploaded block by block any more. Run Model saves
 # the datacube, the settings, the prior file (and mapping/share files) into
@@ -111,7 +117,7 @@ def render_cluster_status_controls():
         <style>
             .cluster-status-wrap {{
                 display: flex;
-                justify-content: flex-end;
+                justify-content: flex-start;
                 margin-bottom: 0.4rem;
             }}
             .cluster-status-radio {{
@@ -151,7 +157,7 @@ def render_cluster_status_controls():
             }}
             .cluster-start-note {{
                 display: flex;
-                justify-content: flex-end;
+                justify-content: flex-start;
                 font-size: 0.75rem;
                 color: #475569;
                 margin: 0.2rem 0 0.4rem 0;
@@ -174,25 +180,23 @@ def render_cluster_status_controls():
         start_requested_key, False
     )
     if show_start_button:
-        _, start_btn_col = st.columns([1, 1])
-        with start_btn_col:
-            if st.button(
-                "Start Cluster",
-                type="secondary",
-                key="start_cluster_button",
-                use_container_width=False,
-            ):
-                st.session_state[start_requested_key] = True
-                try:
-                    status_code = start_cluster()
-                    if status_code in {200, 202}:
-                        st.success(
-                            "Cluster start requested. Status refreshes every 5 seconds."
-                        )
-                    else:
-                        st.error(f"Failed to start cluster. Status code: {status_code}")
-                except Exception as e:
-                    st.error(f"Unable to start cluster: {e}")
+        if st.button(
+            "Start Cluster",
+            type="secondary",
+            key="start_cluster_button",
+            use_container_width=False,
+        ):
+            st.session_state[start_requested_key] = True
+            try:
+                status_code = start_cluster()
+                if status_code in {200, 202}:
+                    st.success(
+                        "Cluster start requested. Status refreshes every 5 seconds."
+                    )
+                else:
+                    st.error(f"Failed to start cluster. Status code: {status_code}")
+            except Exception as e:
+                st.error(f"Unable to start cluster: {e}")
     elif cluster_state == "TERMINATED":
         st.markdown(
             '<div class="cluster-start-note">Start request submitted.</div>',
@@ -231,8 +235,86 @@ def render_backend_status():
         st.rerun()
 
 
+def render_sidebar_status():
+    """Under the page list: the backend (codebase 1's version - and, for full
+    access, its folder, the worker processes and Reload) and the cluster."""
+    render_backend_status()
+    render_cluster_status_controls()
+
+
 # --------------------------------------------------------------------------- #
-# 1. BMC, period and run - where the run is saved, and the BMC's earlier runs
+# the pages (st.navigation in app.py; each file in views/ calls one page_*)
+# --------------------------------------------------------------------------- #
+PAGES = {"project": "views/1_project.py", "data": "views/2_data.py",
+         "settings": "views/3_settings.py", "side": "views/4_mapping_share.py",
+         "prior": "views/5_prior.py", "run": "views/6_run.py",
+         "results": "views/7_results.py"}
+PAGE_TITLES = {"project": "① BMC, period and run", "data": "② Input data",
+               "settings": "③ Model settings", "side": "④ Mapping and share files",
+               "prior": "⑤ Prior file", "run": "⑥ Run", "results": "Runs and results"}
+
+
+def page_done():
+    """{page: done?} - the ✅ in the page list."""
+    ss = st.session_state
+    side = [k for k in ("mapping", "share") if ss.get(f"{k}_bytes")]
+    return {"project": _run_target()["problem"] is None,
+            "data": ss.get("datacube_bytes") is not None and bool(ss.get("datacube_ok")),
+            "settings": config_valid(),
+            "side": bool(side) and all(ss.get(f"{k}_ok") for k in side),
+            "prior": _prior_is_valid()}
+
+
+def navigation():
+    """The pages for st.navigation, grouped: the new run's steps, then the
+    runs and their results. A step's title carries ✅ once it is done."""
+    done = page_done()
+
+    def page(key, default=False, icon=None):
+        return st.Page(PAGES[key], title=PAGE_TITLES[key] + (" ✅" if done.get(key) else ""),
+                       icon=icon, default=default)
+
+    return {"New run": [page("project", default=True), page("data"), page("settings"),
+                        page("side"), page("prior"), page("run")],
+            "Results": [page("results", icon=":material/insights:")]}
+
+
+def page_project():
+    _project_fragment()
+
+
+def page_data():
+    _data_fragment()
+
+
+def page_settings():
+    render_settings_section()
+
+
+def page_side_files():
+    _pre_model_fragment()
+
+
+def page_prior():
+    _prior_fragment()
+
+
+def page_run():
+    render_run_section()
+
+
+def page_results():
+    st.markdown("### Runs and results")
+    st.caption("Every run of a BMC - each with its results, job log and zip; reuse its "
+               "inputs for a new run, mark the run the results were reported from, rename "
+               "it or add a note. Below them: every recent run of the model job.")
+    _results_fragment()
+    st.divider()
+    render_all_runs_section()
+
+
+# --------------------------------------------------------------------------- #
+# 1. BMC, period and run - where the run is saved
 # --------------------------------------------------------------------------- #
 QUARTERS = (1, 2, 3, 4)
 ALL_GROUPS = "All periods and types"
@@ -419,8 +501,8 @@ def _project_fragment():
         st.markdown("### ① BMC, period and run" + ("" if target["problem"] else " ✅"))
         st.caption("Every run is saved in its own folder, Secondary Modelling/<BMC>/<period> "
                    "<modelling type>/<run name>/, with the inputs it used and its outputs. "
-                   "Pick a BMC to see its runs - reuse one's inputs to change them and run "
-                   "again, or mark the run the results were reported from.")
+                   "The BMC's runs - to reuse one's inputs, read its results or mark the "
+                   "reported one - are on the Runs and results page.")
         options, list_problem = _bmc_options(names)
         current = ss.get("bmc_name")
         if current and current not in options:
@@ -434,6 +516,17 @@ def _project_fragment():
                              "The team's BMC names (codebase 1's bmc_names.csv) and the BMCs "
                              "that already have runs; the team adds new ones."))
         _render_period_row(names)
+        # a modelling type brings its own settings (codebase 1's
+        # modelling_types.csv) - switched the moment the type is chosen
+        kind = ss.get("modelling_type")
+        if kind != ss.get("_type_applied"):
+            ss["type_note"] = (kind, apply_modelling_type(kind))
+        type_note = ss.get("type_note")
+        if type_note and type_note[0] == kind and type_note[1]:
+            st.info(f"Modelling type **{kind or '(none)'}**: the model settings switched - "
+                    + "; ".join(f"`{name}` {before} → {after}"
+                                for name, before, after in type_note[1])
+                    + " (codebase 1's modelling_types.csv).")
         name_col, note_col = st.columns([5, 1.3], vertical_alignment="bottom")
         with name_col:
             st.text_input("Run name (optional)", key="new_run_name",
@@ -465,9 +558,48 @@ def _project_fragment():
         for note in ss.pop("reuse_notes", None) or []:
             st.info(note)
         bmc = target["bmc"]
-        if not bmc or projects.bmc_problem(bmc):
-            return
-        _render_bmc_runs(bmc, target["group"])
+        if bmc and not projects.bmc_problem(bmc):
+            _render_runs_summary(bmc, target["group"])
+
+
+def _render_runs_summary(bmc, group):
+    """One line about the BMC's runs, and the way to them."""
+    rows, _errors = _bmc_runs(bmc)
+    if not rows:
+        st.caption(f"No runs in {bmc} yet - this run will be its first.")
+        return
+    in_group = [r for r in rows if group and r["group"] == group]
+    reported = next((r for r in in_group if r["reported"]), None)
+    st.caption(f"**{bmc}** has {len(rows)} run{'s' if len(rows) != 1 else ''}"
+               + (f", {len(in_group)} of them in {group}" if group else "")
+               + (f" - {projects.REPORTED_BADGE}: **{reported['run']}**" if reported else "")
+               + ".")
+    st.page_link(PAGES["results"], label="See the runs and their results",
+                 icon=":material/insights:")
+
+
+@st.fragment
+def _results_fragment():
+    """The BMC's runs - the BMC of ① until another is picked here."""
+    ss = st.session_state
+    options, problem = _bmc_options(_standard_names())
+    chosen = ss.get("bmc_name")
+    if ss.get("_results_follow") != chosen:
+        ss["_results_follow"] = chosen
+        if chosen:
+            ss["results_bmc"] = chosen
+    current = ss.get("results_bmc")
+    if current and current not in options:
+        options = [current] + options
+    st.selectbox("BMC", options, index=None, key="results_bmc", placeholder="Choose a BMC",
+                 help="The BMC chosen in ① - or any other, to look at its runs.")
+    if problem:
+        st.warning(problem)
+    bmc = ss.get("results_bmc")
+    if not bmc or projects.bmc_problem(bmc):
+        st.caption("Choose a BMC to see its runs.")
+        return
+    _render_bmc_runs(bmc, _chosen_group()[0] if bmc == ss.get("bmc_name") else "")
 
 
 def _group_sort_key(name):
@@ -553,20 +685,38 @@ def _render_bmc_runs(bmc, group=""):
         "reused from": r["source"],
         "changed": ", ".join(r["changed"]),
     } for r, seconds in zip(shown, times)])
+    table_key = f"bmc_runs_table_{_sha(f'{bmc}|{shown_group}'.encode())[:8]}"
     event = st.dataframe(table, use_container_width=True, hide_index=True,
-                         on_select="rerun", selection_mode="single-row",
-                         key=f"bmc_runs_table_{_sha(f'{bmc}|{shown_group}'.encode())[:8]}",
+                         on_select="rerun", selection_mode="single-row", key=table_key,
                          column_config={"note": st.column_config.TextColumn(
                              "note", help="The modeller's note - why the run was made, what "
                                           "changed. Open the run to read all of it.")})
     st.caption("Run time = the notebook's own time (not the time queued or starting the "
                "cluster).")
     picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])
-    if not picked:
+    if page_state.emptied(table_key, picked):
+        ss.pop("results_selected", None)          # the person cleared the selection
+    if picked:
+        sel = shown[picked[0]]
+        ss["results_selected"] = {"bmc": bmc, "group": sel["group"], "run": sel["run"],
+                                  "job_run_id": sel["job_run_id"]}
+    # the run open before the page was left stays open on the way back
+    held = ss.get("results_selected") or {}
+    chosen = next((r for r in shown if held.get("bmc") == bmc and r["run"] == held.get("run")
+                   and r["group"] == str(held.get("group") or "")), None)
+    if chosen is None:
         st.caption("Select a run to see its results, job log and zip - to reuse its inputs, "
-                   "or to mark it as the reported run.")
+                   "mark it as the reported run, rename it or add a note.")
         return
-    chosen = shown[picked[0]]
+    if not picked:
+        left, right = st.columns([6, 1], vertical_alignment="center")
+        with left:
+            st.caption(f"Showing **{chosen['run']}** - opened before; select another row "
+                       "to switch.")
+        with right:
+            if st.button("Close", key="results_close", use_container_width=True):
+                ss.pop("results_selected", None)
+                st.rerun()
     render_run_panel(projects.make_ref(chosen["job_run_id"], bmc, chosen["run"], chosen["group"]),
                      "bmc", on_reuse=reuse_run)
 
@@ -636,7 +786,14 @@ def reuse_run(ref):
                  + (f" ({'; '.join(errors.values())})" if errors else "") + ".")
         return
     notes = []
-    # the settings first: the datacube is read with their column names
+    # the settings first: the datacube is read with their column names - and
+    # under the reused run's modelling type, whose settings are the base its
+    # config.yaml was laid over (as the job did)
+    group = projects.ref_group(ref) if projects.has_folder(ref) else ""
+    parts = projects.parse_group(group) if group else None
+    if parts:
+        set_type_base(parts["modelling_type"])
+    ss.pop("type_note", None)               # the reused run's settings, not a switch
     if "config_file" in got:
         parsed = codebase.parse_config_yaml(
             got["config_file"][1].decode("utf-8-sig", errors="replace"),
@@ -670,9 +827,7 @@ def reuse_run(ref):
             _clear_side(kind)
     _remember_source(ref, label, note=request.get("note"))
     if projects.has_folder(ref):
-        group = projects.ref_group(ref)
         ss["_pending_bmc_name"] = ref["bmc"]
-        parts = projects.parse_group(group) if group else None
         if parts:                           # the same period and type
             ss.update(_pending_period_start_y=parts["start_year"],
                       _pending_period_start_q=parts["start_quarter"],
@@ -688,10 +843,10 @@ def reuse_run(ref):
     ss.pop("gen_result", None)              # a generated file belongs to other inputs
     notes.insert(0, f"Loaded the inputs of **{label}** - datacube, settings, prior file"
                  + ("".join(f", {k} file" for k in ("mapping", "share") if f"{k}_file" in got))
-                 + ". Change what you need below, then Run Model saves them as a new run"
-                 + " - and say what you changed in its 📝 note.")
+                 + ". Change what you need on the pages, then Run Model saves them as a "
+                   "new run - and say what you changed in its 📝 note.")
     ss["reuse_notes"] = notes
-    st.rerun()
+    st.switch_page(PAGES["project"])        # where the reused BMC, period and type show
 
 
 # --------------------------------------------------------------------------- #
@@ -738,19 +893,34 @@ def _reset_datacube():
         st.session_state.pop(key, None)
 
 
+def _refresh_datacube(cfg):
+    """Read the datacube again when a setting it is read with (a column name,
+    the sheet, the date format) changed - on any page. True when it did."""
+    ss = st.session_state
+    if ss.get("datacube_bytes") is None:
+        return False
+    if ss.get("datacube_key") == _datacube_key(ss["datacube_bytes"], cfg):
+        return False
+    _load_datacube(ss["datacube_bytes"], ss["datacube_name"], cfg,
+                   origin=ss.get("datacube_origin") or "upload")
+    return True
+
+
 @st.fragment
 def _data_fragment():
     ss = st.session_state
     with st.container(border=True):
         st.markdown("### ② Input data" + (" ✅" if ss.get("datacube_ok") else ""))
+        upload_key = f"input_data_file_{ss.get('datacube_uploader_version', 0)}"
         uploaded = st.file_uploader(
             "Choose input data file",
             type=["xlsx", "csv"],
-            key=f"input_data_file_{ss.get('datacube_uploader_version', 0)}",
+            key=upload_key,
             help="The datacube: one row per region x date, with the date, region, KPI "
                  "and feature columns named in Model settings (run.date_col / "
                  "region_col / dv_col).",
         )
+        removed = page_state.emptied(upload_key, uploaded)
         cfg = live_config() or {}
         if uploaded is not None:
             data = uploaded.getvalue()
@@ -759,21 +929,21 @@ def _data_fragment():
                 _load_datacube(data, uploaded.name, cfg, origin="upload")
                 ss["datacube_upload_sig"] = signature
                 st.rerun()                # templates, generation and priors use it
-        elif ss.get("datacube_origin") == "upload":
+        elif removed and ss.get("datacube_origin") == "upload":
             _reset_datacube()
             st.rerun()                    # the other blocks forget the datacube too
         if ss.get("datacube_bytes") is None:
-            st.caption("Upload the datacube - or reuse a run's inputs in ①.")
+            st.caption("Upload the datacube - or reuse a run's inputs (Runs and results).")
             return
-        if ss.get("datacube_key") != _datacube_key(ss["datacube_bytes"], cfg):
-            # a column name or the sheet changed in Model settings: read it again
-            _load_datacube(ss["datacube_bytes"], ss["datacube_name"], cfg,
-                           origin=ss.get("datacube_origin") or "upload")
-            st.rerun()
+        if _refresh_datacube(cfg):
+            st.rerun()                    # a column name or the sheet changed in Model settings
 
         origin = ss.get("datacube_origin")
-        if origin and origin != "upload":
-            if file_chip(f"Using **{ss.get('datacube_name')}** from {origin}. Upload a file "
+        # a file from a reused run - or one uploaded before this page was left,
+        # whose box now comes back empty - is named here, with its own ✕
+        if origin and (origin != "upload" or uploaded is None):
+            where = f"from {origin}" if origin != "upload" else "(uploaded earlier)"
+            if file_chip(f"Using **{ss.get('datacube_name')}** {where}. Upload a file "
                          "above to replace it.", "remove_datacube",
                          "Remove this datacube."):
                 _reset_datacube()
@@ -874,15 +1044,16 @@ def _render_side_file(kind, df, cfg):
                                 + ("Leave vendor_variable blank on rows you do not map."
                                    if kind == "mapping" else
                                    "Delete the rows you have no share for."))
-    uploaded = st.file_uploader(f"Choose {title.lower()}", type=["csv", "xlsx"],
-                                key=f"{kind}_file_{ss.get(f'{kind}_uploader_version', 0)}")
+    upload_key = f"{kind}_file_{ss.get(f'{kind}_uploader_version', 0)}"
+    uploaded = st.file_uploader(f"Choose {title.lower()}", type=["csv", "xlsx"], key=upload_key)
+    removed = page_state.emptied(upload_key, uploaded)
     if uploaded is not None:
         data = uploaded.getvalue()
         signature = (uploaded.name, _sha(data))
         if ss.get(f"{kind}_upload_sig") != signature:
             _set_side(kind, data, uploaded.name, "upload")
             ss[f"{kind}_upload_sig"] = signature
-    elif ss.get(f"{kind}_origin") == "upload":
+    elif removed and ss.get(f"{kind}_origin") == "upload":
         if _clear_side(kind):
             st.rerun()                    # the case preview and the checklist change
     if not ss.get(f"{kind}_bytes"):
@@ -891,8 +1062,9 @@ def _render_side_file(kind, df, cfg):
         st.rerun()                        # the case preview and the checklist change
     outcome = ss[f"{kind}_check"][1]
     origin = ss.get(f"{kind}_origin")
-    if origin and origin != "upload":
-        if file_chip(f"Using **{ss.get(f'{kind}_name')}** from {origin}.", f"remove_{kind}",
+    if origin and (origin != "upload" or uploaded is None):
+        where = f"from {origin}" if origin != "upload" else "(uploaded earlier)"
+        if file_chip(f"Using **{ss.get(f'{kind}_name')}** {where}.", f"remove_{kind}",
                      f"Remove this {title.lower()} - run without one."):
             _clear_side(kind)
             st.rerun()
@@ -918,9 +1090,9 @@ def _pre_model_fragment():
     df = st.session_state.get("datacube_df")
     with st.container(border=True):
         st.markdown("### ④ Mapping and share files (optional)")
-        st.caption("Inputs to codebase 1's prior generator (the Prior file block below "
-                   "says which case they lead to). Without either, it writes a blank "
-                   "template for you to fill in.")
+        st.caption("Inputs to codebase 1's prior generator (the ⑤ Prior file page says "
+                   "which case they lead to). Without either, it writes a blank template "
+                   "for you to fill in.")
         left, right = st.columns(2, gap="large")
         with left:
             _render_side_file("mapping", df, cfg)
@@ -1186,7 +1358,8 @@ def _render_fill_step(cfg):
     if rows:
         with st.expander(f"Warnings from the generator ({len(rows)})"):
             docs = result.get("warning_docs") or {}
-            render_warnings_table(pd.DataFrame(rows), lambda slug: docs.get(slug), key="gen")
+            render_warnings_table(pd.DataFrame(rows), lambda slug: docs.get(slug), key="gen",
+                                  texts=pd.DataFrame(result.get("warning_texts") or []))
     if outcome.log:
         with st.expander("Log"):
             with st.container(height=300):
@@ -1214,27 +1387,33 @@ def _prior_fragment():
             _render_fill_step(cfg)
         st.markdown("#### 3 · Your prior file")
         st.caption("The file you filled in (CSV or Excel), or a prior file from an earlier "
-                   "run - or reuse a run's inputs in ①. It is saved in the run's folder "
-                   "when you press Run Model.")
+                   "run - or reuse a run's inputs (Runs and results). It is saved in the "
+                   "run's folder when you press Run Model.")
         up_col, edit_col = st.columns([3, 1], vertical_alignment="bottom")
         with up_col:
+            upload_key = f"prior_file_{ss.get('prior_uploader_version', 0)}"
             prior_file = st.file_uploader(
                 "Choose prior file",
                 type=["csv", "xlsx"],
-                key=f"prior_file_{ss.get('prior_uploader_version', 0)}",
+                key=upload_key,
             )
+            removed = page_state.emptied(upload_key, prior_file)
         with edit_col:
             edit_clicked = st.button("Preview / Edit", key="prior_preview_edit",
                                      use_container_width=True,
                                      disabled=ss.get("prior_working_table") is None,
                                      help="See the table, edit it, paste from Excel, "
                                           "download it.")
-        handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup)
+        handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup,
+                                  removed=removed)
         if edit_clicked:
             show_prior_file_popup()
 
 
-def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup):
+def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prior_file_popup,
+                              removed=True):
+    """`removed`: the upload box was just emptied by its ✕ (not merely drawn
+    empty again after a visit to another page)."""
     ss = st.session_state
     if prior_file:
         prior_table, prior_error = read_uploaded_file_as_table(prior_file)
@@ -1245,7 +1424,8 @@ def handle_prior_file_section(prior_file, read_uploaded_file_as_table, show_prio
             st.rerun()                    # the Run checklist re-checks against it
         if prior_error:
             st.toast(f"Error: {prior_error}", icon="🚨")
-    elif ss.get("prior_origin") == "upload" and ss.get("prior_working_table") is not None:
+    elif (removed and ss.get("prior_origin") == "upload"
+          and ss.get("prior_working_table") is not None):
         _clear_prior()                    # its file was taken out of the upload box (✕)
         st.rerun()
     table = ss.get("prior_working_table")
@@ -1314,14 +1494,23 @@ def _job_parameters():
 
 
 def _readiness():
+    """The Run checklist - everything checked again here, whichever pages
+    were opened: the datacube is re-read if Model settings changed how it is
+    read, the mapping/share files re-checked against it, and the settings
+    validated (cached by content, so this is quick)."""
     ss = st.session_state
+    cfg = live_config() or {}
+    _refresh_datacube(cfg)
+    for kind in ("mapping", "share"):
+        if ss.get(f"{kind}_bytes"):
+            _check_side(kind, ss.get("datacube_df"), cfg)
     target = _run_target()
     ready = {"BMC, period and run name": (target["problem"] is None,
                                           target["problem"] or _target_path(target))}
     ready["Input data checked"] = (ss.get("datacube_bytes") is not None
                                    and bool(ss.get("datacube_ok")),
                                    ss.get("datacube_name", ""))
-    ready["Model settings valid"] = (bool(ss.get("cfg_valid")), "")
+    ready["Model settings valid"] = (config_valid(), "")
     has_prior = ss.get("prior_working_table") is not None
     ready["Prior file valid"] = (_prior_is_valid(),
                                  ss.get("prior_effective_name", "") if has_prior else "")
@@ -1530,25 +1719,3 @@ def render_all_runs_section():
     """Every recent run of the job (all BMCs, and runs from before the run
     folders), each with its panel and "Reuse inputs"."""
     render_runs_section(on_reuse=reuse_run)
-
-
-def render_input_upload_section():
-    """The header, then the BMC and run, the input data, Model settings, the
-    mapping/share files and the prior file - each block a fragment."""
-    init_config_state()
-    with st.container(border=True):
-        header_left, header_right = st.columns([3, 1])
-        with header_left:
-            st.markdown("### Model Setup")
-            st.caption("① choose the BMC, the period and the modelling type · ② datacube · "
-                       "③ settings · ④ mapping/share files · ⑤ prior file · ⑥ run. A run's "
-                       "inputs can be reused from any earlier run.")
-            render_backend_status()
-        with header_right:
-            render_cluster_status_controls()
-
-    _project_fragment()
-    _data_fragment()
-    render_settings_section()
-    _pre_model_fragment()
-    _prior_fragment()

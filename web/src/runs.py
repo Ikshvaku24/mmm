@@ -12,11 +12,14 @@ run time is the NOTEBOOK's time only (the Jobs API's execution time), never
 the queue or the cluster start. When it finishes it shows the notebook's real
 error with its full traceback, or the codebase version that ran; the run's
 zip (its inputs AND its outputs); the complete job log; and the results as
-charts (src/charts.py): fit, contributions (by pillar, each opened with its
-+), decomposition, prior vs posterior - plus the convergence report and the
-warnings, picked with a row of buttons. The modeller's note is shown with the
-run, and a run the results were reported from carries its badge; "Mark as
-reported" (app_access.yaml `mark_reported`) makes a finished run that. "Reuse
+charts (src/charts.py): fit (the aggregate's R², or the chosen region's),
+contributions (by pillar, each opened with its +), decomposition,
+collinearity (the design's correlation heatmap and its VIFs) - plus the
+convergence report and the warnings (each variable counted once, whatever the
+number of regions), picked with a row of buttons. The modeller's note is shown
+with the run - and, for app_access.yaml `edit_runs`, it can be edited and the
+run renamed afterwards; a run the results were reported from carries its
+badge, and "Mark as reported" (`mark_reported`) makes a finished run that. "Reuse
 inputs" hands the run to the page, which loads its datacube, settings and
 prior (and mapping/share) files to edit and run again. "Open in Databricks" is
 for the people with full access in app_access.yaml; everyone else reads the
@@ -58,8 +61,9 @@ from datetime import datetime, timedelta, timezone
 import pandas as pd
 import streamlit as st
 
-from src import charts, perf, projects
-from src.config_editor import has_full_access, may_mark_reported, viewer_email
+from src import charts, page_state, perf, projects
+from src.config_editor import (has_full_access, may_edit_run, may_mark_reported,
+                               viewer_email)
 from src.files import download_from_adls, is_not_found, list_tree_meta
 from src.jobs import cancel_run, get_run_output, get_run_status, list_runs
 
@@ -99,17 +103,20 @@ ZIP_CACHE_BYTES = int(float(os.environ.get("BRIDGE_ZIP_CACHE_MB", "2048")) * 2 *
 _BUILD_LOCKS = {}
 _BUILD_GUARD = threading.Lock()
 
-RESULT_VIEWS = ("Fit", "Contributions", "Decomposition", "Prior vs posterior",
+RESULT_VIEWS = ("Fit", "Contributions", "Decomposition", "Collinearity",
                 "Convergence", "Warnings")
-CHART_VIEWS = {"Fit", "Contributions", "Decomposition", "Prior vs posterior"}
+CHART_VIEWS = {"Fit", "Contributions", "Decomposition", "Collinearity"}
 RESULT_FILES = {
     "fit": "04_fit/fit_metrics.csv",
     "avp": "04_fit/actual_vs_predicted.csv",
     "summary": "05_contributions/contribution_summary.csv",
     "timeseries": "05_contributions/contribution_timeseries.csv",
-    "contraction": "02_convergence/prior_posterior_contraction.csv",
+    "collin_matrix": "01_data/collinearity_matrix.csv",
+    "collin_vif": "01_data/collinearity_vif.csv",
+    "collin_summary": "01_data/collinearity_summary.csv",
     "convergence": "02_convergence/convergence_report.txt",
     "warnings": "00_warnings/all_warnings.csv",
+    "warning_texts": "00_warnings/warning_texts.csv",
 }
 
 
@@ -441,7 +448,9 @@ def _forget_files(ref):
 def render_run_panel(ref, where, on_reuse=None):
     """The panel for one run. `where` is 'current' (the run just started here,
     dismissable), 'bmc' (picked in the BMC's run list) or 'history'.
-    `on_reuse(ref)`, when given, adds a "Reuse inputs" button."""
+    `on_reuse(ref)`, when given, adds a "Reuse inputs" button. A ref with a
+    run's old name (it was renamed since) opens the run under its new one."""
+    ref = projects.resolve_ref(ref)
     run = fetch_run(ref.get("job_run_id"))
     if _known(run) and not is_done(run):
         _live_panel(ref, where, on_reuse)
@@ -529,6 +538,7 @@ def _panel_body(ref, where, run, on_reuse):
                                                      "its BMC's run list."):
                 st.session_state.pop("current_run", None)
                 st.rerun()
+        _render_edit_controls(ref, where, running, request)
         if not running and _succeeded(run, info):
             _render_mark_reported(ref, where, reported)
 
@@ -548,6 +558,64 @@ def _panel_body(ref, where, run, on_reuse):
         _render_job_log(ref, where, expanded=not succeeded)
         if succeeded:
             _render_results(ref, where)
+
+
+def _follow_rename(ref, new):
+    """Point the page's remembered runs (the current run, the run open in
+    the results) at the new name."""
+    ss = st.session_state
+    for key in ("current_run", "results_selected"):
+        held = ss.get(key)
+        if (held and held.get("bmc") == ref.get("bmc") and held.get("run") == ref.get("run")
+                and str(held.get("group") or "") == projects.ref_group(ref)):
+            ss[key] = dict(held, run=new)
+
+
+def _render_edit_controls(ref, where, running, request):
+    """📝 Note (any time) and ✏️ Rename (once the run has finished) - for the
+    people app_access.yaml `edit_runs` names (by default the run's author and
+    full_access)."""
+    if not projects.has_folder(ref) or not may_edit_run(request):
+        return
+    key = projects.ref_key(ref)
+    group = projects.ref_group(ref)
+    note_col, name_col, _rest = st.columns([1, 1, 3])
+    with note_col:
+        with st.popover("📝 Edit note",
+                        help="Why the run was made - and, now that you have seen its "
+                             "results, what happened. Saved in the run's folder "
+                             "(run_request.json keeps every version, note.txt the "
+                             "latest)."):
+            text = st.text_area("Note", value=request.get("note", ""),
+                                key=f"note_text_{where}_{key}", max_chars=projects.NOTE_MAX,
+                                height=140)
+            if st.button("Save note", key=f"note_save_{where}_{key}", type="primary"):
+                try:
+                    projects.update_note(ref["bmc"], group, ref["run"], text,
+                                         user=viewer_email())
+                except Exception as e:  # noqa: BLE001 - shown, the user can try again
+                    st.error(f"Could not save the note: {e}")
+                    return
+                st.toast("Note saved.", icon="📝")
+                st.rerun()
+    with name_col:
+        with st.popover("✏️ Rename", disabled=running,
+                        help="Give the run a name that says what it is (e.g. 'mid model "
+                             "result'). Its folder is renamed; the old name is kept in its "
+                             "run_request.json. Not while it runs."):
+            new = st.text_input("New name", value=ref["run"], key=f"rename_text_{where}_{key}")
+            if st.button("Rename", key=f"rename_save_{where}_{key}", type="primary"):
+                try:
+                    new = projects.rename_run(ref["bmc"], group, ref["run"], new,
+                                              user=viewer_email(), running=running)
+                except Exception as e:  # noqa: BLE001 - shown, the user can try again
+                    st.error(f"Could not rename it: {e}")
+                    return
+                _LISTINGS.invalidate()
+                _forget_files(ref)
+                _follow_rename(ref, new)
+                st.toast(f"Renamed to {new}.", icon="✏️")
+                st.rerun()
 
 
 def _succeeded(run, info):
@@ -923,8 +991,8 @@ def _render_results(ref, where):
         _view_contributions(ref, tag, mode, plotted)
     elif view == "Decomposition":
         _view_decomposition(ref, tag, mode, plotted)
-    elif view == "Prior vs posterior":
-        _view_prior_posterior(ref, tag, mode, plotted)
+    elif view == "Collinearity":
+        _view_collinearity(ref, tag, mode, plotted)
     elif view == "Convergence":
         _view_convergence(ref, tag)
     else:
@@ -932,24 +1000,28 @@ def _render_results(ref, where):
         if table is None:
             st.info(problem)
             return
+        texts, _problem = read_run_frame(ref, RESULT_FILES["warning_texts"])
         render_warnings_table(table.fillna(""),
                               lambda slug: read_run_file(ref, f"00_warnings/{slug}.md")[0],
-                              key=tag)
+                              key=tag, texts=texts)
 
 
 def _view_fit(ref, tag, mode, plotted):
-    fit, problem = read_run_frame(ref, RESULT_FILES["fit"])
+    fit, fit_problem = read_run_frame(ref, RESULT_FILES["fit"])
+    avp, problem = read_run_frame(ref, RESULT_FILES["avp"])
+    regions = charts.fit_regions(avp) if avp is not None else [charts.ALL]
+    region = st.selectbox("Region", regions, key=f"fit_region_{tag}",
+                          help="All regions = the aggregate: every region summed per date, "
+                               "one national series. The numbers below follow the choice.")
     if fit is None:
-        st.info(problem)
+        st.info(fit_problem)
     else:
-        tiles = charts.fit_tiles(fit)
+        tiles = charts.fit_tiles(fit, region)
         for col, (label, value, help_text) in zip(st.columns(len(tiles) or 1), tiles):
             col.metric(label, value, help=help_text)
-    avp, problem = read_run_frame(ref, RESULT_FILES["avp"])
     if avp is None:
         st.info(problem)
         return
-    region = st.selectbox("Region", charts.fit_regions(avp), key=f"fit_region_{tag}")
     frame, holdout = charts.fit_series(avp, region)
     if plotted:
         _plot(charts.fit_figure(frame, holdout, mode), key=f"fit_chart_{tag}")
@@ -1073,74 +1145,81 @@ def _view_decomposition(ref, tag, mode, plotted):
     _table(table.reset_index(), ref, RESULT_FILES["timeseries"], tag, expanded=not plotted)
 
 
-def _clicked(event):
-    """The `key` (customdata[0]) of the point clicked on a chart, or None."""
-    selection = getattr(event, "selection", None)
-    if selection is None and isinstance(event, dict):
-        selection = event.get("selection")
-    points = (selection.get("points") if isinstance(selection, dict)
-              else getattr(selection, "points", None)) or []
-    for p in points:
-        data = p.get("customdata") if isinstance(p, dict) else None
-        if data is not None and len(data):
-            return str(data[0])
-    return None
+def _safe_name(name) -> str:
+    """codebase 1's file-name rule for a region (collinearity_heatmap_<region>.png)."""
+    return "".join(ch if ch.isalnum() or ch in "-_" else "_" for ch in str(name))
 
 
-def _view_prior_posterior(ref, tag, mode, plotted):
-    contr, problem = read_run_frame(ref, RESULT_FILES["contraction"])
-    if contr is None:
-        st.info(problem)
+def _view_collinearity(ref, tag, mode, plotted):
+    """How tangled the model's inputs are, per region - the correlation between
+    every pair of the design's columns (features, seasonality, trend) as a
+    heatmap, and each variable's VIF - from 01_data/collinearity_*.csv."""
+    matrix, _p1 = read_run_frame(ref, RESULT_FILES["collin_matrix"])
+    vif, _p2 = read_run_frame(ref, RESULT_FILES["collin_vif"])
+    summary, _p3 = read_run_frame(ref, RESULT_FILES["collin_summary"])
+    if matrix is None and vif is None and summary is None:
+        st.info("This run has no collinearity files (01_data/collinearity_*.csv) - "
+                "output.collinearity was switched off.")
         return
-    points = charts.contraction_points(contr)
-    if points.empty:
-        st.info("prior_posterior_contraction.csv has no coefficient rows to show.")
+    regions = charts.collinearity_regions(summary, vif, matrix)
+    if not regions:
+        st.info("The collinearity files have no rows.")
         return
-    keys = list(points["key"])
-    labels = dict(zip(points["key"], points["label"]))
-    pick_key, click_key, ver_key = f"pp_pick_{tag}", f"pp_click_{tag}", f"pp_ver_{tag}"
-    if st.session_state.get(pick_key) not in keys:
-        worst = points[charts.flagged(points, limit=1)]
-        st.session_state[pick_key] = worst["key"].iloc[0] if len(worst) else keys[0]
-    if plotted:
-        event = _plot(charts.contraction_figure(points, st.session_state[pick_key], mode),
-                      key=f"pp_chart_{tag}_{st.session_state.get(ver_key, 0)}",
-                      on_select="rerun", selection_mode="points")
-        clicked = _clicked(event)
-        if clicked in labels and clicked != st.session_state.get(click_key):
-            st.session_state[click_key] = clicked
-            st.session_state[pick_key] = clicked
-            _rerun_fragment()                   # redraw with the new point highlighted
-        st.caption("One point per variable: how much the data sharpened its prior "
-                   "(contraction - further right, more learned) and how far it moved "
-                   "from the prior mean (shift, in prior sds). Points left of 0.2 or "
-                   "beyond ±2 are labelled - read those first. **Click a point** (or "
-                   "pick it below) to see its prior and posterior.")
+    region = st.selectbox("Region", regions, key=f"collin_region_{tag}",
+                          help="Collinearity is measured per region, on the model's own "
+                               "design (the training weeks).")
+    tiles = charts.collinearity_tiles(summary, region)
+    for col, (label, value, help_text) in zip(st.columns(len(tiles) or 1), tiles):
+        col.metric(label, value, help=help_text)
+    if summary is not None and "note" in summary:
+        notes = summary.loc[summary["region"].astype(str) == region, "note"]
+        if len(notes) and str(notes.iloc[0]).strip() not in ("", "nan"):
+            st.caption(str(notes.iloc[0]))
 
-    def _picked():
-        # a pick from the list starts a fresh chart, so clicking the point that
-        # was clicked before still registers
-        st.session_state[ver_key] = st.session_state.get(ver_key, 0) + 1
-        st.session_state[click_key] = None
+    st.markdown("**Correlation between the model's columns**")
+    if matrix is not None:
+        c1, c2 = st.columns(2, vertical_alignment="bottom")
+        count = c1.selectbox("Columns", ["The 25 most correlated", "All"],
+                             key=f"collin_count_{tag}")
+        features_only = c2.toggle("Features only (no seasonality, no trend)",
+                                  key=f"collin_feats_{tag}")
+        labels, grid = charts.correlation_grid(
+            matrix, region, top=25 if count != "All" else None, with_extras=not features_only)
+        if plotted and labels:
+            _plot(charts.correlation_heatmap_figure(labels, grid, mode),
+                  key=f"collin_heat_{tag}")
+            st.caption("Red = move together, blue = move opposite, grey = unrelated. A "
+                       "cell at |r| ≥ 0.8 carries its number: two such columns are "
+                       "identified only as a sum - drop one, combine them into one "
+                       "variable, or hold one with a tight prior. A block of red cells is "
+                       "a group moving together; a feature red with the seasonality or "
+                       "trend is timed with them.")
+        pairs = charts.strongest_pairs(matrix, region, limit=15,
+                                       with_extras=not features_only)
+        pairs = pairs.assign(column_a=pairs["column_a"].map(charts.design_label),
+                             column_b=pairs["column_b"].map(charts.design_label))
+        _table(pairs[["column_a", "column_b", "correlation"]], ref,
+               RESULT_FILES["collin_matrix"], f"{tag}_pairs", expanded=not plotted)
+    else:
+        png, _problem = read_run_file(ref, f"01_data/collinearity_heatmap_{_safe_name(region)}.png")
+        if png is not None:
+            st.image(png, caption="The heatmap codebase 1 drew (this run has no "
+                                  "collinearity_matrix.csv - it predates 2026.10.09.1).")
+        else:
+            st.caption("No correlation matrix for this run (codebase 1 2026.10.09.1 or "
+                       "later writes one).")
 
-    st.selectbox("Variable", keys, key=pick_key, format_func=lambda k: labels.get(k, k),
-                 on_change=_picked)
-    point = points[points["key"] == st.session_state[pick_key]].iloc[0]
-    reading = charts.contraction_reading(point)
-    if reading:
-        st.markdown(reading)
-    fig = charts.prior_posterior_figure(point, mode) if plotted else None
-    if fig is not None:
-        _plot(fig, key=f"pp_detail_{tag}")
-        st.caption("Prior = what the prior file asserted. Data = what the data alone says "
-                   "(recovered from the two; missing when the posterior is not narrower "
-                   "than the prior). Posterior = the two combined."
-                   + (" On the log scale the coefficient is ±exp(x)."
-                      if point.get("scale") == "log" else ""))
-    cols = ["label", "scale", "prior_mean", "prior_sd", "posterior_mean", "posterior_sd",
-            "contraction", "shift"]
-    _table(points[cols].rename(columns={"label": "variable", "shift": "shift_prior_sd"}),
-           ref, RESULT_FILES["contraction"], tag, expanded=not plotted)
+    st.markdown("**Variance inflation (VIF)**")
+    points = charts.vif_points(vif, region)
+    if plotted and points["vif"].notna().any():
+        _plot(charts.vif_figure(points, mode), key=f"collin_vif_{tag}")
+        st.caption("How much each variable's coefficient uncertainty is inflated by the "
+                   "others: 1 = none, above 5 worth a look, above 10 the coefficient is "
+                   "barely identified by the data. The hover says what explains it. A "
+                   "blank VIF (in the table) could not be computed - its note says why.")
+    if not points.empty:
+        shown = points.assign(column=points["column"].map(charts.design_label))
+        _table(shown, ref, RESULT_FILES["collin_vif"], f"{tag}_vif", expanded=not plotted)
 
 
 def _view_convergence(ref, tag):
@@ -1158,21 +1237,33 @@ def _view_convergence(ref, tag):
                        on_click="ignore")
 
 
-def render_warnings_table(table, read_doc, key):
-    """codebase 1's warnings as a table, full width, with each category's own
-    explanation one click away (instead of raw markdown with dead links)."""
+def render_warnings_table(table, read_doc, key, texts=None):
+    """codebase 1's warnings: one row per category - how many DIFFERENT
+    variables (one warned in five regions counts once), in how many regions,
+    how many warnings - then, for a chosen category, what it says
+    (warning_texts.csv) and each variable with its regions, and the
+    category's own explanation one click away."""
     if table is None or table.empty:
         st.success("No warnings.")
         return
-    counts = (table.groupby(["severity", "category"]).size().reset_index(name="count")
-              .sort_values(["severity", "count"], ascending=[True, False]))
-    st.dataframe(counts, use_container_width=True, hide_index=True)
-    categories = list(counts["category"])
-    chosen = st.selectbox("Read a category", categories, key=f"warn_cat_{key}")
+    summary = charts.warning_summary(table)
+    st.dataframe(summary, use_container_width=True, hide_index=True,
+                 column_config={
+                     "variables": st.column_config.NumberColumn(
+                         "variables", help="How many different variables - one warned in "
+                                           "several regions counts once."),
+                     "regions": st.column_config.NumberColumn(
+                         "regions", help="In how many regions."),
+                     "warnings": st.column_config.NumberColumn(
+                         "warnings", help="How many warnings in all (a variable x region "
+                                          "is one each).")})
+    chosen = st.selectbox("Read a category", list(summary["category"]), key=f"warn_cat_{key}")
     if chosen:
-        rows = table[table["category"] == chosen]
-        cols = [c for c in ("feature", "region", "detail", "message") if c in rows.columns]
-        st.dataframe(rows[cols], use_container_width=True, hide_index=True, height=260)
+        for example in charts.warning_examples(texts, chosen):
+            st.caption(f"“{example}”")
+        detail = charts.warning_detail(table, chosen)
+        st.dataframe(detail, use_container_width=True, hide_index=True,
+                     height=min(36 * (len(detail) + 1) + 2, 300))
         doc = read_doc(chosen)
         if doc:
             with st.expander(f"What '{chosen}' means and what to do"):
@@ -1216,13 +1307,20 @@ def _recent_row(r):
     waited = (t["queue_ms"] or 0) + (t["setup_ms"] or 0)
     bmc, group, name = (_param(r, "bmc_name"), _param(r, "run_group"),
                         _param(r, "run_name"))
+    if bmc and name:
+        try:
+            now = projects.current_run_name(bmc, group, name)
+        except Exception:  # noqa: BLE001 - the name it ran under will do
+            now = name
+        name = name if now == name else f"{now} (was {name})"
     return {"run_id": str(r.get("run_id")),
             "started": local_time(r.get("start_time")),
             "status": _status_label(r),
             "run time": run_time,
             "waited": fmt_seconds(waited / 1000) if waited else "",
             "bmc": bmc, "period · type": group, "run name": name,
-            "reported": projects.REPORTED_BADGE if _reported_in_group(bmc, group, name) else "",
+            "reported": (projects.REPORTED_BADGE
+                         if _reported_in_group(bmc, group, name.split(" (was ")[0]) else ""),
             "data_file": _param(r, "data_file")}
 
 
@@ -1252,8 +1350,14 @@ def render_runs_section(on_reuse=None):
                                  on_select="rerun", selection_mode="single-row",
                                  key="runs_table")
             rows = list(getattr(getattr(event, "selection", None), "rows", []) or [])
+            ss = st.session_state
+            if page_state.emptied("runs_table", rows):
+                ss.pop("recent_selected", None)        # the person cleared the selection
             if rows:
-                chosen = runs[rows[0]]
+                ss["recent_selected"] = str(runs[rows[0]].get("run_id"))
+            # a run picked before the page was left stays open on the way back
+            held = ss.get("recent_selected")
+            chosen = next((r for r in runs if str(r.get("run_id")) == held), None)
         typed = (st.text_input("Or open a run by its job run ID", key="runs_typed_id") or "").strip()
         if typed:
             ref = ref_from_job_run(fetch_run(typed) or {"run_id": typed})

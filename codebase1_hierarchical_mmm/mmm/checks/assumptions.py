@@ -65,7 +65,7 @@ import warnings
 import numpy as np
 import pandas as pd
 
-__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.1"   # must equal mmm.__version__
 
 # Every threshold lives on config.AssumptionConfig so a modeller can widen or
 # narrow it from config.yaml without editing code (e.g. pair_warn: 0 dumps the
@@ -445,6 +445,34 @@ def correlation_heatmap(pdata, model_cfg, outdir: str,
         plt.close("all")
         written.append(path)
     return written
+
+
+def correlation_matrix(pdata, model_cfg) -> pd.DataFrame:
+    """Every pair of design columns' correlation, per region, in long form:
+    region, column_a, column_b, correlation (the full square, diagonal
+    included) - the numbers behind collinearity_heatmap_<region>.png, NOT
+    capped at heatmap_max_features, so a viewer (the BRIDGE app) can draw an
+    interactive heatmap and pick its own columns. Training window only, as
+    the rest of the collinearity files. A column that does not vary in the
+    region's training window - the intercept, a feature with no activity
+    there - has no correlation and is left out."""
+    frames = []
+    for g, rname in enumerate(pdata.region_names):
+        M, names = design_matrix(pdata, model_cfg, region=g)
+        if M.shape[0] <= 2 or M.shape[1] < 2:
+            continue
+        live = M.std(axis=0) > 0
+        if live.sum() < 2:
+            continue
+        C = np.corrcoef(M[:, live], rowvar=False)
+        lab = np.array([names[i] for i in np.where(live)[0]], dtype=object)
+        n = len(lab)
+        frames.append(pd.DataFrame({"region": rname, "column_a": np.repeat(lab, n),
+                                    "column_b": np.tile(lab, n),
+                                    "correlation": C.reshape(-1)}))
+    if not frames:
+        return pd.DataFrame(columns=["region", "column_a", "column_b", "correlation"])
+    return pd.concat(frames, ignore_index=True)
 
 
 def _safe(name: str) -> str:
@@ -852,6 +880,12 @@ def write_collinearity(pdata, model_cfg, outdir: str,
             os.path.join(outdir, "collinearity_vif.csv"), index=False)
     res["pairs"].to_csv(os.path.join(outdir, "collinearity_pairs.csv"),
                         index=False)
+    try:
+        res["matrix"] = correlation_matrix(pdata, model_cfg)
+        res["matrix"].to_csv(os.path.join(outdir, "collinearity_matrix.csv"),
+                             index=False, float_format="%.4f")
+    except Exception as e:  # noqa: BLE001 - a viewer's file must never kill a run
+        print(f"[assumptions] WARNING: collinearity_matrix.csv failed: {e}")
     s = res["summary"]
     bad = s[s["verdict"] != "ok"] if len(s) else s
     if len(bad):

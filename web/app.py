@@ -1,10 +1,10 @@
 
 import streamlit as st
-from src import codebase
+from src import codebase, page_state
 from src.components.app_header import render_app_header
+from src.config_editor import init_config_state
 #from src.pages.feasibility_check_page import render_feasibility_check_page
-from src.pages.model_setup_page import (render_all_runs_section, render_input_upload_section,
-                                        render_run_section)
+from src.pages.model_setup_page import navigation, render_sidebar_status
 #from src.pages.transformation_page import render_transformation_page
 from src.styles import inject_global_styles
 import html
@@ -25,6 +25,8 @@ codebase.start_background_refresh()
 if "_bridge_session" not in st.session_state:
     st.session_state["_bridge_session"] = True
     codebase.check_now()
+# count this run and keep what was chosen on the other pages (src/page_state.py)
+page_state.start_run()
 inject_global_styles()
 safe_email = html.escape(name) # Escape the email to prevent XSS attacks
 st.markdown(
@@ -65,6 +67,13 @@ st.markdown(
         """,
         unsafe_allow_html=True,
     )
+# the settings every page reads (Model settings, the datacube check, the run)
+init_config_state()
+# the pages, in the left-hand panel - each step of a new run, then the runs and
+# their results; a step's title carries ✅ once it is done
+page = st.navigation(navigation(), position="sidebar", expanded=True)
+with st.sidebar:
+    render_sidebar_status()
 render_app_header()
 # selected_page = st.radio(
 #     "Select page",
@@ -78,13 +87,6 @@ render_app_header()
 # elif selected_page == "Transformation":
 #     render_transformation_page()
 # else:
-# BMC and run (with the BMC's earlier runs), input data, model settings
-# (config.yaml), mapping/share files, prior file - each block an st.fragment,
-# so a click refreshes that block, not the page
-render_input_upload_section()
-# checklist + Run Model (saves the inputs in the run's folder, starts the job)
-# + the panel of the run started here (it stays until dismissed)
-render_run_section()
-st.divider()
-# every recent run of the job - all BMCs, and runs from before the run folders
-render_all_runs_section()
+# the chosen page (views/*.py - each calls one block of
+# src/pages/model_setup_page.py, an st.fragment: a click refreshes that block)
+page.run()

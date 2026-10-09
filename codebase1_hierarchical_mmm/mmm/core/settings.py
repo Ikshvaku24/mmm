@@ -37,8 +37,9 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.1"   # must equal mmm.__version__
 
+import copy
 import dataclasses
 import difflib
 import os
@@ -501,13 +502,36 @@ def config_schema() -> list[dict]:
 # --------------------------------------------------------------------------- #
 ACCESS_FILE = "app_access.yaml"
 _ACCESS_KEYS = ("full_access", "config_full_access", "config_advanced_access",
-                "editable", "advanced", "show_fixed", "mark_reported")
+                "editable", "advanced", "show_fixed", "mark_reported", "edit_runs")
 # the four levels, most rights first; everyone not named in the file is the last
 ACCESS_LEVELS = ("full_access", "config_full_access", "config_advanced_access",
                  "editable_only")
 # who may mark (or change) the run a group's results were reported from, when
 # the file does not say
 DEFAULT_MARK_REPORTED = ("full_access", "config_full_access", "config_advanced_access")
+# who may rename a finished run and edit its note: the levels, and "submitter"
+# = the person who started that run
+DEFAULT_EDIT_RUNS = ("submitter", "full_access")
+
+
+def _level_list(raw: dict, key: str, default, unknown: list, extra=()) -> list:
+    """A list of levels (ACCESS_LEVELS, plus `extra` words) - unknown names go
+    to `unknown`, the rest are kept in a fixed order."""
+    levels = raw.get(key, list(default))
+    if levels is None:
+        levels = []
+    if not isinstance(levels, list):
+        raise ValueError(f"{ACCESS_FILE}: `{key}` must be a list of levels "
+                         f"({', '.join(tuple(extra) + ACCESS_LEVELS)}), got {levels!r}")
+    known = tuple(extra) + ACCESS_LEVELS
+    named = []
+    for level in levels:
+        name = str(level).strip()
+        if name in known:
+            named.append(name)
+        elif name:
+            unknown.append(f"{key}.{name}")
+    return [lv for lv in known if lv in named]
 
 
 def _emails(raw: dict, key: str) -> list:
@@ -567,6 +591,8 @@ def app_access(path: str | None = None) -> dict:
                                 read-only
         mark_reported           the levels (ACCESS_LEVELS names) that may mark
                                 the run a group's results were reported from
+        edit_runs               who may rename a finished run and edit its note:
+                                levels, and "submitter" (the run's own author)
         unknown                 what the file names that does not exist (a
                                 setting, or a level under mark_reported) -
                                 ignored, for the UI to warn about
@@ -585,7 +611,8 @@ def app_access(path: str | None = None) -> dict:
     if not os.path.exists(path):
         return {"full_access": [], "config_full_access": [], "config_advanced_access": [],
                 "editable": None, "advanced": [], "show_fixed": False,
-                "mark_reported": list(DEFAULT_MARK_REPORTED), "unknown": [], "source": ""}
+                "mark_reported": list(DEFAULT_MARK_REPORTED),
+                "edit_runs": list(DEFAULT_EDIT_RUNS), "unknown": [], "source": ""}
     with open(path, encoding="utf-8") as fh:
         try:
             raw = yaml.safe_load(fh) or {}
@@ -602,26 +629,94 @@ def app_access(path: str | None = None) -> dict:
     if advanced is None:                       # `advanced: all` = everything else
         advanced = sorted({f"{s}.{k}" for s, k in known})
     advanced = [] if editable is None else sorted(set(advanced) - set(editable))
-    levels = raw.get("mark_reported", list(DEFAULT_MARK_REPORTED))
-    if levels is None:
-        levels = []
-    if not isinstance(levels, list):
-        raise ValueError(f"{ACCESS_FILE}: `mark_reported` must be a list of levels "
-                         f"({', '.join(ACCESS_LEVELS)}), got {levels!r}")
-    mark = []
-    for level in levels:
-        name = str(level).strip()
-        if name in ACCESS_LEVELS:
-            mark.append(name)
-        elif name:
-            unknown.append(f"mark_reported.{name}")
+    mark = _level_list(raw, "mark_reported", DEFAULT_MARK_REPORTED, unknown)
+    edit = _level_list(raw, "edit_runs", DEFAULT_EDIT_RUNS, unknown, extra=("submitter",))
     return {"full_access": _emails(raw, "full_access"),
             "config_full_access": _emails(raw, "config_full_access"),
             "config_advanced_access": _emails(raw, "config_advanced_access"),
             "editable": editable, "advanced": advanced,
             "show_fixed": bool(raw.get("show_fixed", False)),
-            "mark_reported": [lv for lv in ACCESS_LEVELS if lv in mark],
+            "mark_reported": mark, "edit_runs": edit,
             "unknown": unknown, "source": path}
+
+
+# --------------------------------------------------------------------------- #
+# the settings each modelling type sets (modelling_types.csv)
+# --------------------------------------------------------------------------- #
+def modelling_type_settings(path: str, job_owned=()) -> dict:
+    """{modelling type: {section: {key: value}}} - the settings each type
+    sets, from modelling_types.csv.
+
+    The file's first column names the types; every further column is a
+    setting, written "section.key" (e.g. model.include_intercept), and each
+    cell is that type's value - true/false, a number, a name - read as YAML.
+    A blank cell sets nothing: the type keeps the team's config.yaml value.
+    So "Primary models carry an intercept, Secondary ones do not" is one
+    column. The web app applies a type's settings when the type is chosen,
+    and the job lays them between the team's config.yaml and the run's own
+    settings. Raises ValueError (naming the cell) for a column that is not a
+    setting, a setting the job sets itself (`job_owned`), or a value the
+    setting cannot take. {} when there is no file or no setting column."""
+    import csv
+    import tempfile
+
+    if not path or not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8-sig", newline="") as fh:
+        rows = [r for r in csv.reader(fh) if r and any(c.strip() for c in r)
+                and not r[0].strip().startswith("#")]
+    if not rows:
+        return {}
+    header = [h.strip() for h in rows[0]]
+    if header[0].lower() not in ("modelling_type", "modelling type", "name"):
+        return {}                                  # names only, no header: no settings
+    known = {(r["section"], r["key"]): r for r in config_schema()}
+    columns, problems = [], []
+    for j, name in enumerate(header[1:], start=1):
+        if not name:
+            continue
+        section, _, key = name.partition(".")
+        if (section, key) not in known:
+            near = difflib.get_close_matches(name, [f"{s}.{k}" for s, k in known], n=1)
+            problems.append(f"column '{name}' is not a setting"
+                            + (f" (did you mean '{near[0]}'?)" if near else ""))
+        elif name in set(job_owned):
+            problems.append(f"column '{name}' is set by the job itself - it cannot "
+                            "depend on the modelling type")
+        else:
+            columns.append((j, section, key))
+    if problems:
+        raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
+    out = {}
+    for r in rows[1:]:
+        kind = r[0].strip()
+        if not kind:
+            continue
+        values = {}
+        for j, section, key in columns:
+            cell = r[j].strip() if j < len(r) else ""
+            if not cell:
+                continue
+            try:
+                value = yaml.safe_load(cell)
+            except yaml.YAMLError:
+                value = cell
+            if known[(section, key)]["kind"] in ("str", "choice", "str_or_null") \
+                    and value is not None and not isinstance(value, str):
+                value = cell                         # "1" for a text setting stays "1"
+            values.setdefault(section, {})[key] = value
+        if not values:
+            continue
+        try:
+            settings_from_dict(copy.deepcopy(values), base_dir=tempfile.gettempdir(),
+                               features=[])
+        except ValueError as e:
+            problems.append(f"{kind}: {e}")
+            continue
+        out[kind] = values
+    if problems:
+        raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
+    return out
 
 
 # --------------------------------------------------------------------------- #

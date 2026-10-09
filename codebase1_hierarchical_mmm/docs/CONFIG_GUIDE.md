@@ -18,8 +18,8 @@ Then run:
 python run_real_data.py config.yaml
 ```
 
-**From the BRIDGE web app** (`../web/`), the same file is edited in the
-*Model settings* block. Every widget comes from this codebase's own schema
+**From the BRIDGE web app** (`../web/`), the same file is edited on the
+*Model settings* page. Every widget comes from this codebase's own schema
 (`mmm.core.settings.config_schema()`): a dropdown wherever
 `mmm.core.settings.CHOICES` lists the allowed values, this guide's one-line
 help as the tooltip. So a key you add to a config dataclass (plus its `HELP`
@@ -29,9 +29,10 @@ run's own folder, `Secondary Modelling/<BMC>/<period> <modelling type>/<run
 name>/` - holds **only the settings that person may change**
 (`settings_text(only=...)`); the job
 (`demo.ipynb` -> `mmm/app_job.py`) lays it over this folder's `config.yaml`
-(`app_job.merge_config`), so a fixed setting always comes from here, then
-replaces only the input paths, the output folder and the run name -
-`app_job.JOB_OWNED_KEYS`. It never edits this folder's `config.yaml`. "Reuse
+with the run's modelling-type settings between them (`app_job.merge_config`:
+config.yaml < type < run - see "Each modelling type's settings" below), so a
+fixed setting always comes from here or from the type, then replaces only the
+input paths, the output folder and the run name - `app_job.JOB_OWNED_KEYS`. It never edits this folder's `config.yaml`. "Reuse
 inputs" in the app loads an earlier run's settings back into the editor, on
 top of this `config.yaml`.
 
@@ -48,6 +49,7 @@ top of this `config.yaml`.
 | `advanced:` | `config_advanced_access` | the settings needed once in a while; same format as `editable:` (one listed in both counts as editable) |
 | `show_fixed:` | levels 3 and 4 | `true` lists the settings they may not change, read-only |
 | `mark_reported:` | levels | which levels may mark the run a period's results were reported from (moves run folders): `full_access`, `config_full_access`, `config_advanced_access`, `editable_only`. Default: the first three |
+| `edit_runs:` | levels, and `submitter` | who may rename a run and edit its note once it has run; `submitter` = the person who started that run. Default: `submitter` and `full_access` |
 
 `editable` and `advanced` are allow-lists. Every other setting is fixed at
 its value in `config.yaml` - also when someone uploads another config.yaml
@@ -66,6 +68,31 @@ Two more files next to it hold the **standard names** the app offers:
 `modelling_types.csv` (LTE, Primary, Secondary ...). One name per line under
 the header; lines starting with `#` are ignored; a name that cannot be a
 folder name stops the list with a message (`app_job.read_names`).
+
+**Each modelling type's settings** (2026.10.09.1). Every column of
+`modelling_types.csv` after `modelling_type` is a setting, written
+`section.key`, and each cell is that type's value, read as YAML (`true`, `4`,
+`mean`). A blank cell sets nothing: the type keeps this `config.yaml`'s value.
+The shipped file has one column:
+
+```
+modelling_type,model.include_intercept
+LTE,
+Primary,true
+Secondary,false
+```
+
+The job lays a type's settings between this `config.yaml` and the run's own:
+**config.yaml < the type's settings < the run's config**
+(`app_job.type_settings`; the job log prints each one and `run_info.json`
+records them). The app applies them as soon as the type is chosen, and they
+are the base its editor starts from and resets to - also for a setting the
+person may not change, which is then held at the type's value. They are the
+team's settings, like `config.yaml`, so `app_access.yaml` does not limit them.
+`settings.modelling_type_settings()` reads the file and stops, naming the cell,
+on a column that is not a setting (with the closest spelling), a setting the
+job sets itself, or a value the setting cannot take. Add a setting by adding a
+column; re-upload the folder.
 
 **Two rules that save time:**
 

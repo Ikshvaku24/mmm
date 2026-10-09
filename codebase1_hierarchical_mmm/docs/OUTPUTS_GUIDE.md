@@ -64,7 +64,7 @@ OutputConfig.core_only(contribution_summary=True)  # only the volume table
 | `model_input_matrix` | `model_input_matrix.csv` | 01 |
 | `model_input_summary` | `model_input_summary.csv` | 01 |
 | `data_plots` | `kpi_by_region.png` | 01 |
-| `collinearity` | `collinearity_summary.csv`, `_vif.csv`, `_pairs.csv`, `collinearity_heatmap_<region>.png` | 01 |
+| `collinearity` | `collinearity_summary.csv`, `_vif.csv`, `_pairs.csv`, 🆕 `_matrix.csv`, `collinearity_heatmap_<region>.png` | 01 |
 | `prior_summary` | `prior_summary.csv` | 01 |
 | *(always, when run from YAML)* | `resolved_config.yaml` | 01 |
 | `contraction_plot` | `prior_posterior_contraction.png` | 02 |
@@ -422,7 +422,7 @@ numbers?" six months from now. Diff two runs' `resolved_config.yaml` to see
 exactly what changed between them; the feature-level priors are not in here,
 they are in the run's `prior_summary.csv`.
 
-### 🆕 `collinearity_summary.csv` / `_vif.csv` / `_pairs.csv`
+### 🆕 `collinearity_summary.csv` / `_vif.csv` / `_pairs.csv` / `_matrix.csv`
 
 **Nothing measured collinearity before this.** The old `near_constant_sd` guard
 caught one special case; the general case — two features that move together,
@@ -466,6 +466,15 @@ VIF) or `the intercept/level` (high uncentred, low centred → set
 **`collinearity_pairs.csv`** — column pairs above |r| = 0.8, worst first.
 Columns are named `__intercept__`, `__fourier__*`, `__trend__` or the feature
 name, so you can see *what* a feature is collinear with.
+
+🆕 **`collinearity_matrix.csv`** (2026.10.09.1) — every number behind the
+heatmap, per region, in long form: `region`, `column_a`, `column_b`,
+`correlation` (the full square: every pair both ways, the diagonal 1). Same
+design and training window as the rest; a column that does not vary there -
+the intercept, a feature with no activity in the region - has no correlation
+and is left out. Unlike the PNG it is **not** capped at
+`heatmap_max_features`. The BRIDGE web app draws its interactive heatmap from
+it. Written to 4 decimals; if it fails, the run prints a warning and goes on.
 
 ### `panel_summary.csv`
 

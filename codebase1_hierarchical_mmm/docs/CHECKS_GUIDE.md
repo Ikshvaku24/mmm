@@ -289,7 +289,8 @@ is ≈ 0 over the training window under `contribution_reference: auto`; see §12
 - `01_data/collinearity_summary.csv` (one row per region);
 - `collinearity_vif.csv`;
 - `collinearity_pairs.csv`;
-- `collinearity_heatmap_<region>.png`.
+- `collinearity_heatmap_<region>.png`;
+- `collinearity_matrix.csv` (the heatmap's numbers, uncapped - for the web app).
 
 ### 3.0 Why it is measured on the design matrix, not on the raw data
 
@@ -496,6 +497,11 @@ The pairs table says *which* pairs crossed a line. The heatmap shows the
 
 Cells with \|r\| ≥ `pair_bad` are annotated when the map has ≤ 25 columns. Above
 `heatmap_max_features` (40), only the highest-VIF columns are drawn.
+
+`collinearity_matrix.csv` holds every number behind the map, uncapped. The
+BRIDGE app's *Collinearity* view draws it interactively per region (the 25
+most correlated columns or all of them, with or without seasonality and
+trend), next to each variable's VIF on a log axis.
 
 ### 3.7 What to do about collinearity, in order
 

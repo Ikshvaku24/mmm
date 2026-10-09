@@ -212,6 +212,24 @@ def path_exists(path):
     return bool(_file_system().get_directory_client(path).exists())
 
 
+@perf.timed("adls.delete", lambda path: path)
+def delete_file(file_path) -> bool:
+    """Delete one file; False when it was not there."""
+    if LOCAL_STORAGE_DIR:
+        try:
+            os.remove(_local_path(file_path))
+            return True
+        except FileNotFoundError:
+            return False
+    try:
+        _file_system().get_file_client(file_path).delete_file()
+        return True
+    except Exception as e:
+        if is_not_found(e):
+            return False
+        raise
+
+
 @perf.timed("adls.move", lambda src, dst: f"{src} -> {dst}")
 def move_dir(src_path, dst_path):
     """Move a folder (with everything in it) to `dst_path` - one rename in

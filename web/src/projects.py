@@ -23,6 +23,12 @@ which run when. A run is therefore found by its BMC, group and name - never by
 where it sits now (`run_place` looks that up), so a moved run keeps its
 results, its cached files and its widgets.
 
+A finished run can be RENAMED (`rename_run`: its folder, where it sits; the
+old name is kept in its run_request.json, and in the group's renames.json so
+the Jobs API's record of the run - which keeps the name it ran under - still
+finds it) and its NOTE edited (`update_note`: run_request.json keeps every
+version, note.txt the latest).
+
 So a run's zip holds exactly what went in and what came out, and a new run
 can start from any earlier run's inputs. Runs from before the run groups
 (Secondary Modelling/<BMC>/<run name>/) and from before the run folders (the
@@ -45,8 +51,8 @@ from datetime import datetime, timezone
 import pandas as pd
 
 from src import codebase, perf
-from src.files import (ADLS_ROOT, download_from_adls, is_not_found, list_dir, move_dir,
-                       path_exists, read_json, upload_to_adls, write_json)
+from src.files import (ADLS_ROOT, delete_file, download_from_adls, is_not_found, list_dir,
+                       move_dir, path_exists, read_json, upload_to_adls, write_json)
 
 FILE_KINDS = ("config_file", "data_file", "prior_file", "mapping_file", "share_file")
 KIND_LABELS = {"config_file": "settings", "data_file": "datacube",
@@ -55,6 +61,7 @@ KIND_LABELS = {"config_file": "settings", "data_file": "datacube",
 RUN_INFO = "run_info.json"
 NOTE_FILE = "note.txt"
 REPORTING_FILE = "reporting.json"
+RENAMES_FILE = "renames.json"
 NOTE_MAX = 2000                   # characters - a note, not a document
 
 # used only until the backend answers (the same values as mmm/app_job.py)
@@ -82,6 +89,7 @@ _BMCS = perf.SharedCache("bmc_list", ttl=BMC_LIST_SECONDS, maxsize=4)
 _RUN_LISTS = perf.SharedCache("bmc_runs", ttl=RUN_LIST_SECONDS, maxsize=64)
 _GROUPS = perf.SharedCache("group_places", ttl=RUN_LIST_SECONDS, maxsize=512)
 _REQUESTS = perf.SharedCache("run_requests", ttl=60, maxsize=512)
+_RENAMES = perf.SharedCache("run_renames", ttl=RUN_LIST_SECONDS, maxsize=256)
 _FINISHED = {}            # "<bmc>/<group>/<run>" -> {"request", "info"} of a finished run
 _FINISHED_MAX = 5000
 
@@ -540,9 +548,11 @@ def forget_runs(bmc=None):
         _RUN_LISTS.invalidate()
         _BMCS.invalidate()
         _GROUPS.invalidate()
+        _RENAMES.invalidate()
     else:
         _RUN_LISTS.invalidate(str(bmc))
         _GROUPS.invalidate(prefix=f"{bmc}/")
+        _RENAMES.invalidate(prefix=f"{bmc}/")
 
 
 def run_exists(bmc, run, group="") -> bool:
@@ -733,6 +743,153 @@ def mark_reported(bmc, group, run, user="", running=()) -> dict:
                    REPORTING_FILE, group_dir(bmc, group))
         forget_runs(bmc)
     return {"moved": moved, "previous": previous[0] if previous else None}
+
+
+# --------------------------------------------------------------------------- #
+# after a run: its name and its note
+# --------------------------------------------------------------------------- #
+def _names_home(bmc, group="") -> str:
+    """Where a group's renames.json lives (without a group: the BMC's)."""
+    return group_dir(bmc, group) if group else bmc_dir(bmc)
+
+
+def renames(bmc, group="") -> dict:
+    """{old name: name now} of the group's renamed runs (shared, 30 s)."""
+    def load():
+        data, _problem = _read(f"{_names_home(bmc, group)}/{RENAMES_FILE}")
+        return dict((data or {}).get("renamed") or {})
+    value, _hit = _RENAMES.get_or_compute(f"{bmc}/{group}", load)
+    return value
+
+
+def current_run_name(bmc, group, run) -> str:
+    """The name a run has NOW. The Jobs API keeps the name a run ran under;
+    renames.json says what it became."""
+    return renames(bmc, group).get(run, run)
+
+
+def resolve_ref(ref) -> dict:
+    """The ref with the run's current name (a renamed run's old ref still
+    opens it)."""
+    if not has_folder(ref):
+        return ref
+    try:
+        name = current_run_name(ref["bmc"], ref_group(ref), ref["run"])
+    except Exception:  # noqa: BLE001 - an unreadable renames.json: keep the name
+        return ref
+    return ref if name == ref["run"] else dict(ref, run=name)
+
+
+def _place_now(bmc, group, run) -> str:
+    """run_place, read now (not the shared 30 s copy)."""
+    if not group:
+        return ""
+    places = _list_group(bmc, group)
+    if run in places["reported"]:
+        return reported_folder()
+    if run in places["archived"]:
+        return archived_folder()
+    return ""
+
+
+def _stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def rename_run(bmc, group, run, new, user="", running=False) -> str:
+    """Rename a run that is not running: its folder (wherever it sits in its
+    group), `run_name` in its run_request.json (the old name and who renamed
+    it are kept under `renamed_from`), reporting.json when it is the
+    group's reported run, and renames.json (old -> new) for the Jobs API's
+    record of the run. Returns the new name; raises ValueError when it cannot
+    be done (running, a bad name, a name in use - now or by a run renamed
+    before, so an old link can never open the wrong run)."""
+    new = str(new or "").strip()
+    group = group or ""
+    if running:
+        raise ValueError("the run is still running - rename it once it has finished")
+    if new == run:
+        raise ValueError("that is already its name")
+    problem = run_name_problem(new)
+    if problem:
+        raise ValueError(problem)
+    if not group and parse_group(new):
+        raise ValueError(f"'{new}' reads like a period folder - pick another run name")
+    where = f"{bmc} / {group}" if group else bmc
+    with group_lock(bmc, group):
+        taken = taken_run_names(bmc, group)
+        if run not in taken:
+            raise ValueError(f"'{run}' is not a run of {where}")
+        if new in taken:
+            raise ValueError(f"'{new}' already exists in {where} - choose another name")
+        home = _names_home(bmc, group)
+        record, _problem = _read(f"{home}/{RENAMES_FILE}")
+        record = record or {}
+        renamed = dict(record.get("renamed") or {})
+        if new in renamed:
+            raise ValueError(f"'{new}' was the name of another run before (now "
+                             f"'{renamed[new]}') - choose another name")
+        place = _place_now(bmc, group, run)
+        try:
+            move_dir(run_dir(bmc, run, group, place), run_dir(bmc, new, group, place))
+        finally:
+            forget_runs(bmc)
+            _REQUESTS.invalidate()
+        now = _stamp()
+        request, _problem = _read(request_path(bmc, new, group, place))
+        request = request or {}
+        request["run_name"] = new
+        request["renamed_from"] = list(request.get("renamed_from") or []) + [
+            {"name": run, "by": user or "", "at": now}]
+        write_json(request, layout()["run_request"], run_dir(bmc, new, group, place))
+        if group:
+            rep_path = f"{group_dir(bmc, group)}/{REPORTING_FILE}"
+            reporting, _problem = _read(rep_path)
+            if reporting and reporting.get("reported_run") == run:
+                reporting["reported_run"] = new
+                reporting["history"] = list(reporting.get("history") or []) + [
+                    {"run": new, "renamed_from": run, "by": user or "", "at": now}]
+                write_json(reporting, REPORTING_FILE, group_dir(bmc, group))
+        renamed = {k: (new if v == run else v) for k, v in renamed.items()}
+        renamed[run] = new
+        write_json({"renamed": renamed,
+                    "history": list(record.get("history") or []) + [
+                        {"from": run, "to": new, "by": user or "", "at": now}]},
+                   RENAMES_FILE, home)
+        forget_runs(bmc)
+        _REQUESTS.invalidate()
+    return new
+
+
+def update_note(bmc, group, run, note, user="") -> dict:
+    """Set a run's note - at any time, also while it runs (it touches neither
+    the inputs nor Outputs/). run_request.json keeps every version under
+    `note_history` (the note it was started with first); note.txt holds the
+    latest (it is deleted for an empty note). Returns the request."""
+    text = clean_note(note)
+    group = group or ""
+    with group_lock(bmc, group):
+        place = _place_now(bmc, group, run)
+        folder = run_dir(bmc, run, group, place)
+        if not path_exists(folder):
+            raise ValueError(f"the run folder {folder} does not exist")
+        request, _problem = _read(f"{folder}/{layout()['run_request']}")
+        request = request or {}
+        history = list(request.get("note_history") or [])
+        if not history and request.get("note"):
+            history.append({"note": request["note"], "by": request.get("submitted_by", ""),
+                            "at": request.get("submitted_at", "")})
+        history.append({"note": text, "by": user or "", "at": _stamp()})
+        request["note"] = text
+        request["note_history"] = history
+        write_json(request, layout()["run_request"], folder)
+        if text:
+            upload_to_adls((text + "\n").encode("utf-8"), NOTE_FILE, folder)
+        else:
+            delete_file(f"{folder}/{NOTE_FILE}")
+        forget_runs(bmc)
+        _REQUESTS.invalidate()
+    return request
 
 
 # --------------------------------------------------------------------------- #

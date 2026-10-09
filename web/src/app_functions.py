@@ -87,26 +87,34 @@ def table_to_csv_bytes(table):
     return plain_table.to_csv(index=False).encode("utf-8")
 
 
-def build_edit_table_with_remove_column(table):
-    remove_column_name = "Remove"
+KEEP_COLUMN = "Keep"
+
+
+def build_edit_table_with_keep_column(table):
+    """The table with a ticked "Keep" box on every row - untick a row to drop
+    it on Save. First column, so it is visible without scrolling across 14
+    prior columns."""
     edit_table = table.copy()
-
-    if remove_column_name in edit_table.columns:
-        return edit_table, remove_column_name
-
-    # first column, so it is visible without scrolling across 14 prior columns
-    # (it used to sit after the old format's B0 column)
-    edit_table.insert(0, remove_column_name, False)
-    return edit_table, remove_column_name
+    if KEEP_COLUMN in edit_table.columns:
+        return edit_table, KEEP_COLUMN
+    edit_table.insert(0, KEEP_COLUMN, True)
+    return edit_table, KEEP_COLUMN
 
 
-def apply_row_removals(edited_table, remove_column_name):
-    if remove_column_name not in edited_table.columns:
+def drop_unkept_rows(edited_table, keep_column):
+    """The rows whose Keep box is ticked (a new row added in the grid has it
+    ticked; an unanswered box counts as kept), without the Keep column."""
+    if keep_column not in edited_table.columns:
         return edited_table
-
-    removal_mask = edited_table[remove_column_name].fillna(False).astype(bool)
-    cleaned_table = edited_table.loc[~removal_mask].drop(columns=[remove_column_name])
-    return cleaned_table
+    def kept(v):
+        if isinstance(v, bool):
+            return v
+        try:
+            return True if pd.isna(v) else bool(v)
+        except (TypeError, ValueError):
+            return bool(v)
+    keep = edited_table[keep_column].map(kept).astype(bool)
+    return edited_table.loc[keep].drop(columns=[keep_column])
 
 
 def has_table_changed(original_table, edited_table):
@@ -168,10 +176,12 @@ def prepare_prior_table(table, spec=None):
     return to_serial_index_table(t)
 
 
-def prior_column_config(spec, regions, remove_column_name):
+def prior_column_config(spec, regions, keep_column):
     config = {
-        remove_column_name: st.column_config.CheckboxColumn(
-            "Remove", help="Check to remove this row on Save or Upload.", default=False)
+        keep_column: st.column_config.CheckboxColumn(
+            "Keep", help="Ticked = the row stays. Untick a row to remove it when you "
+                         "Save - or press Remove all, then tick the rows to keep.",
+            default=True)
     }
     if not spec:
         return config
@@ -278,10 +288,10 @@ def parse_pasted_block(text):
 
 def detect_header(first_row, columns):
     """{position: column} when every non-blank cell of the first pasted row
-    names a column (any case; 'Serial No' / 'Remove' map to None = skip).
+    names a column (any case; 'Serial No' / 'Keep' map to None = skip).
     None when the first row is data."""
     lookup = {str(c).strip().lower(): c for c in columns}
-    lookup.update({"serial no": None, "remove": None})
+    lookup.update({"serial no": None, "keep": None, "remove": None})
     named = [(j, str(v).strip()) for j, v in enumerate(first_row) if str(v).strip()]
     if not named or not all(v.lower() in lookup for _, v in named):
         return None
@@ -289,7 +299,7 @@ def detect_header(first_row, columns):
 
 
 def paste_block(table, text, spec, regions=None, start_row=0, start_col=None,
-                skip_columns=("Remove",)):
+                skip_columns=("Keep", "Remove")):
     """Cells copied from Excel -> (new table, summary, problems). Nothing
     changes when there is any problem.
 
@@ -508,7 +518,7 @@ def _row_label(table, position):
             + ("" if _blank(reg) else f" · {reg}"))
 
 
-def _render_block_paste(edited_table, remove_column_name, spec, regions, columns, version,
+def _render_block_paste(edited_table, keep_column, spec, regions, columns, version,
                         prefix="prior", save=None):
     """Paste cells copied from Excel through a text box - no clipboard permission needed."""
     save = save or save_prior_table
@@ -544,7 +554,7 @@ def _render_block_paste(edited_table, remove_column_name, spec, regions, columns
                     "Top-left cell - column", columns, key=f"{prefix}_block_col_{version}",
                     index=columns.index("global_prior_sd") if "global_prior_sd" in columns else 0)
     new, summary, problems = paste_block(edited_table, text, spec, regions, start_row,
-                                         start_col, skip_columns=(remove_column_name,))
+                                         start_col, skip_columns=(keep_column,))
     for p in problems[:12]:
         st.error(p)
     if len(problems) > 12:
@@ -554,23 +564,23 @@ def _render_block_paste(edited_table, remove_column_name, spec, regions, columns
                 f"{', '.join(summary['columns'])}.")
     if st.button("Apply paste", key=f"{prefix}_block_apply_{version}", type="primary",
                  disabled=bool(problems)):
-        save(apply_row_removals(new, remove_column_name))
+        save(drop_unkept_rows(new, keep_column))
         st.toast(f"Pasted {summary['cells']} cell(s).", icon="✅")
         st.rerun(scope="fragment")
 
 
-def _render_column_tools(edited_table, remove_column_name, spec, prefix="prior", save=None):
+def _render_column_tools(edited_table, keep_column, spec, prefix="prior", save=None):
     """Paste cells from Excel, fill a column, or fill every blank with the
     defaults; the result is saved and the dialog stays open."""
     save = save or save_prior_table
     regions = st.session_state.get("datacube_regions") or []
-    columns = [c for c in edited_table.columns if c not in (remove_column_name,)]
+    columns = [c for c in edited_table.columns if c not in (keep_column,)]
     version = st.session_state.get(f"{prefix}_popup_editor_version", 0)
     with st.expander("Paste cells from Excel · Fill a column · Fill blanks with the defaults"):
         paste_tab, fill_tab, defaults_tab = st.tabs(
             ["Paste cells from Excel", "Fill a column", "Fill blanks with the defaults"])
         with paste_tab:
-            _render_block_paste(edited_table, remove_column_name, spec, regions, columns,
+            _render_block_paste(edited_table, keep_column, spec, regions, columns,
                                 version, prefix, save)
         with fill_tab:
             col = st.selectbox("Column", columns, key=f"{prefix}_fill_col_{version}",
@@ -594,25 +604,26 @@ def _render_column_tools(edited_table, remove_column_name, spec, prefix="prior",
             blanks = st.checkbox("Only where the cell is blank", key=f"{prefix}_fill_blank_{version}")
             if st.button("Apply fill", key=f"{prefix}_fill_apply_{version}", type="primary"):
                 new, n = fill_column(edited_table, col, value, scope, pattern, blanks)
-                save(apply_row_removals(new, remove_column_name))
+                save(drop_unkept_rows(new, keep_column))
                 st.toast(f"Filled {n} cell(s) of {col}.", icon="✅")
                 st.rerun(scope="fragment")
         with defaults_tab:
             st.caption("Every blank cell of the feature rows gets: " + DEFAULTS_TEXT)
             if st.button("Fill every blank with the defaults", key=f"{prefix}_defaults_{version}",
                          type="primary"):
-                new, changes = fill_blank_priors(apply_row_removals(edited_table, remove_column_name))
+                new, changes = fill_blank_priors(drop_unkept_rows(edited_table, keep_column))
                 save(new)
                 st.toast(("Filled: " + describe_fill(changes)) if changes else "Nothing was blank.",
                          icon="✅")
                 st.rerun(scope="fragment")
 
 
-def _seed_remove(prefix, edited_table, remove_column_name, value, editor_version):
-    """Remove all / Keep all: the grid as it is now (unsaved edits included)
-    with every Remove box set, drawn again as a new editor."""
+def _seed_remove_all(prefix, edited_table, keep_column, editor_version):
+    """Remove all: the grid as it is now (unsaved edits included) with every
+    Keep box unticked, drawn again as a new editor - then tick the rows to
+    keep and Save."""
     seeded = edited_table.copy()
-    seeded[remove_column_name] = bool(value)
+    seeded[keep_column] = False
     st.session_state[f"{prefix}_popup_editor_version"] = editor_version + 1
     st.session_state[f"{prefix}_editor_seed"] = (editor_version + 1, seeded)
     st.rerun(scope="fragment")
@@ -637,31 +648,27 @@ def render_prior_editor(table, prefix, save, use=None, download_name="feature_pr
         editor_version = ss.get(f"{prefix}_popup_editor_version", 0)
         seed = ss.get(f"{prefix}_editor_seed")
         if seed is not None and seed[0] == editor_version:
-            edit_table, remove_column_name = seed[1], "Remove"   # after Remove all / Keep all
+            edit_table, keep_column = seed[1], KEEP_COLUMN   # after Remove all
         else:
-            edit_table, remove_column_name = build_edit_table_with_remove_column(table)
+            edit_table, keep_column = build_edit_table_with_keep_column(table)
         edited_table = st.data_editor(
             edit_table,
             use_container_width=True,
             height=420,
             num_rows="dynamic",
             key=f"{prefix}_popup_editor_{editor_version}",
-            column_config=prior_column_config(spec, regions, remove_column_name),
+            column_config=prior_column_config(spec, regions, keep_column),
         )
-        all_col, none_col, _gap = st.columns([1, 1, 3])
+        all_col, _gap = st.columns([1, 4])
         with all_col:
-            if st.button("☑ Remove all", key=f"{prefix}_remove_all", use_container_width=True,
-                         help="Tick Remove on every row - then untick the rows to keep "
-                              "and press Save Changes."):
-                _seed_remove(prefix, edited_table, remove_column_name, True, editor_version)
-        with none_col:
-            if st.button("☐ Keep all", key=f"{prefix}_remove_none", use_container_width=True,
-                         help="Untick Remove on every row."):
-                _seed_remove(prefix, edited_table, remove_column_name, False, editor_version)
+            if st.button("Remove all", key=f"{prefix}_remove_all", use_container_width=True,
+                         help="Untick Keep on every row - then tick the rows to keep and "
+                              "press Save Changes."):
+                _seed_remove_all(prefix, edited_table, keep_column, editor_version)
         st.caption(PASTE_HINT)
-        _render_column_tools(edited_table, remove_column_name, spec, prefix, save)
+        _render_column_tools(edited_table, keep_column, spec, prefix, save)
 
-        effective_edited_table = apply_row_removals(edited_table, remove_column_name)
+        effective_edited_table = drop_unkept_rows(edited_table, keep_column)
         table_changed = has_table_changed(table, effective_edited_table)
         if not effective_edited_table.empty:
             show_prior_validation(validate_prior(effective_edited_table), compact=True)
@@ -671,7 +678,7 @@ def render_prior_editor(table, prefix, save, use=None, download_name="feature_pr
                 if st.button("Save Changes", type="primary", key=f"{prefix}_save",
                              use_container_width=True):
                     if effective_edited_table.empty:
-                        st.warning("At least one row must remain after removal.")
+                        st.warning("Tick Keep on at least one row.")
                         return
                     save(effective_edited_table)
                     ss[f"{prefix}_popup_toggle_version"] = toggle_version + 1
@@ -680,7 +687,7 @@ def render_prior_editor(table, prefix, save, use=None, download_name="feature_pr
                         st.rerun(scope="fragment")
                     st.rerun()
             else:
-                st.caption("Make a change or tick Remove to enable Save.")
+                st.caption("Make a change, or untick Keep on a row, to enable Save.")
         if use:
             with use_col:
                 if st.button("Use this file", key=f"{prefix}_use_edit", use_container_width=True,

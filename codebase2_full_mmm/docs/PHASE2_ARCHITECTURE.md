@@ -136,7 +136,7 @@ The Trade and Competitor TV defaults:
 |---|---|---|
 | Input | pre-transformed features | **raw** media + spend |
 | Transforms | fixed upstream, invisible to the model | **learned in-model** |
-| Status | live: a package `mmm/{core,data,modelling,reporting,checks}`, 1968 local checks (incl. the BRIDGE web app that runs it), eight real-data runs | early design, ~2,570 lines in flat files, no work since |
+| Status | live: a package `mmm/{core,data,modelling,reporting,checks}`, 2021 local checks (incl. the BRIDGE web app that runs it), eight real-data runs | early design, ~2,570 lines in flat files, no work since |
 | Scaling | `resolve_scaling`: every column, both sides of every transform | hard-wired per column type. **The v1 defect is still present** |
 | Priors | `prior_sd_basis` / `prior_mean_basis`, three pooling modes | a raw log-scale sd, hierarchical/global only |
 | Front end | `config.yaml` + prior CSV | Python driver |
@@ -295,7 +295,7 @@ How to read it:
 
 | Capability | Codebase 1 source | In plain words | Codebase 2 today | Action | P |
 |---|---|---|---|---|---|
-| Tests with no PyMC | `tests/run_all.py` (1968 checks, stubbed pymc and matplotlib) | scaling, decomposition and reporting logic run on a laptop | none | **new** suite `tests_phase2/`. Do not extend the codebase 1 suites | P0 |
+| Tests with no PyMC | `tests/run_all.py` (2021 checks, stubbed pymc and matplotlib) | scaling, decomposition and reporting logic run on a laptop | none | **new** suite `tests_phase2/`. Do not extend the codebase 1 suites | P0 |
 | A real-PyMC test | `tests/test_v24_real_pymc.py` | samples the real model on a small panel and SKIPs without PyMC: the only test that can catch a PyMC or ArviZ API change | none | **new**: the same for codebase 2, transforms included | P1 |
 | Package layout | `mmm/{core,data,modelling,reporting,checks}`, absolute imports from the package root, entry points at the folder root | one place for each concern; the shared modules import cleanly | flat files; `tests/test_no_pymc.py` swaps `sys.path` between the two codebases | **new**: the same layout under its own package name (proposal: `mmm2`), so both import side by side | P0 |
 | Modeller docs | `docs/CONFIG_GUIDE.md`, `CHECKS_GUIDE.md` (every check: theory, a real example, how to read it, what to change), `OUTPUTS_GUIDE.md`, `FEATURE_PRIOR_GUIDE.md`, `cases/` (one file per real problem) | the references a modeller works from | the planning docs in this folder | codebase 2 editions, with the transform checks as new chapters | P1 |

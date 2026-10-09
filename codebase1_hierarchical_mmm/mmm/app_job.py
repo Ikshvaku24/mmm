@@ -60,7 +60,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.07.2"   # must equal mmm.__version__
+__codebase__ = "2026.10.09.1"   # must equal mmm.__version__
 
 import contextlib
 import copy
@@ -279,6 +279,20 @@ def read_names(path: str, column: str) -> list:
     if problems:
         raise ValueError(f"{os.path.basename(path)}: " + "; ".join(problems))
     return names
+
+
+def type_settings(run_group: str, config_dir: str) -> tuple[str, dict]:
+    """(modelling type, the settings it sets) for a run group - from this
+    folder's modelling_types.csv (settings.modelling_type_settings). ("", {})
+    without a group, or for a type the file gives no settings."""
+    parts = parse_group(run_group) if run_group else None
+    if not parts:
+        return "", {}
+    from mmm.core.settings import modelling_type_settings
+    every = modelling_type_settings(os.path.join(config_dir, MODELLING_TYPES_FILE),
+                                    job_owned=JOB_OWNED_KEYS)
+    kind = parts["modelling_type"]
+    return kind, copy.deepcopy(every.get(kind) or {})
 
 
 def effective_config(raw: dict | None, params: dict, base_path: str,
@@ -538,18 +552,33 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
             print(f"[app_job] config   {cfg_src}")
             with open(cfg_src, encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}
+            # the modelling type's own settings (modelling_types.csv) sit
+            # between the team's config.yaml and the run's: team < type < run
+            kind, by_type = type_settings(p["run_group"], config_dir)
+            if by_type:
+                info["modelling_type"] = kind
+                info["type_settings"] = by_type
+                for sec, block in by_type.items():
+                    for key, value in block.items():
+                        print(f"[app_job] type     {kind}: {sec}.{key} = {value}")
             if p["config_file"]:
                 team = os.path.join(config_dir, "config.yaml")
                 if os.path.exists(team):
                     with open(team, encoding="utf-8") as fh:
-                        raw = merge_config(yaml.safe_load(fh) or {}, raw)
-                    print(f"[app_job] settings {p['config_file']} on top of the team's {team}")
+                        raw = merge_config(merge_config(yaml.safe_load(fh) or {}, by_type),
+                                           raw)
+                    print(f"[app_job] settings {p['config_file']} on top of the team's {team}"
+                          + (f" and the {kind} settings" if by_type else ""))
+                elif by_type:
+                    raw = merge_config(by_type, raw)
                 # the app names every input it sends: a mapping / share file in the
                 # team's config.yaml must not slip into a run that has none
                 raw["data"] = dict(raw.get("data") or {})
                 for param in ("mapping_file", "share_file"):
                     if not p[param]:
                         raw["data"][param] = None
+            elif by_type:                    # a hand run of this folder's config.yaml
+                raw = merge_config(raw, by_type)
             cfg = effective_config(raw, p, base_path, local_root, cfg_dir)
             cfg_path = os.path.join(run_dir, "app_config.yaml")
             with open(cfg_path, "w", encoding="utf-8") as fh:

@@ -23,6 +23,14 @@ widget, and `enforce_fixed` puts it back whenever a config.yaml is loaded, a
 run is reused or a run starts. The same limit applies to what goes out: the
 config.yaml a person downloads or saves with a run holds only the settings
 they may change; the job lays it over the team's config.yaml.
+
+The MODELLING TYPE chosen in block ① brings its own settings (codebase 1's
+modelling_types.csv - e.g. Primary carries an intercept, Secondary does not):
+`cfg_team` is the team's config.yaml, `cfg_base` = the team's settings WITH
+the type's, and everything above ("fixed at the team's value", Reset, the
+changes table) reads `cfg_base`. Choosing a type switches its settings at
+once (`apply_modelling_type`); the job lays the same type settings between
+the team's config.yaml and the run's own.
 """
 import copy
 import hashlib
@@ -31,7 +39,7 @@ import pandas as pd
 import streamlit as st
 import yaml
 
-from src import codebase
+from src import codebase, page_state
 
 SECTION_LABELS = {"model": "Model", "run": "Run", "sampler": "Sampler",
                   "cv": "Cross-validation", "output": "Output",
@@ -145,6 +153,17 @@ def may_mark_reported():
     return a["level"] in (a["policy"].get("mark_reported") or [])
 
 
+def may_edit_run(request) -> bool:
+    """May the viewer rename this run and edit its note? (app_access.yaml
+    `edit_runs`: levels, and "submitter" = the person who started the run.)"""
+    a = access()
+    allowed = a["policy"].get("edit_runs") or []
+    if a["level"] in allowed:
+        return True
+    who = str((request or {}).get("submitted_by") or "").strip().lower()
+    return "submitter" in allowed and bool(who) and who == viewer_email()
+
+
 def ui_policy():
     """(allowed 'section.key' set - None = every setting -, show_fixed, the
     policy as read) for the person viewing the page."""
@@ -172,18 +191,78 @@ def enforce_fixed(values, base):
     return reset
 
 
+# --------------------------------------------------------------------------- #
+# the modelling type's own settings (codebase 1's modelling_types.csv)
+# --------------------------------------------------------------------------- #
+def all_type_settings():
+    """{modelling type: {section: {key: value}}} - what each type sets."""
+    out = codebase.standard_names()
+    return dict((out.value or {}).get("type_settings") or {}) if out.ok else {}
+
+
+def type_settings_of(kind):
+    """What the modelling type `kind` sets ({} for none)."""
+    return copy.deepcopy(all_type_settings().get(kind) or {}) if kind else {}
+
+
+def _merge(base, over):
+    out = copy.deepcopy(base or {})
+    for section, block in (over or {}).items():
+        out.setdefault(section, {}).update(copy.deepcopy(block or {}))
+    return out
+
+
+def _flat(settings):
+    return {(sec, key) for sec, block in (settings or {}).items() for key in (block or {})}
+
+
+def set_type_base(kind):
+    """Make the team's settings for `kind` the base - fixed settings follow
+    it - without touching the current values (a reused run brings its own)."""
+    ss = st.session_state
+    team = ss.get("cfg_team") or ss.get("cfg_base") or {}
+    ss["cfg_base"] = _merge(team, type_settings_of(kind))
+    ss["_type_applied"] = kind
+
+
+def apply_modelling_type(kind):
+    """The modelling type was chosen (or changed): every setting the old or
+    the new type sets takes the new type's value - or the team's, where the
+    new type sets nothing. Returns [(setting, before, after)] that changed."""
+    ss = st.session_state
+    if ss.get("cfg_values") is None:
+        return []
+    old = ss.get("_type_applied")
+    keys = _flat(type_settings_of(old)) | _flat(type_settings_of(kind))
+    set_type_base(kind)
+    base, values = ss["cfg_base"], ss["cfg_values"]
+    changes = []
+    for section, key in sorted(keys):
+        new = (base.get(section) or {}).get(key)
+        now = (values.get(section) or {}).get(key)
+        if not _same(now, new):
+            values.setdefault(section, {})[key] = copy.deepcopy(new)
+            changes.append((f"{section}.{key}", _fmt(now), _fmt(new)))
+    if changes:
+        _bump()
+    return changes
+
+
 def _sync_with_schema():
     """Keep the session's config in step with codebase 1's CURRENT schema.
 
     codebase 1 can be re-uploaded while a session is open: a key it no longer
-    has would stop the YAML being written, a key it gained would be missing.
-    Runs at the top of every rerun, before anything reads the config."""
+    has would stop the YAML being written, a key it gained would be missing,
+    and the modelling types' settings may have changed. Runs at the top of
+    every rerun, before anything reads the config."""
+    ss = st.session_state
     schema = get_schema()
-    values, base = st.session_state.get("cfg_values"), st.session_state.get("cfg_base")
-    if not schema or values is None or base is None:
+    values = ss.get("cfg_values")
+    team = ss.get("cfg_team") or ss.get("cfg_base")
+    if not schema or values is None or team is None:
         return
     known = {(r["section"], r["key"]) for r in schema["rows"]}
-    for block in (values, base):
+    for block in (values, team):
         for section in list(block):
             for key in list(block.get(section) or {}):
                 if (section, key) not in known:
@@ -192,10 +271,15 @@ def _sync_with_schema():
                 block.pop(section, None)
     for row in schema["rows"]:
         section, key = row["section"], row["key"]
-        base.setdefault(section, {}).setdefault(key, row["default"])
+        team.setdefault(section, {}).setdefault(key, row["default"])
+    ss["cfg_team"] = team
+    base = _merge(team, type_settings_of(ss.get("_type_applied")))
+    ss["cfg_base"] = base
+    for row in schema["rows"]:
+        section, key = row["section"], row["key"]
         values.setdefault(section, {}).setdefault(key, base[section][key])
-    # app_access.yaml may have changed with the re-upload: a setting that is
-    # now fixed goes back to the team's value
+    # app_access.yaml (or a type's settings) may have changed with the
+    # re-upload: a setting that is now fixed goes back to the base value
     if enforce_fixed(values, base):
         _bump()
 
@@ -216,6 +300,7 @@ def init_config_state():
         if not fallback.ok:
             return False
         values = fallback.value
+    st.session_state["cfg_team"] = copy.deepcopy(values)
     st.session_state["cfg_base"] = values
     st.session_state["cfg_values"] = copy.deepcopy(values)
     st.session_state["cfg_version"] = 0
@@ -264,6 +349,16 @@ def config_is_valid():
     return bool(st.session_state.get("cfg_valid", False))
 
 
+def config_valid():
+    """Do the current settings load the way the job will load them? Asked of
+    codebase 1 (cached by content) - also when the settings page was never
+    opened. Kept in cfg_valid for the page titles and the checklist."""
+    values = st.session_state.get("cfg_values")
+    ok = values is not None and codebase.validate_config(values).ok
+    st.session_state["cfg_valid"] = ok
+    return ok
+
+
 def _bump():
     st.session_state["cfg_version"] = st.session_state.get("cfg_version", 0) + 1
 
@@ -296,7 +391,8 @@ def _clear_config_upload():
 
 
 def reset_config_to_base():
-    """Back to the team's config.yaml - what the ✕ on a loaded or reused config does."""
+    """Back to the team's config.yaml (with the modelling type's settings) -
+    what the ✕ on a loaded or reused config does."""
     _set_config(st.session_state["cfg_base"])
     st.session_state["cfg_origin"] = None
     st.session_state["cfg_origin_name"] = ""
@@ -467,6 +563,14 @@ def _settings_fragment():
         note = st.session_state.pop("cfg_load_note", None)
         if note:
             st.info(note)
+        kind = st.session_state.get("_type_applied")
+        by_type = type_settings_of(kind)
+        if by_type:
+            st.info(f"Modelling type **{kind}** (chosen in ①) sets "
+                    + ", ".join(f"`{sec}.{key}` = {_fmt(v)}" for sec, block in by_type.items()
+                                for key, v in block.items())
+                    + " - codebase 1's modelling_types.csv. Those values are the base below; "
+                      "Reset goes back to them.")
 
         values = st.session_state["cfg_values"]
         base = st.session_state["cfg_base"]
@@ -487,50 +591,39 @@ def _settings_fragment():
                 (advanced_by if is_advanced(row) else rows_by).setdefault(
                     row["section"], []).append(row)
 
-        # The widgets are only drawn while the editor is open - up to a hundred
-        # of them, which every page refresh would otherwise redraw.
-        if st.toggle("Edit settings", key="cfg_editor_open"):
-            if not rows_by and not advanced_by:
-                st.caption("Every setting is fixed by the team (app_access.yaml).")
-            _render_tabs(rows_by, schema, values, base, job_owned, version)
-            n_advanced = sum(len(v) for v in advanced_by.values())
-            if n_advanced and st.toggle(
-                    f"Advanced options ({n_advanced} settings)", key="cfg_advanced_open",
-                    help="The settings app_access.yaml opens to config_advanced_access - "
-                         "needed once in a while. Your changes to them count whether "
-                         "this is open or not."):
-                st.markdown("##### Advanced options")
-                _render_tabs(advanced_by, schema, values, base, job_owned, version)
-            if show_fixed and editable is not None:
-                fixed = [{"setting": f"{r['section']}.{r['key']}",
-                          "value": _fmt((values.get(r["section"]) or {}).get(r["key"])),
-                          "what it does": " ".join(str(r["help"]).split())[:120]}
-                         for r in schema["rows"]
-                         if not shown(r) and f"{r['section']}.{r['key']}" not in job_owned
-                         and r["kind"] != "path"]
-                with st.expander(f"Fixed by the team ({len(fixed)} settings)"):
-                    st.dataframe(pd.DataFrame(fixed), use_container_width=True,
-                                 hide_index=True)
+        # The settings have a page of their own, so they are drawn as soon as
+        # it opens - no "Edit settings" switch any more.
+        if not rows_by and not advanced_by:
+            st.caption("Every setting is fixed by the team (app_access.yaml).")
+        _render_tabs(rows_by, schema, values, base, job_owned, version)
+        n_advanced = sum(len(v) for v in advanced_by.values())
+        if n_advanced and st.toggle(
+                f"Advanced options ({n_advanced} settings)", key="cfg_advanced_open",
+                help="The settings app_access.yaml opens to config_advanced_access - "
+                     "needed once in a while. Your changes to them count whether "
+                     "this is open or not."):
+            st.markdown("##### Advanced options")
+            _render_tabs(advanced_by, schema, values, base, job_owned, version)
+        if show_fixed and editable is not None:
+            fixed = [{"setting": f"{r['section']}.{r['key']}",
+                      "value": _fmt((values.get(r["section"]) or {}).get(r["key"])),
+                      "what it does": " ".join(str(r["help"]).split())[:120]}
+                     for r in schema["rows"]
+                     if not shown(r) and f"{r['section']}.{r['key']}" not in job_owned
+                     and r["kind"] != "path"]
+            with st.expander(f"Fixed by the team ({len(fixed)} settings)"):
+                st.dataframe(pd.DataFrame(fixed), use_container_width=True,
+                             hide_index=True)
 
-        if st.session_state.get("cfg_origin") == "run":
-            note_col, x_col = st.columns([14, 1], vertical_alignment="center")
-            with note_col:
-                st.caption("Settings from **"
-                           + str(st.session_state.get("cfg_origin_name") or "a reused run")
-                           + "**.")
-            with x_col:
-                if st.button("✕", key="cfg_origin_clear",
-                             help="Remove these settings - back to the team's config.yaml."):
-                    reset_config_to_base()
-                    st.rerun()
+        upload_key = f"cfg_upload_{st.session_state.get('cfg_upload_version', 0)}"
         up_col, dl_col, reset_col = st.columns([2, 1, 1], vertical_alignment="bottom")
         with up_col:
             uploaded = st.file_uploader(
-                "Load a config.yaml", type=["yaml", "yml"],
-                key=f"cfg_upload_{st.session_state.get('cfg_upload_version', 0)}",
+                "Load a config.yaml", type=["yaml", "yml"], key=upload_key,
                 help="Takes the settings you may change from the file; a setting the file "
                      "leaves out, and every setting fixed by the team, keeps the team's "
                      "value. Remove the file (✕) to go back to the team's settings.")
+            removed = page_state.emptied(upload_key, uploaded)
             if uploaded is not None:
                 data = uploaded.getvalue()
                 signature = (uploaded.name, hashlib.sha1(data).hexdigest())
@@ -548,7 +641,7 @@ def _settings_fragment():
                         st.rerun()
                     for err in parsed.errors:
                         st.error(err)
-            elif st.session_state.get("cfg_origin") == "file":
+            elif removed and st.session_state.get("cfg_origin") == "file":
                 reset_config_to_base()          # the file was taken out of the box (✕)
                 st.rerun()
         text = codebase.config_yaml(values, only=editable)
@@ -565,9 +658,24 @@ def _settings_fragment():
                                  "file is run.")
         with reset_col:
             if st.button("Reset to base", key="cfg_reset", type="secondary",
-                         help="Every setting back to the team's config.yaml."):
+                         help="Every setting back to the team's config.yaml (with the "
+                              "modelling type's settings)."):
                 reset_config_to_base()
                 st.rerun()
+        # a reused run's settings - or a loaded file whose box is empty because
+        # the page was opened again - are named here, with their own ✕
+        origin = st.session_state.get("cfg_origin")
+        if origin == "run" or (origin == "file" and uploaded is None):
+            note_col, x_col = st.columns([14, 1], vertical_alignment="center")
+            with note_col:
+                st.caption("Settings from **"
+                           + str(st.session_state.get("cfg_origin_name") or "a reused run")
+                           + "**.")
+            with x_col:
+                if st.button("✕", key="cfg_origin_clear",
+                             help="Remove these settings - back to the team's config.yaml."):
+                    reset_config_to_base()
+                    st.rerun()
 
         check = codebase.validate_config(values)
         st.session_state["cfg_valid"] = check.ok

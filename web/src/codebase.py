@@ -72,11 +72,13 @@ import yaml
 
 from src import perf
 
-# the first version whose job knows the run groups (the job parameter
-# run_group: <BMC>/<period> <modelling type>/<run>), the four access levels
-# and the standard BMC / modelling-type lists; 2026.09.30.1 brought
-# app_access.yaml and the partial run configs, 2026.09.29.2 the run folders
-MIN_CODEBASE = "2026.10.07.1"
+# the first version whose modelling_types.csv carries each type's settings
+# (applied by the app AND the job), with app_access.yaml's `edit_runs` and
+# 01_data/collinearity_matrix.csv; 2026.10.07.1 brought the run groups (the
+# job parameter run_group), the four access levels and the standard lists,
+# 2026.09.30.1 app_access.yaml and the partial run configs, 2026.09.29.2 the
+# run folders
+MIN_CODEBASE = "2026.10.09.1"
 REFRESH_SECONDS = 300
 WEB_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SIBLING = os.path.normpath(os.path.join(WEB_DIR, "..", "codebase1_hierarchical_mmm"))
@@ -817,8 +819,8 @@ def _impl_schema():
         # full access - it never opens anything
         access = {"full_access": [], "config_full_access": [],
                   "config_advanced_access": [], "editable": [], "advanced": [],
-                  "show_fixed": True, "mark_reported": [], "unknown": [],
-                  "source": access_file, "error": str(e)}
+                  "show_fixed": True, "mark_reported": [], "edit_runs": [],
+                  "unknown": [], "source": access_file, "error": str(e)}
     return {"rows": st_.config_schema(), "job_owned": list(aj.JOB_OWNED_KEYS),
             "folders": dict(aj.FOLDERS), "output_folder": aj.OUTPUT_FOLDER,
             "sections": ["data"] + list(st_.SECTIONS),
@@ -848,7 +850,7 @@ def layout() -> Outcome:
 
 
 def _impl_standard_names():
-    aj = _m("mmm.app_job")
+    aj, st_ = _m("mmm.app_job"), _m("mmm.core.settings")
     out, problems = {}, []
     for key, file_name, column in (("bmc_names", aj.BMC_NAMES_FILE, "bmc_name"),
                                    ("modelling_types", aj.MODELLING_TYPES_FILE,
@@ -861,6 +863,13 @@ def _impl_standard_names():
         except (OSError, ValueError) as e:
             out[key] = []
             problems.append(str(e))
+    try:
+        out["type_settings"] = st_.modelling_type_settings(
+            os.path.join(_STATE["dir"], aj.MODELLING_TYPES_FILE),
+            job_owned=aj.JOB_OWNED_KEYS)
+    except (OSError, ValueError) as e:
+        out["type_settings"] = {}
+        problems.append(str(e))
     out["problems"] = problems
     return out
 
@@ -868,6 +877,7 @@ def _impl_standard_names():
 def standard_names() -> Outcome:
     """The standard BMC names and modelling types - codebase 1's
     bmc_names.csv and modelling_types.csv: {bmc_names, modelling_types,
+    type_settings ({type: {section: {key: value}}} - what each type sets),
     problems}."""
     return _call("standard_names")
 
@@ -1161,7 +1171,7 @@ def clean_prior_table(df: pd.DataFrame) -> pd.DataFrame:
     """The table as the loader should see it: UI-only columns dropped, text
     trimmed, empty strings blank. Pure pandas - safe without the backend."""
     t = df.copy()
-    t = t.drop(columns=[c for c in ("Remove", "Serial No") if c in t.columns])
+    t = t.drop(columns=[c for c in ("Keep", "Remove", "Serial No") if c in t.columns])
     t.columns = [str(c).strip() for c in t.columns]
     def tidy(v):
         if isinstance(v, str):
@@ -1345,7 +1355,7 @@ def _impl_generate_priors(datacube, cfg, mapping=None, share=None, restrict_to=N
                 with open(p, "rb") as fh:
                     files[os.path.basename(p)] = fh.read()
         wdir = res.get("warnings_dir") or os.path.join(out, "00_warnings")
-        index_md, rows, docs = "", [], {}
+        index_md, rows, docs, texts = "", [], {}, []
         if os.path.isdir(wdir):
             idx = os.path.join(wdir, "00_INDEX.md")
             if os.path.exists(idx):
@@ -1354,6 +1364,9 @@ def _impl_generate_priors(datacube, cfg, mapping=None, share=None, restrict_to=N
             table = os.path.join(wdir, "all_warnings.csv")
             if os.path.exists(table):
                 rows = pd.read_csv(table).fillna("").to_dict("records")
+            table = os.path.join(wdir, "warning_texts.csv")
+            if os.path.exists(table):
+                texts = pd.read_csv(table).fillna("").to_dict("records")
             for f in sorted(os.listdir(wdir)):
                 if f.endswith(".md") and f != "00_INDEX.md":
                     with open(os.path.join(wdir, f), encoding="utf-8") as fh:
@@ -1366,7 +1379,7 @@ def _impl_generate_priors(datacube, cfg, mapping=None, share=None, restrict_to=N
         return {"case": res.get("case"), "basis": res.get("basis"),
                 "case_text": pb.CASE_TEXT.get(res.get("case"), ""),
                 "files": files, "index_md": index_md,
-                "warnings": rows, "warning_docs": docs}
+                "warnings": rows, "warning_texts": texts, "warning_docs": docs}
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 

@@ -1,5 +1,6 @@
 """The charts a finished run shows: fit, contributions, decomposition and
-prior vs posterior - built from the run's own output files.
+collinearity (the design's correlation heatmap and its VIFs) - built from the
+run's own output files.
 
 Two layers, so the arithmetic can be tested without Plotly:
   * data functions (pure pandas) - one per chart, reading the CSVs codebase 1
@@ -13,7 +14,10 @@ its colour from its size over the whole run, so it keeps it in every region,
 period and chart; the baseline core in a recessive grey with the drivers in
 colour; 2px lines, ~10% washes, solid hairline grids; a hover readout that
 lists every series; a legend for two or more series. The page puts a table
-twin under every chart.
+twin under every chart. The correlation heatmap is the one diverging scale:
+blue (negative) - a neutral grey at 0 - red (positive), the two arms at
+matching OKLCH lightness, stepped again for the dark theme (where 0 recedes
+into the surface and strong correlations are the bright cells).
 """
 from __future__ import annotations
 
@@ -78,26 +82,43 @@ def _pillar(v) -> str:
 # --------------------------------------------------------------------------- #
 # data - fit (04_fit/fit_metrics.csv, 04_fit/actual_vs_predicted.csv)
 # --------------------------------------------------------------------------- #
-def fit_tiles(fit: pd.DataFrame) -> list:
-    """[(label, value text, help)] - the headline fit numbers (the __all__ rows)."""
+AGGREGATE = "__aggregate__"     # fit_metrics.csv: every region summed per date
+POOLED = "__all__"              # fit_metrics.csv: every region x date pooled
+
+
+def fit_tiles(fit: pd.DataFrame, region: str = ALL) -> list:
+    """[(label, value text, help)] - the fit numbers of the series the chart
+    shows: with all regions, the AGGREGATE (the regions summed per date, one
+    national series - codebase 1's __aggregate__ rows); with one region, that
+    region's own. R² is of that series against its own mean. A run older
+    than the __aggregate__ rows falls back to the within-region R² of all
+    rows."""
     if fit is None or fit.empty or not {"region", "dataset"} <= set(fit.columns):
         return []
-    rows = fit[fit["region"].astype(str) == "__all__"]
+    names = fit["region"].astype(str)
+    if region != ALL:
+        rows, r2_col, what = fit[names == str(region)], "r2", f"{region}'s own series"
+    elif (names == AGGREGATE).any():
+        rows, r2_col, what = fit[names == AGGREGATE], "r2", \
+            "the aggregate - every region summed per date, one national series"
+    else:
+        rows, r2_col, what = fit[names == POOLED], "r2_within_region", \
+            "every region against its own mean (this run has no aggregate rows)"
     by = {str(r["dataset"]): r for _, r in rows.iterrows()}
     out = []
 
     def add(label, dataset, col, fmt, help_text):
         row = by.get(dataset)
-        v = _num(row.get(col)) if row is not None else None
+        v = _num(row.get(col)) if row is not None and col in row else None
         if v is not None:
-            out.append((label, fmt(v), help_text))
+            out.append((label, fmt(v), help_text + f" Series: {what}."))
 
-    add("R² within region · training", "train", "r2_within_region", lambda v: f"{v:.2f}",
-        "R² against each region's own mean - the honest R² (the pooled one is "
-        "inflated by the gaps in level between regions).")
-    add("R² within region · holdout", "test", "r2_within_region", lambda v: f"{v:.2f}",
-        "The same on the held-out weeks. Below 0 = worse than each region's own "
-        "average.")
+    add("R² · training", "train", r2_col, lambda v: f"{v:.2f}",
+        "How much of the sales' movement around its own average the model explains "
+        "on the weeks it was fitted on.")
+    add("R² · holdout", "test", r2_col, lambda v: f"{v:.2f}",
+        "The same on the held-out weeks the model never saw. Below 0 = worse than "
+        "the series' own average.")
     add("MAPE · holdout", "test", "mape_pct", lambda v: f"{v:.1f}%",
         "Mean absolute % error on the held-out weeks.")
     add("Holdout inside the 90% band", "test", "coverage_90_pred_pct", lambda v: f"{v:.0f}%",
@@ -305,96 +326,181 @@ def decomposition_frame(ts: pd.DataFrame, pillars: list, region: str = ALL):
 
 
 # --------------------------------------------------------------------------- #
-# data - prior vs posterior (02_convergence/prior_posterior_contraction.csv)
+# data - collinearity (01_data/collinearity_matrix.csv, _vif.csv, _summary.csv)
 # --------------------------------------------------------------------------- #
-def contraction_points(contr: pd.DataFrame) -> pd.DataFrame:
-    """One point per feature (per region under independent pooling): the
-    parameter the delta arithmetic uses (`use_for_delta`), with its
-    contraction and shift."""
-    if contr is None or contr.empty or "parameter" not in contr:
-        return pd.DataFrame()
-    d = contr[contr["use_for_delta"].map(_truthy)] if "use_for_delta" in contr else contr
+VIF_WARN, VIF_BAD = 5.0, 10.0     # codebase 1's assumption defaults (vif_warn, vif_bad)
+DESIGN_EXTRAS = ("__intercept__", "__trend__")
+
+
+def is_design_extra(name) -> bool:
+    """The model's own columns - intercept, seasonality (Fourier), trend."""
+    n = str(name)
+    return n in DESIGN_EXTRAS or n.startswith("__fourier__")
+
+
+def collinearity_regions(*frames) -> list:
+    """The regions any of the collinearity files covers, in file order."""
+    seen = []
+    for f in frames:
+        if f is not None and len(f) and "region" in f:
+            seen += [r for r in f["region"].astype(str) if r not in seen]
+    return seen
+
+
+def correlation_grid(matrix: pd.DataFrame, region: str, top: int | None = 25,
+                     with_extras: bool = True):
+    """(labels, grid) - one region's correlation matrix as a square array, for
+    the heatmap. `top` keeps the columns most correlated with another (their
+    largest |r|), in design order (seasonality and trend first, then the
+    features as the model lists them); None keeps all. `with_extras` False
+    leaves out the seasonality / trend columns."""
+    d = matrix[matrix["region"].astype(str) == str(region)]
     if d.empty:
-        return pd.DataFrame()
-    blank = pd.Series("", index=d.index)
-    feature = (d["feature"] if "feature" in d else d.get("name", blank)).map(_text)
-    region = d.get("region", blank).map(_text)
-    out = pd.DataFrame({
-        "key": d["parameter"].astype(str).values,
-        "label": [f + (f" · {r}" if r else "") for f, r in zip(feature, region)],
-        "feature": feature.values, "region": region.values,
-        "variable": d.get("variable", blank).map(_text).values,
-        "scale": d.get("scale", blank).map(_text).values,
-        "prior_mean": pd.to_numeric(d["prior_mean"], errors="coerce").values,
-        "prior_sd": pd.to_numeric(d["prior_sd"], errors="coerce").values,
-        "posterior_mean": pd.to_numeric(d["posterior_mean"], errors="coerce").values,
-        "posterior_sd": pd.to_numeric(d["posterior_sd"], errors="coerce").values,
-        "contraction": pd.to_numeric(d["contraction"], errors="coerce").values,
-        "shift": pd.to_numeric(d["mean_shift_in_prior_sd"], errors="coerce").values,
-    })
-    out = out.dropna(subset=["contraction", "shift"])
-    return out.sort_values("label", kind="stable").reset_index(drop=True)
+        return [], np.zeros((0, 0))
+    order = list(dict.fromkeys(d["column_a"].astype(str)))
+    if not with_extras:
+        order = [c for c in order if not is_design_extra(c)]
+    wide = (d.assign(column_a=d["column_a"].astype(str), column_b=d["column_b"].astype(str))
+            .pivot_table(index="column_a", columns="column_b", values="correlation",
+                         aggfunc="first")
+            .reindex(index=order, columns=order))
+    if top and len(order) > top:
+        off = wide.abs().where(~np.eye(len(order), dtype=bool))
+        strength = off.max(axis=1).fillna(0.0)
+        keep = set(strength.sort_values(ascending=False, kind="stable").index[:top])
+        order = [c for c in order if c in keep]
+        wide = wide.reindex(index=order, columns=order)
+    return order, wide.to_numpy(dtype=float)
 
 
-def data_curve(point):
-    """(mean, sd) of what the data alone says - recovered from the prior and
-    the posterior (both ~Normal), as codebase 1's own three-curve charts do:
-        1/sd_data^2 = 1/sd_post^2 - 1/sd_prior^2
-        mu_data     = sd_data^2 * (mu_post/sd_post^2 - mu_prior/sd_prior^2)
-    None when the posterior is not narrower than the prior (unidentified)."""
-    pm, ps = _num(point.get("prior_mean")), _num(point.get("prior_sd"))
-    qm, qs = _num(point.get("posterior_mean")), _num(point.get("posterior_sd"))
-    if None in (pm, ps, qm, qs) or ps <= 0 or qs <= 0:
-        return None
-    precision = 1.0 / qs ** 2 - 1.0 / ps ** 2
-    if precision <= 1e-12:
-        return None
-    var = 1.0 / precision
-    return var * (qm / qs ** 2 - pm / ps ** 2), math.sqrt(var)
+def strongest_pairs(matrix: pd.DataFrame, region: str, limit: int = 10,
+                    with_extras: bool = True) -> pd.DataFrame:
+    """The most correlated pairs of one region, |r| largest first (each pair
+    once, no column with itself); `with_extras` False: features only."""
+    d = matrix[matrix["region"].astype(str) == str(region)].copy()
+    d = d[d["column_a"].astype(str) < d["column_b"].astype(str)]
+    if not with_extras:
+        d = d[~d["column_a"].map(is_design_extra) & ~d["column_b"].map(is_design_extra)]
+    d["abs"] = pd.to_numeric(d["correlation"], errors="coerce").abs()
+    return (d.sort_values("abs", ascending=False, kind="stable").head(limit)
+            .drop(columns=["abs"]).reset_index(drop=True))
 
 
-def density_curves(point, n: int = 400):
-    """{"x", "prior", "posterior", "data"}: Normal curves from the means and
-    sds ("data" is None when it cannot be recovered), or None when an sd is
-    missing or not positive."""
-    pm, ps = _num(point.get("prior_mean")), _num(point.get("prior_sd"))
-    qm, qs = _num(point.get("posterior_mean")), _num(point.get("posterior_sd"))
-    if None in (pm, ps, qm, qs) or ps <= 0 or qs <= 0:
-        return None
-    lo, hi = min(pm - 4 * ps, qm - 4 * qs), max(pm + 4 * ps, qm + 4 * qs)
-    data = data_curve(point)
-    if data is not None and data[1] <= 3 * ps:          # an informative data curve
-        lo, hi = min(lo, data[0] - 4 * data[1]), max(hi, data[0] + 4 * data[1])
-    x = np.linspace(lo, hi, n)
-
-    def pdf(m, s):
-        return np.exp(-0.5 * ((x - m) / s) ** 2) / (s * math.sqrt(2 * math.pi))
-
-    return {"x": x, "prior": pdf(pm, ps), "posterior": pdf(qm, qs),
-            "data": pdf(*data) if data is not None else None}
+def vif_points(vif: pd.DataFrame, region: str) -> pd.DataFrame:
+    """One region's VIFs, worst first: column, vif, vif_uncentred, duplicates,
+    explained_by, vif_note (blank VIFs - not computable - last, with their
+    note)."""
+    if vif is None or vif.empty:
+        return pd.DataFrame(columns=["column", "vif", "vif_uncentred", "duplicates",
+                                     "explained_by", "vif_note"])
+    d = vif[vif["region"].astype(str) == str(region)].copy()
+    for col in ("vif", "vif_uncentred"):
+        if col in d:
+            d[col] = pd.to_numeric(d[col], errors="coerce")
+    keep = [c for c in ("column", "vif", "vif_uncentred", "duplicates", "explained_by",
+                        "vif_note") if c in d.columns]
+    return (d.sort_values("vif", ascending=False, na_position="last", kind="stable")[keep]
+            .reset_index(drop=True))
 
 
-def contraction_reading(point) -> str:
-    """What the two numbers say, in one or two sentences."""
-    c, s = _num(point.get("contraction")), _num(point.get("shift"))
-    if c is None or s is None:
-        return ""
-    learned = ("the data determined it" if c >= 0.7 else
-               "the data sharpened it" if c >= 0.2 else
-               "the posterior is mostly your prior - report it as an assumption, "
-               "not a finding" if c >= 0 else
-               "the posterior came out WIDER than the prior - the data is fighting "
-               "the model")
-    moved = ("it sits far from the prior mean you gave (|shift| > 2) - check the "
-             "units or the prior" if abs(s) > 2 else "it stayed close to the prior mean")
-    text = f"Contraction {c:.2f}, shift {s:+.2f} prior sd: {learned}; {moved}."
-    if str(point.get("scale")) == "log":
-        sign = -1.0 if str(point.get("variable", "")).endswith("neg") else 1.0
-        pm, qm = _num(point.get("prior_mean")), _num(point.get("posterior_mean"))
-        if pm is not None and qm is not None:
-            text += (f" As a coefficient (median, scaled units): prior {sign * math.exp(pm):.4g}"
-                     f" → posterior {sign * math.exp(qm):.4g}.")
-    return text
+def collinearity_tiles(summary: pd.DataFrame, region: str) -> list:
+    """[(label, value text, help)] - one region's collinearity in four numbers."""
+    if summary is None or summary.empty:
+        return []
+    rows = summary[summary["region"].astype(str) == str(region)]
+    if rows.empty:
+        return []
+    r = rows.iloc[0]
+    out = []
+    cond = _num(r.get("condition_number"))
+    if cond is not None or str(r.get("condition_number")) == "inf":
+        out.append(("Condition number", "∞" if cond is None or math.isinf(cond)
+                    else f"{cond:,.0f}",
+                    "How close the whole design is to singular. Above 10 warns, above "
+                    "30 is severe; ∞ = some columns are exact combinations of others."))
+    mx = _num(r.get("max_vif"))
+    out.append(("Largest VIF", "n/a" if mx is None else f"{mx:,.1f}",
+                "The worst variable's variance inflation: 5 warns, 10 is severe. n/a = "
+                "not computable (more design columns than training periods)."))
+    if _text(r.get("worst_column")):
+        out.append(("Worst variable", _text(r.get("worst_column")),
+                    "Explained by: " + (_text(r.get("worst_explained_by")) or "-")))
+    out.append(("Verdict", _text(r.get("verdict")) or "-",
+                "ok / moderate / severe - codebase 1's reading of the condition number "
+                "and the VIFs together."))
+    return out
+
+
+# --------------------------------------------------------------------------- #
+# data - warnings (00_warnings/all_warnings.csv, warning_texts.csv)
+# --------------------------------------------------------------------------- #
+SEVERITY_ORDER = {"high": 0, "medium": 1, "review": 2, "info": 3}
+NOT_A_VARIABLE = "(not about one variable)"
+
+
+def _warning_frame(table: pd.DataFrame) -> pd.DataFrame:
+    t = table.copy()
+    for col in ("severity", "category", "feature", "region"):
+        if col not in t:
+            t[col] = ""
+        t[col] = t[col].map(_text)
+    return t
+
+
+def warning_summary(table: pd.DataFrame) -> pd.DataFrame:
+    """One row per category: severity, category, `variables` - how many
+    DIFFERENT variables it is about (a variable warned in five regions counts
+    once), `regions` - in how many regions, `warnings` - how many rows the
+    file has. Worst severity first, then most variables."""
+    cols = ["severity", "category", "variables", "regions", "warnings"]
+    if table is None or table.empty:
+        return pd.DataFrame(columns=cols)
+    t = _warning_frame(table)
+    rows = []
+    for (severity, category), d in t.groupby(["severity", "category"], sort=False):
+        rows.append({"severity": severity, "category": category,
+                     "variables": int(d.loc[d["feature"] != "", "feature"].nunique()),
+                     "regions": int(d.loc[d["region"] != "", "region"].nunique()),
+                     "warnings": int(len(d))})
+    out = pd.DataFrame(rows, columns=cols)
+    out["_rank"] = out["severity"].map(lambda v: SEVERITY_ORDER.get(str(v).lower(), 9))
+    return (out.sort_values(["_rank", "variables", "warnings"], ascending=[True, False, False],
+                            kind="stable").drop(columns="_rank").reset_index(drop=True))
+
+
+def warning_detail(table: pd.DataFrame, category: str) -> pd.DataFrame:
+    """One row per VARIABLE a category is about: variable, regions (which),
+    warnings (rows). A warning that names no variable is one row of its own."""
+    cols = ["variable", "regions", "warnings"]
+    if table is None or table.empty:
+        return pd.DataFrame(columns=cols)
+    t = _warning_frame(table)
+    d = t[t["category"] == str(category)]
+    rows = []
+    for feature, g in d[d["feature"] != ""].groupby("feature", sort=False):
+        regions = list(dict.fromkeys(r for r in g["region"] if r))
+        rows.append({"variable": feature,
+                     "regions": ", ".join(regions) if regions else "-",
+                     "warnings": int(len(g))})
+    unnamed = d[d["feature"] == ""]
+    if len(unnamed):
+        regions = list(dict.fromkeys(r for r in unnamed["region"] if r))
+        rows.append({"variable": NOT_A_VARIABLE,
+                     "regions": ", ".join(regions) if regions else "-",
+                     "warnings": int(len(unnamed))})
+    return pd.DataFrame(rows, columns=cols)
+
+
+def warning_examples(texts: pd.DataFrame, category: str, limit: int = 3) -> list:
+    """What a category's warnings actually SAY - one example message per
+    kind (warning_texts.csv), most frequent first."""
+    if texts is None or texts.empty or "category" not in texts:
+        return []
+    d = texts[texts["category"].map(_text) == str(category)]
+    if "n" in d:
+        d = d.sort_values("n", ascending=False, kind="stable")
+    col = "example" if "example" in d else ("template" if "template" in d else None)
+    return [_text(v) for v in d[col].head(limit)] if col else []
 
 
 # --------------------------------------------------------------------------- #
@@ -550,83 +656,102 @@ def decomposition_figure(wide: pd.DataFrame, actual: pd.Series, colours: dict,
     return fig
 
 
-def flagged(points: pd.DataFrame, limit: int = 8) -> pd.Series:
-    """The points worth a label: contraction < 0.2 or |shift| > 2, worst
-    first, at most `limit` (the rest keep their hover and the table)."""
-    c, s = points["contraction"], points["shift"].abs()
-    bad = (c < 0.2) | (s > 2)
-    worst = (s.where(s > 2, 0) + (0.2 - c).clip(lower=0) * 10)[bad]
-    keep = worst.sort_values(ascending=False, kind="stable").index[:limit]
-    return points.index.isin(keep)
+# the diverging scale for correlations: equal steps per arm, the arms at
+# matching OKLCH lightness (blue = the sequential ramp; red stepped to match),
+# a neutral grey at 0 - and, on the dark surface, 0 receding into it
+DIVERGING = {
+    "light": [(0.0, "#104281"), (0.25, "#2a78d6"), (0.425, "#9ec5f4"), (0.5, "#f0efec"),
+              (0.575, "#f1aea8"), (0.75, "#c74845"), (1.0, "#762221")],
+    "dark": [(0.0, "#86b6ef"), (0.25, "#2a78d6"), (0.425, "#184f95"), (0.5, "#383835"),
+             (0.575, "#892b2a"), (0.75, "#c74845"), (1.0, "#ea9a93")],
+}
 
 
-def contraction_figure(points: pd.DataFrame, selected: str | None, mode: str = "light"):
-    """Every feature as a point: contraction (x) against shift (y). The
-    guides mark the two warnings - contraction < 0.2 and |shift| > 2 - and
-    the points past them are labelled."""
+def design_label(name) -> str:
+    """A design column as a modeller reads it: __fourier__sin_1 -> seasonality
+    sin 1, __trend__ -> trend, __intercept__ -> intercept."""
+    n = str(name)
+    if n.startswith("__fourier__"):
+        return "seasonality " + n[len("__fourier__"):].replace("_", " ")
+    if n in ("__trend__", "__intercept__"):
+        return n.strip("_")
+    return n
+
+
+def _short(label: str, n: int = 28) -> str:
+    label = design_label(label)
+    return label if len(label) <= n else label[:n - 1] + "…"
+
+
+def correlation_heatmap_figure(labels: list, grid, mode: str = "light", mark: float = 0.8):
+    """The design's correlation matrix as a heatmap: -1 blue, 0 neutral, +1
+    red. Only the cells at |r| >= `mark` carry their number (the rest have a
+    hover), and the diagonal - a column with itself - is left blank."""
     import plotly.graph_objects as go
-    ink, slots = INK[mode], SERIES[mode]
-    x = points["contraction"].clip(lower=-1.0)
-    fig = go.Figure()
-    fig.add_vline(x=0.2, line_color=ink["axis"], line_width=1,
-                  annotation_text="0.2", annotation_position="top",
-                  annotation_font=dict(color=ink["muted"], size=11))
-    for y in (2.0, -2.0):
-        fig.add_hline(y=y, line_color=ink["axis"], line_width=1,
-                      annotation_text=f"{y:+.0f} sd", annotation_position="right",
-                      annotation_font=dict(color=ink["muted"], size=11))
-    hover = ("<b>%{customdata[1]}</b><br>contraction %{customdata[2]:.2f}"
-             "<br>moved %{y:+.2f} prior sd<extra></extra>")
-    label = np.where(flagged(points), points["label"], "")
-    for name, mask, colour, size in (
-            ("Variables", points["key"] != (selected or ""), slots[0], 11),
-            ("Selected", points["key"] == (selected or ""), slots[1], 15)):
-        if not mask.any():
-            continue
-        text = np.where(mask & (points["key"] == (selected or "")), points["label"], label)[mask]
-        fig.add_trace(go.Scatter(
-            x=x[mask], y=points["shift"][mask], mode="markers+text", name=name,
-            text=text, textposition="top center",
-            textfont=dict(color=ink["secondary"], size=11),
-            marker=dict(size=size, color=colour, line=dict(color=ink["surface"], width=2)),
-            customdata=np.stack([points["key"][mask], points["label"][mask],
-                                 points["contraction"][mask]], axis=-1),
-            hovertemplate=hover, selected=dict(marker=dict(opacity=1)),
-            unselected=dict(marker=dict(opacity=1))))
-    _style(fig, mode, 340, x_title="Contraction - how much the data sharpened the prior",
-           y_title="Shift from the prior mean, prior sd", legend=False)
-    fig.update_layout(clickmode="event+select", dragmode=False, hovermode="closest",
-                      hoverdistance=24, margin=dict(r=48))
-    lo = float(min(-0.1, x.min() - 0.08))
-    fig.update_xaxes(range=[lo, 1.08])
-    ymax = float(max(3.0, points["shift"].abs().max() * 1.15))
-    fig.update_yaxes(range=[-ymax, ymax])
+    ink = INK[mode]
+    z = np.array(grid, dtype=float)
+    n = len(labels)
+    if n:
+        np.fill_diagonal(z, np.nan)
+    short = [_short(x) for x in labels]
+    text = [["" if (i == j or not np.isfinite(z[i, j]) or abs(z[i, j]) < mark
+                    or n > 30) else f"{z[i, j]:.2f}" for j in range(n)] for i in range(n)]
+    fig = go.Figure(go.Heatmap(
+        z=z, x=short, y=short, zmin=-1, zmax=1, colorscale=DIVERGING[mode],
+        xgap=2, ygap=2, text=text, texttemplate="%{text}",
+        textfont=dict(size=10),
+        customdata=np.array([[[labels[i], labels[j]] for j in range(n)] for i in range(n)],
+                            dtype=object) if n else None,
+        hovertemplate="<b>%{z:.2f}</b>  %{customdata[0]} × %{customdata[1]}<extra></extra>",
+        colorbar=dict(title=dict(text="r", font=dict(color=ink["secondary"])), thickness=10,
+                      tickvals=[-1, -0.5, 0, 0.5, 1], tickfont=dict(color=ink["muted"]),
+                      outlinewidth=0)))
+    side = max(320, 22 * n + 140)
+    _style(fig, mode, side, legend=False)
+    fig.update_layout(margin=dict(l=8, r=8, t=12, b=8), plot_bgcolor=ink["surface"])
+    fig.update_xaxes(showgrid=False, tickangle=-60, side="bottom", automargin=True,
+                     tickfont=dict(color=ink["secondary"], size=10))
+    fig.update_yaxes(showgrid=False, autorange="reversed", automargin=True,
+                     tickfont=dict(color=ink["secondary"], size=10))
     return fig
 
 
-def prior_posterior_figure(point, mode: str = "light"):
+def vif_figure(points: pd.DataFrame, mode: str = "light", warn: float = VIF_WARN,
+               bad: float = VIF_BAD):
+    """Each variable's VIF as a dot on a log axis (VIFs run from 1 to the
+    thousands - a bar from an arbitrary log baseline would mislead), worst at
+    the top, with the 5 and 10 guides. One series, so one colour and no
+    legend; the value is in the hover and the table."""
     import plotly.graph_objects as go
-    curves = density_curves(point)
-    if curves is None:
-        return None
-    ink, slots = INK[mode], SERIES[mode]
+    ink, blue = INK[mode], SERIES[mode][0]
+    d = points.dropna(subset=["vif"])
+    d = d[d["vif"] > 0]
     fig = go.Figure()
-    series = [("Prior", curves["prior"], ink["muted"], 0.10),
-              ("Data", curves["data"], slots[1], 0.0),
-              ("Posterior", curves["posterior"], slots[0], 0.12)]
-    for name, y, colour, wash in series:
-        if y is None:
-            continue
-        fig.add_trace(go.Scatter(
-            x=curves["x"], y=y, mode="lines", name=name,
-            line=dict(color=colour, width=2),
-            fill="tozeroy" if wash else None, fillcolor=_alpha(colour, wash) if wash else None,
-            hovertemplate="%{x:.3f}<extra>" + name.lower() + "</extra>"))
-    log = str(point.get("scale") or "") == "log"
-    _style(fig, mode, 300, x_title="log coefficient" if log else "coefficient (scaled units)",
-           y_title="density")
-    fig.update_layout(hovermode="x unified")
-    fig.update_yaxes(showticklabels=False, rangemode="tozero")
+    # on a log axis a shape is placed in data units but an annotation in log10
+    # units - add_vline's own label would land at 10^10, so they go separately
+    for x, label in ((warn, f"{warn:g} warn"), (bad, f"{bad:g} severe")):
+        fig.add_shape(type="line", x0=x, x1=x, xref="x", y0=0, y1=1, yref="paper",
+                      line=dict(color=ink["axis"], width=1, dash="dot"))
+        fig.add_annotation(x=math.log10(x), y=1, yref="paper", yanchor="bottom",
+                           text=label, showarrow=False,
+                           font=dict(color=ink["muted"], size=11))
+    fig.add_trace(go.Scatter(
+        x=d["vif"], y=[_short(c, 34) for c in d["column"]], mode="markers",
+        marker=dict(size=10, color=blue, line=dict(color=ink["surface"], width=2)),
+        customdata=np.stack([d["column"].astype(str),
+                             d.get("duplicates", pd.Series([""] * len(d))).fillna("").astype(str),
+                             d.get("explained_by", pd.Series([""] * len(d))).fillna("").astype(str)],
+                            axis=-1) if len(d) else None,
+        hovertemplate="<b>VIF %{x:,.1f}</b>  %{customdata[0]}<br>duplicates: "
+                      "%{customdata[1]}<br>explained by: %{customdata[2]}<extra></extra>"))
+    _style(fig, mode, max(220, 24 * len(d) + 80), x_title="VIF (log scale)", legend=False)
+    fig.update_layout(hovermode="closest", margin=dict(t=28))
+    top = max(float(d["vif"].max()) if len(d) else bad, bad) * 1.8
+    ticks = [m * 10 ** e for e in range(0, 7) for m in (1, 2, 5) if m * 10 ** e <= top]
+    fig.update_xaxes(type="log", range=[math.log10(0.8), math.log10(top)], tickvals=ticks,
+                     ticktext=[f"{t:,.0f}" for t in ticks])
+    fig.update_yaxes(showgrid=False, autorange="reversed",
+                     tickfont=dict(color=ink["secondary"]))
     return fig
 
 

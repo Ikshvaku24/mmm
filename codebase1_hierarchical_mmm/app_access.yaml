@@ -104,3 +104,11 @@ mark_reported:
   - full_access
   - config_full_access
   - config_advanced_access
+
+# Who may RENAME a finished run and edit its NOTE afterwards (in the run's
+# panel): any of the four levels above, and `submitter` = the person who
+# started that run. Renaming moves the run's folder (never while it runs) and
+# is recorded in the run's run_request.json; a note's history is kept there too.
+edit_runs:
+  - submitter
+  - full_access
