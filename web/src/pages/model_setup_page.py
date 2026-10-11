@@ -32,11 +32,12 @@ uuid = str(uuid.uuid4())
 
 # The app is PAGES (st.navigation, the left-hand panel - app.py): ① BMC,
 # period and run · ② input data · ③ model settings · ④ mapping and share files
-# · ⑤ prior file · ⑥ run · runs and results. Each page is one block below (an
-# st.fragment, so a click inside it refreshes that block only); everything a
-# block holds lives in the session, so it is all still there after a visit to
-# another page (src/page_state.py keeps the widgets' values, and an upload
-# box that comes back empty does not drop its file). A block refreshes the
+# · ⑤ prior file · ⑥ run · runs and results. Each page is one block below (a
+# fragment - page_state.fragment, never st.fragment - so a click inside it
+# refreshes that block only); everything a block holds lives in the session,
+# so it is all still there after a visit to another page (src/page_state.py
+# keeps the widgets' values - Streamlit deletes them at a page change - and an
+# upload box that comes back empty does not drop its file). A block refreshes the
 # whole page (st.rerun()) only when it changed something the page titles or
 # another block read - the BMC or run name, a new datacube, a new prior file,
 # a reused run - never on ordinary clicks.
@@ -110,7 +111,7 @@ CLUSTER_TEXT = {"RUNNING": "running", "PENDING": "starting", "RESTARTING": "rest
 CLUSTER_TONE = {"RUNNING": "good", "TERMINATED": "off"}
 
 
-@st.fragment(run_every="5s")
+@page_state.fragment(run_every="5s")
 def render_cluster_status_controls():
     """The model cluster's state - a dot and a word - and, when it is
     stopped, Start cluster. Lives in the top bar on every page."""
@@ -448,7 +449,7 @@ def _render_note_button():
             st.caption(f"The note of {source.get('label')}: {source['note']}")
 
 
-@st.fragment
+@page_state.fragment
 def _project_fragment():
     ss = st.session_state
     # values chosen by "Reuse inputs" or by a run that just started - set
@@ -641,7 +642,7 @@ def _pinned_group(filters):
         return ""
 
 
-@st.fragment
+@page_state.fragment
 def _results_fragment():
     """Every run, filtered by BMC, period and modelling type - each filter
     optional and independent - newest first; select one for its panel."""
@@ -1002,7 +1003,7 @@ def _refresh_datacube(cfg):
     return True
 
 
-@st.fragment
+@page_state.fragment
 def _data_fragment():
     ss = st.session_state
     with st.container(border=True):
@@ -1180,7 +1181,7 @@ def _render_side_file(kind, df, cfg):
         st.caption("Upload the datacube to check the names in this file against it.")
 
 
-@st.fragment
+@page_state.fragment
 def _pre_model_fragment():
     cfg = live_config() or {}
     df = st.session_state.get("datacube_df")
@@ -1467,7 +1468,7 @@ def _prior_is_valid():
     return table is not None and validate_prior(table).ok
 
 
-@st.fragment
+@page_state.fragment
 def _prior_fragment():
     ss = st.session_state
     cfg = live_config() or {}
@@ -1769,7 +1770,7 @@ def _start_run():
     st.rerun()
 
 
-@st.fragment
+@page_state.fragment
 def render_run_section():
     """The checklist, Run Model, and the panel of the run started here - which
     stays until dismissed, refreshing itself while the job runs."""

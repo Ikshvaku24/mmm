@@ -508,13 +508,22 @@ cells from Excel** uses a plain text box, which needs no permission.
 one `page_*` function (files, not functions, so AppTest can switch to them).
 Only the open page is drawn, so a page costs no more than its own widgets.
 
-Streamlit deletes the value of every widget a run does not draw, so leaving
-① would lose its BMC and period. `src/page_state.py` keeps them:
-- `start_run()`, at the top of every full run, writes the value of each
-  widget in `KEEP` (BMC, period, type, run name, note, Advanced options, the
-  results page's six filters, ...) and `KEEP_PREFIXES` (each
-  run's chosen region, period, category, ...) back into the session, which
-  makes Streamlit keep it.
+Streamlit deletes the value of every widget a run does not draw - and, at a
+page change, the values of the block (fragment) that was clicked last, or of
+every widget in a block that changes page itself (**See the runs and their
+results**). `src/page_state.py` keeps the widgets in `KEEP` (BMC, period,
+type, run name, note, Advanced options, the results page's six filters, ...)
+and `KEEP_PREFIXES` (each run's chosen region, period, category, ...):
+- `remember()` copies their values into keys no widget owns
+  (`_keep::<key>`), which Streamlit never deletes - at the start of every
+  full run and of every block's own run.
+- `start_run()`, at the top of every full run, puts back each value
+  Streamlit dropped, from its copy, then writes every kept value back into
+  the session.
+- So every block is a `page_state.fragment` - Streamlit's `st.fragment` that
+  first calls `remember()` - never a bare `st.fragment`. (Until Update 12
+  only full runs saved the values: a filter chosen and then a page change
+  lost it.)
 - Upload boxes and selectable tables cannot be written that way (Streamlit
   refuses), so a page drawn again gets an empty upload box. The file itself
   stays in the session and in use: the page names it *(uploaded earlier)*,
@@ -526,8 +535,8 @@ Streamlit deletes the value of every widget a run does not draw, so leaving
 Everything else (the files, the settings, the prior table, the run panels)
 already lives in the session under keys no widget owns.
 
-Each page's content is an `@st.fragment`: a click or an upload reruns only
-that. It asks for a full rerun (`st.rerun()`) only when it changes what
+Each page's content is a fragment (`@page_state.fragment`): a click or an
+upload reruns only that. It asks for a full rerun (`st.rerun()`) only when it changes what
 another page, or the page list's ✅, shows:
 - the BMC, the period and type, or the run name;
 - a new or removed datacube, mapping or share file;
@@ -666,14 +675,16 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #                              (step 19) the shared caches and the zip disk cache, (step 20) marking
 #                              the reported run, (step 21) the pages and what they keep, (step 22)
 #                              the modelling types' settings and the difference table, (step 23)
-#                              rename and note, (24) the filters on Runs and results, (25) deleting a
+#                              rename and note, (24) the filters on Runs and results, (24b) the
+#                              values Streamlit deletes at a page change coming back, (25) deleting a
 #                              run, (26) the top bar, the light / dark button and Start cluster, (27)
 #                              the co-branding - both themes, a logo press switching this viewer's
 #                              look (and remembered by e-mail), the deployment's company, the
 #                              markup-free toggle script, every colour pairing's contrast, (28)
 #                              `all` in app_access.yaml - everyone at that level, never above
 #   test_v22_web_apptest.py    the same flow under REAL streamlit (AppTest), page by page, with a
-#                              round trip between pages, the filters, a delete, the top bar and the
+#                              round trip between pages, the filters (and their values deleted as the
+#                              browser deletes them, then put back), a delete, the top bar and the
 #                              logos, a logo press switching the look, the session-theme hook against
 #                              Streamlit's own theme code, the light / dark button - the charts too,
 #                              with plotly; SKIPs without streamlit
@@ -722,7 +733,7 @@ web/
 │   ├── codebase.py        the ONLY module that imports codebase 1 (no Streamlit): cache, worker pool
 │   ├── perf.py            shared caches (one copy for every session) and the timing log (no Streamlit)
 │   ├── projects.py        run folders and groups: paths, names, run lists, notes, the reported run, renames, deletes, a run's inputs, what changed (no Streamlit)
-│   ├── page_state.py      what is kept across pages (re-saved widget values; a real ✕ told from a new upload box)
+│   ├── page_state.py      what is kept across pages (widget values copied to keys no widget owns; the fragment decorator; a real ✕ told from a new upload box)
 │   ├── config_editor.py   Model settings, the modelling types' settings, who may do what
 │   ├── app_functions.py   prior editor dialog, paste from Excel
 │   ├── runs.py            the run panel (status, cancel, live/complete job log, results, zip, reuse, note, rename, delete) and All recent runs

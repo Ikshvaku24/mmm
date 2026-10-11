@@ -576,7 +576,7 @@ def render_settings_section():
     return st.session_state.get("cfg_values"), bool(st.session_state.get("cfg_valid"))
 
 
-@st.fragment
+@page_state.fragment
 def _settings_fragment():
     """A fragment: editing a setting refreshes this block only, not the page."""
     with st.container(border=True):

@@ -1,15 +1,26 @@
 """Keeping what a person chose while they move between the app's pages.
 
 The app is several pages (st.navigation, the left-hand panel). Streamlit
-forgets a widget's value at the end of any run that does not draw it - so
-without this, a BMC, a period or a chosen region would be gone after a visit
-to another page. Two things keep them:
+deletes a widget's value whenever the widget is not drawn - at the end of a
+run that does not draw it, and at a PAGE CHANGE: then every value owned by a
+widget of the block (fragment) that ran last is deleted, and a page switch
+made from inside a block ("See the runs and their results" on ①) deletes all
+of that block's values. A click inside a block reruns only that block - so
+choosing a filter and then opening another page lost the filter, and ①'s
+BMC, period and type were gone after "See the runs and their results"
+(found in the real browser; AppTest always reruns the whole script and never
+showed it). So, for the widgets in KEEP / KEEP_PREFIXES (only select boxes,
+text boxes and switches - Streamlit refuses this for buttons, file uploaders
+and tables):
 
-* `start_run()` - called by app.py at the top of every full run - re-saves
-  the values of the widgets in KEEP / KEEP_PREFIXES. A value re-saved this way
-  belongs to the session, not to the widget, and survives the run. (Only
-  select boxes, text boxes and switches are listed: Streamlit refuses that for
-  buttons, file uploaders and tables.)
+* `remember()` copies each value to COPY + its key - a key no widget owns,
+  which Streamlit never deletes - at the start of every full run
+  (`start_run`) and of every block's own run (`fragment`, which every block
+  uses instead of st.fragment).
+* `start_run()` - called by app.py at the top of every full run, before any
+  widget is drawn - puts back each value Streamlit dropped, from its copy,
+  and re-saves every kept value (a value set this way belongs to the
+  session, not to the widget, and survives the run).
 * `emptied(key, value)` - for the widgets Streamlit will not let us keep: file
   uploaders and selectable tables. A page drawn again after a visit elsewhere
   gets a NEW, empty uploader, and that must not read as "the person removed
@@ -21,6 +32,8 @@ to another page. Two things keep them:
 Every other piece of state (the files, the settings, the prior table, the
 run panels) already lives in the session under keys no widget owns.
 """
+import functools
+
 import streamlit as st
 
 # widgets whose values are kept across pages (re-saved on every full run)
@@ -31,17 +44,51 @@ KEEP = ("bmc_name", "period_start_q", "period_start_y", "period_end_q", "period_
 KEEP_PREFIXES = ("fit_region_", "contrib_region_", "contrib_period_", "decomp_drivers_",
                  "warn_cat_", "collin_region_", "collin_count_")
 RUN_NO = "_run_no"
+COPY = "_keep::"            # + a kept widget's key: a copy of its value no widget owns
+
+
+def kept(key) -> bool:
+    """Is `key` a widget whose value is kept across pages?"""
+    return isinstance(key, str) and (key in KEEP or key.startswith(KEEP_PREFIXES))
+
+
+def remember() -> None:
+    """Copy every kept widget's value to COPY + its key (see the module's
+    docstring). Safe at any point of a run: only the copies are written."""
+    ss = st.session_state
+    for key in list(ss.keys()):
+        if kept(key):
+            ss[COPY + key] = ss[key]
 
 
 def start_run() -> int:
-    """Count this full run and re-save the kept widget values. Returns the
-    run's number. Call it before any widget is drawn (app.py does)."""
+    """Count this full run, put back the kept values Streamlit dropped and
+    re-save them all. Returns the run's number. Call it before any widget is
+    drawn (app.py does)."""
     ss = st.session_state
     ss[RUN_NO] = int(ss.get(RUN_NO, 0)) + 1
     for key in list(ss.keys()):
-        if isinstance(key, str) and (key in KEEP or key.startswith(KEEP_PREFIXES)):
+        if isinstance(key, str) and key.startswith(COPY) and key[len(COPY):] not in ss:
+            ss[key[len(COPY):]] = ss[key]           # dropped by Streamlit: put it back
+    for key in list(ss.keys()):
+        if kept(key):
             ss[key] = ss[key]
+    remember()
     return ss[RUN_NO]
+
+
+def fragment(func=None, *, run_every=None):
+    """st.fragment that first remembers the kept values - each time the block
+    runs on its own (a click inside it, or its run_every timer). Every block
+    of the app uses it: the value a click just chose is copied before a page
+    change can delete it."""
+    def wrap(f):
+        @functools.wraps(f)          # the same name, so the same fragment id
+        def run(*args, **kwargs):
+            remember()
+            return f(*args, **kwargs)
+        return st.fragment(run, run_every=run_every)
+    return wrap(func) if func is not None else wrap
 
 
 def run_no() -> int:

@@ -477,7 +477,7 @@ def _deleted_panel(ref, where, gone):
             st.rerun()
 
 
-@st.fragment(run_every="5s")
+@page_state.fragment(run_every="5s")
 def _live_panel(ref, where, on_reuse):
     run = fetch_run(ref.get("job_run_id"))
     if not _known(run) or is_done(run):
@@ -486,7 +486,7 @@ def _live_panel(ref, where, on_reuse):
     _panel_body(ref, where, run, on_reuse)
 
 
-@st.fragment
+@page_state.fragment
 def _static_panel(ref, where, on_reuse):
     _panel_body(ref, where, fetch_run(ref.get("job_run_id")), on_reuse)
 
@@ -1416,7 +1416,7 @@ def _recent_row(r):
             "data_file": _param(r, "data_file")}
 
 
-@st.fragment
+@page_state.fragment
 def render_runs_section(on_reuse=None):
     with st.expander("All recent runs of the model job - every BMC, and runs from "
                      "before the run folders"):

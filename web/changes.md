@@ -19,6 +19,35 @@ needs no redeploy.
 
 ---
 
+## Update 12 - fix: the filters, and ①'s choices, are kept when you change page (2026-10-10)
+
+| You reported | Why it happened | Now |
+|---|---|---|
+| Filters chosen on Runs and results (BMC, quarter, ...) are gone after a visit to another page | Each page's block is a *fragment*: a click inside it reruns only that block. Streamlit then deletes the values of that block's widgets at the next page change. The app saved them again only when the whole page ran - not after a click inside a block | Every block now copies the chosen values at the start of each of its runs into keys no widget owns, which Streamlit never deletes; the next page run puts back anything Streamlit dropped (`src/page_state.py`) |
+| **See the runs and their results** does not pass ①'s choices to the filters | The button changes page from *inside* ①'s block, so Streamlit deleted all of ①'s values. The results page then saw ① emptied, and emptied its filters to match | ①'s values come back from their copies before anything reads them: the filters get ①'s BMC, period and type - and ① still has them when you go back |
+
+Checked in a real browser (Edge), with the server running locally - every
+step failed before the fix and passes now:
+- two filters chosen, then ③ and back - and ① and back after a pause: kept;
+- six choices on ①, then **See the runs and their results**: all six are the
+  filters, and ① still has them;
+- a run name typed on ①, then ③ and back: kept;
+- a filter changed after that, then ③ and back: kept (① did not change);
+- a new BMC on ①: the BMC filter follows it, the other filters stay.
+
+A changed setting on ③ was already kept (the settings live in the session),
+and stays so.
+
+Why the tests did not catch it: Streamlit's test harness (AppTest), like the
+stand-in, reruns the whole page on every click, so it never deletes these
+values. The tests now delete them by hand, where the browser does (v21 step
+24b, v22 9e); with the fix switched off they fail exactly as reported.
+
+**To get this:** copy `web/` to the app's source folder and press Deploy.
+Codebase 1 is unchanged (still 2026.10.09.3); no app.yml change.
+
+---
+
 ## Update 11 - the light / dark button, each company's look by its logo, `all` in app_access.yaml (2026.10.09.3)
 
 | You asked | Now |
@@ -945,7 +974,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (2089 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2096 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.
