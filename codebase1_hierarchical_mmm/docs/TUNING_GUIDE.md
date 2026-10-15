@@ -263,33 +263,44 @@ intercept near 0.9 means it has claimed ~90% of sales before any feature speaks.
 
 ### 2.2 `include_intercept` — remove the intercept outright
 
-Default **`true`**. `alpha_prior_sd=0.05` (§2.1) *squeezes* the intercept;
-`include_intercept: false` **deletes it**. No `mu_alpha`, no `tau_alpha`, no
-`alpha_region` — the model simply has no estimated level term, so nothing can
-quietly absorb sales the named drivers should be explaining.
+Default **`true`**; the team's `config.yaml` and the **Secondary** modelling
+type use `false`. `alpha_prior_sd=0.05` (§2.1) *squeezes* the intercept;
+`include_intercept: false` **deletes it**: no `mu_alpha`, no `tau_alpha`, no
+`alpha_region`. Nothing estimated can quietly absorb sales the named drivers
+should be explaining.
 
-**What actually happens to the level.** It does not vanish. With
-`dv_center: mean` the KPI is centred before fitting and the mean is added back
-by the inverse transform, so `__baseline_core__` becomes that **fixed
-historical mean** — the same number every draw, **zero posterior width**. The
-baseline stops being a free parameter and becomes an accounting constant. Every
-contribution still reconciles to actual sales.
+**Who then carries the level of sales depends on `run.dv_center`:**
 
-| | intercept on | intercept off |
-|---|---|---|
-| `__baseline_core__` | estimated, has an HDI | the training mean, no HDI |
-| what absorbs unexplained variance | the intercept | the residual |
-| `alpha_region` in the reports | present | absent |
-| drivers | compete with a free level | carry everything above the mean |
+| | intercept on | off + `dv_center: none` | off + `dv_center: mean` |
+|---|---|---|---|
+| What it is | the default model | **a decomposition versus zero** — the vendor convention; the Secondary type | a fixed-mean baseline |
+| `__baseline_core__` | the estimated intercept (+ seasonality / trend); has an HDI | 0 (+ seasonality / trend) | the training mean, no HDI (+ seasonality / trend) |
+| Who carries the level | the intercept | **the uncentred always-on level variables** (distribution, TDP, price, category) | the fixed mean |
+| Unexplained variance goes to | the intercept | the residual | the residual |
+| Level variables should be | centred (`mean` + `contribution_reference: zero`) | **uncentred** (`none`) — they ARE the level | centred — an uncentred one adds a second level the centred KPI does not have |
 
-> **Use when:** the benchmark you are reproducing has no intercept (region
-> fixed-effect dummies *are* its intercept), or `mu_alpha` has run away — on a
-> KPI scaled to mean 1.0, a posterior near 0.9 means the intercept claimed ~90%
-> of sales before any feature spoke.
->
-> **Do not use with `dv_center: none`.** The KPI still carries its level and
-> nothing is left to hold it, so every coefficient is dragged upwards to fake an
-> intercept. `run_pipeline` warns, but the run will not stop you.
+**Decomposition versus zero (decided 2026-10-14).** `include_intercept: false`
+with `dv_center: none` is the legitimate vendor-style setup: there is no
+intercept, the level variables carry the level, and every contribution is
+measured against zero. A prior generated from vendor contributions
+(`C / Σx / mean dv`) lands on the vendor's numbers exactly in this setup. It
+used to raise a high-severity warning on every run; it no longer does. Two
+things it needs:
+
+- **Keep the always-on level variables uncentred.** Without an intercept,
+  centring is not a reparameterisation (§4.2): it takes the variable's level out
+  of the model. If every always-on variable in a region is centred (or active in
+  under half the training periods), nothing can carry the level, and
+  `prepare_data` warns: `no_level_term` (high), naming the regions.
+- **Expect the level variables to move together.** Near-constant level columns
+  are collinear with each other, so only their sum is identified
+  (`near_constant_mutual`). In a secondary model their split comes from the
+  vendor's priors — the LOCKED rows of METHODOLOGY §2c.
+
+> **Use when:** reproducing a benchmark decomposed versus zero (no intercept —
+> its level variables or region fixed-effect dummies carry the level), or when
+> `mu_alpha` has run away — on a KPI scaled to mean 1.0, a posterior near 0.9
+> means the intercept claimed ~90% of sales before any feature spoke (v7).
 
 Order of escalation, mildest first:
 
@@ -336,7 +347,7 @@ this.** Common causes:
 | Two columns are duplicates (`_mat1`/`_mat2`, `_newtarget`/`_oldtarget`) | both negative contraction, identical priors | merge the columns, or report the **pair as a sum** |
 | A region dummy alongside `alpha_region` | negative contraction on the dummy | pin `alpha_prior_sd`, or drop the dummy |
 | A feature active in ~0 weeks | `n_active_train` tiny, `data_support = none` | drop it, or accept it is a pure prior |
-| Collinear level variables | offsetting ± contributions | `center_mode=mean` (§4.2) |
+| Collinear level variables | offsetting ± contributions | with an intercept: `center_mode=mean` (§4.2). In a decomposition versus zero only their sum is identified — fix the split with priors (§2.2) |
 
 Check `03_coefficients/support_warnings.txt` — it lists every region × feature
 combination driven by shrinkage rather than that region's data.
@@ -371,21 +382,25 @@ region, and `mean_shift_in_prior_sd` large and same-signed across many features.
 A blank is `none` / `none` for every feature — the column is used exactly as it
 is in the datacube. Everything below is opt-in.
 
-> ⚠️ **An explicit `center_mode` beats the legacy `center` flag** and then
-> overwrites it. If your file has `center_mode=none`, setting `center=1` does
-> **nothing**. Change `center_mode`.
+> The legacy `center` column is gone: a prior file that still carries one is
+> rejected with instructions. `center_mode` is the only centring setting.
 
 | Situation | Setting |
 |---|---|
 | Data already transformed and on the prior's scale | `none` / `none` |
-| **Always-on level variable** (distribution, price, ACV) | **`mean` / `none`** + `contribution_reference=zero` |
+| **Always-on level variable** (distribution, price, ACV), model **with an intercept** | **`mean` / `none`** + `contribution_reference=zero` |
+| Always-on level variable in a **decomposition versus zero** (no intercept, `dv_center: none`) | **`none` / `none`** — it carries the level (§2.2) |
 | Media, zero means "no activity" | `none` / `mean_positive` |
 | Control variable | `mean` / `sd` |
 
 **`center_mode=mean` with `scale_mode=none` divides by 1**, so it subtracts a
 constant and **preserves your coefficient units** — every prior stays valid.
-Centring is a *reparameterisation*, not a transformation: fitted values are
-unchanged, only the intercept/coefficient split becomes identifiable.
+**With an intercept**, centring is a *reparameterisation*, not a
+transformation: the intercept absorbs the constant, fitted values are
+unchanged, and only the intercept/coefficient split becomes identifiable.
+**Without an intercept it changes the model**: nothing absorbs the constant,
+so centring decides who carries the level (§2.2). Do not centre the level
+variables of a decomposition versus zero.
 
 > **Use when:** you get the *"always on but nearly constant"* warning, or see
 > saturated tree depth / divergences / offsetting ± contributions. Expect the
@@ -447,7 +462,7 @@ still sums to the fitted value.
 | `mean_shift` > 2 prior sd | **prior-data conflict** | check `dv_scale` units first (§4), then the prior |
 | Sign is wrong | free feature, wrong-signed mean | `sign_constraint`, or negate the mean (§1.4) |
 | `contraction ≤ 0` | unidentified / duplicate column | structural — §3 |
-| High R-hat, saturated tree depth, divergences | level variable collinear with intercept | `center_mode=mean` (§4.2) |
+| High R-hat, saturated tree depth, divergences | level variable collinear with intercept | `center_mode=mean` (§4.2); then, if coefficients still trade off, `sampler.dense_mass: true` / `max_treedepth: 12` (MODEL_GUIDE §9) |
 | Offsetting ± contributions between two features | mutual collinearity | check `01_data/collinearity_pairs.csv` + `04_fit/posterior_correlation.csv`, then `center_mode` or merge (METHODOLOGY §3) |
 | `baseline_core_pct` very negative, features > 100% | redundant free intercept | `alpha_prior_sd=0.05` (§2.1) |
 | Intercept alone claims most of sales (`mu_alpha` ≈ 0.9 on a mean-1.0 KPI) | a free level is out-competing every driver | `alpha_prior_sd=0.05`, then `include_intercept: false` (§2.2) |

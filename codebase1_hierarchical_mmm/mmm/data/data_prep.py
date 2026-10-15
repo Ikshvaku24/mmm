@@ -39,6 +39,8 @@ decomposition that reconciles perfectly and is wrong by a constant multiple.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import os
 import warnings
 from dataclasses import dataclass, field
@@ -293,6 +295,10 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
     dust_counts = {}
     degenerate = []        # (feature, region, scale) - column is pure numerical dust
     near_constant = {}     # feature -> [regions] - collinear with the intercept
+    # regions where some feature can carry the KPI's LEVEL: uncentred and
+    # non-zero in at least half the training periods. Only matters for a
+    # decomposition versus zero (no intercept, KPI not centred) - see below
+    level_carrier = np.zeros(G, dtype=bool)
     for j, spec in enumerate(model_cfg.features):
         v = d[spec.name].to_numpy(dtype=float)
         # pre-transformed data often carries adstock-tail "dust" (e.g. 5e-17)
@@ -328,6 +334,9 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
             X[m_all, j] = (v[m_all] - mu) / sc
             scale_rows.append((regions[g], spec.name, method, mu, sc, n_active,
                                spec.center_mode, spec.scale_mode))
+            if (method == "scale_only" and m_tr.any()
+                    and (v[m_tr] != 0).mean() >= 0.5):
+                level_carrier[g] = True
             if method == "scale_only":
                 # always on but barely moving => x ~ constant, which the region
                 # intercept already spans (see the near-constant guard below).
@@ -386,6 +395,15 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
                 "price: the intercept and this coefficient are trading off, so read "
                 "neither on its own.")
     elif len(near_constant) > 1:
+        # Without an intercept these columns may BE the level: in a
+        # decomposition versus zero (dv_center="none") centring them all
+        # removes the level from the model, so the advice differs
+        advice = ("They carry the level of sales here (no intercept, KPI not "
+                  "centred), so do not centre them all: keep them uncentred and "
+                  "fix their split with priors (the LOCKED rows of a secondary "
+                  "model), keep one and drop the rest, or centre all but one."
+                  if run_cfg.dv_center == "none" else
+                  "Centre them (center_mode=mean), or keep one and drop the rest.")
         warnings.warn(
             f"{', '.join(sorted(near_constant))}: {len(near_constant)} features "
             "are always on and nearly constant without centring "
@@ -393,8 +411,27 @@ def prepare_data(df: pd.DataFrame, run_cfg: RunConfig, model_cfg: ModelConfig) -
             "intercept to compete with (include_intercept=False), but they are "
             "near-constant columns and therefore collinear with EACH OTHER - "
             "only their SUM is identified, so the split between them is set by "
-            "the priors, not the data. Centre them (center_mode=mean), or keep "
-            "one and drop the rest.")
+            f"the priors, not the data. {advice}")
+
+    # A decomposition versus zero - include_intercept=False with an uncentred
+    # KPI (dv_center="none") - is the vendor-style setup and is legitimate: the
+    # always-on level variables carry the level of sales. (Until 2026.10.14.2
+    # the pipeline raised a HIGH warning on every such run.) It only breaks when
+    # NOTHING can carry the level: every feature centred, or active in under
+    # half the training periods. Then the level is unexplained and every
+    # coefficient is distorted chasing it.
+    if (not getattr(model_cfg, "include_intercept", True)
+            and run_cfg.dv_center == "none" and not level_carrier.all()):
+        regs = [regions[g] for g in range(G) if not level_carrier[g]]
+        warnings.warn(
+            f"no feature can carry the KPI's level in regions {regs}: the model "
+            "has no intercept and the KPI is not centred (a decomposition versus "
+            "zero), but every feature there is centred (center_mode=mean) or "
+            "active in under half the training periods. Nothing can explain the "
+            "level of sales, so every coefficient is distorted chasing it. Keep "
+            "at least one always-on level variable (distribution, TDP, price, "
+            "category volume) uncentred, or set model.include_intercept: true, "
+            "or run.dv_center: mean.")
 
     # ---- seasonality & trend ----------------------------------------------
     Xf, f_names = fourier_features(d[dc], model_cfg.fourier_order,

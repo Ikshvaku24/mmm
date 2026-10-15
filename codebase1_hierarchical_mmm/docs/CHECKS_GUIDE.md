@@ -251,14 +251,24 @@ monthly, so MAT blocks and CV presets may be wrong. **Change (config):** set
   - *Config:* `run.zero_threshold_rel: 1.0e-6` snaps adstock-tail dust to
     exact zero.
 
-**`intercept_without_centering` (high).**
+**`no_level_term` (high).**
 
-- **Computes.** `include_intercept: false` while `dv_center: none`.
-- **Meaning.** The KPI still carries its level, and nothing in the model holds
-  it. Every coefficient is dragged upwards to fake an intercept.
-- **Change (config).** `run.dv_center: mean`. The baseline then becomes the
-  fixed training mean instead of a free parameter. Or keep the intercept. See
+- **Computes.** No intercept and an uncentred KPI (`include_intercept: false`,
+  `dv_center: none` — a decomposition versus zero), **and** a region where no
+  feature can carry the level: every feature there is centred, or non-zero in
+  under half the training periods.
+- **Meaning.** A decomposition versus zero is the vendor convention and is fine
+  on its own — the uncentred always-on level variables carry the level. This
+  fires only when nothing can, so every coefficient is distorted chasing the
+  level of sales.
+- **Change (config).** Keep the always-on level variables (distribution, TDP,
+  price, category) uncentred — without an intercept, centring removes their
+  level from the model. Or restore the intercept (the Primary type), or
+  `run.dv_center: mean` (the training mean becomes a fixed baseline).
   TUNING_GUIDE §2.2.
+- **History.** Until 2026.10.14.2 a high warning, `intercept_without_centering`,
+  fired on *every* no-intercept run with an uncentred KPI — including the team's
+  legitimate vendor-style setup. Removed by decision on 2026-10-14.
 
 **`scaling_uses_holdout` (review).**
 
@@ -633,15 +643,20 @@ do not represent the posterior, nothing computed from them does either.
 
 ### 4.4 Tree depth
 
-- **Computes.** NUTS doubles each trajectory until it turns back, up to depth
-  10 (1,023 steps). "Saturated" means it hit the cap: the sampler is walking a
-  long, narrow, correlated ridge and still had not turned.
-- **Threshold.** The report flags max depth ≥ 10, with the % of steps
-  saturated.
+- **Computes.** NUTS doubles each trajectory until it turns back, up to
+  `sampler.max_treedepth` (default 10 = 1,023 steps). "Saturated" means it hit
+  the cap: the sampler is walking a long, narrow, correlated ridge and still had
+  not turned.
+- **Threshold.** The report reads `max tree depth : D of cap C` and gives the %
+  of draws that hit the cap in force (since 2026.10.14.1; before, the cap was
+  hard-coded at 10).
 - **Example.** v1 was saturated **100%** of steps. v2 was saturated 0.2%. v3
   reached max depth 8, so nothing saturated.
 - **Change.** Treat the *cause* — collinearity, nearly always (§3). Raising the
   depth cap just pays more compute to walk the same ridge.
+  - *Config, after the cause:* `sampler.dense_mass: true` when coefficients
+    trade off (it learns the correlation, so the ridge is no longer narrow to
+    the sampler); then `sampler.max_treedepth` 11–12. MODEL_GUIDE §9.
 
 ### 4.5 BFMI and the energy plot
 
@@ -1529,7 +1544,7 @@ on/off, `fourier_order` 2 vs 4, a merged vs split pair — instead of one holdou
 | `collinear_with_intercept` | high | §2.2, §3.3 |
 | `near_constant_mutual` | high | §2.2 |
 | `degenerate_feature_column` | high | §2.2 |
-| `intercept_without_centering` | high | §2.2 |
+| `no_level_term` | high | §2.2 |
 | `generated_prior_units` | high | §1.2 |
 | `collinearity_not_computable` | medium | §3.8 |
 | `pooling_collapsed` | medium | §1.3 |
@@ -1572,7 +1587,7 @@ built-in default whatever the YAML says; the note says which part.
 | ESS bulk / tail | 400 | — | **No** |
 | Divergence guardrail | 1% | — | **No**. `run.on_convergence_failure` sets warn vs fail |
 | BFMI | 0.3 | — | **No** |
-| Tree depth flagged | ≥ 10 | — | **No** |
+| Tree depth saturated | draws at the cap | `sampler.max_treedepth` (10) | Yes — the cap in force (since 2026.10.14.1) |
 
 ### 16.3 Prior vs posterior and coefficients (§5–§6)
 

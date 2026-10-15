@@ -18,13 +18,15 @@ Two things the first real run (real_data_v1) got wrong in the CONFIG, both now
 detected by prepare_data and written to 00_warnings/ - fix them in the prior
 file before re-running:
 
-  1. Always-on LEVEL variables need `center_mode=mean`: TDP, AVP, ACV_WD_Any
-     Merch. Without it they are scaled to ~1.0 every week, collinear with the
-     region intercept. That run produced coefficients of +31 / -33 on TDP / AVP
-     and a decomposition of +91% / -97% that cancelled out, with max R-hat 1.26,
-     min ESS 13 and tree depth saturated in 100% of steps.
-     NOTE the legacy `center=1` flag is a NO-OP when an explicit `center_mode`
-     column is present in the file - set `center_mode`.
+  1. In a model WITH an intercept, always-on LEVEL variables need
+     `center_mode=mean`: TDP, AVP, ACV_WD_Any Merch. Without it they are
+     scaled to ~1.0 every week, collinear with the region intercept. That run
+     produced coefficients of +31 / -33 on TDP / AVP and a decomposition of
+     +91% / -97% that cancelled out, with max R-hat 1.26, min ESS 13 and tree
+     depth saturated in 100% of steps. (The old `center` column is gone - a
+     prior file that still has one is rejected.) In a decomposition VERSUS
+     ZERO - no intercept and dv_center: none, the team's config - leave them
+     uncentred: they carry the level of sales.
   2. Columns that are pure numerical dust must be dropped: Coupon-Digital,
      Coupon-FSI and Coupon-Ibotta had every non-zero value at ~1e-15, so the
      model was fitting float noise (and reporting 1e18 "per unit" effects).

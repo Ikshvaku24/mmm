@@ -22,6 +22,10 @@ codebase1_hierarchical_mmm/
 ├── feature_priors_*.csv      the prior table (one row per feature)
 │
 ├── mmm/                      the package
+│   ├── __init__.py           __version__ + the partial-upload guard: every module's
+│   │                         __codebase__ is read from the files; a mixed copy stops
+│   │                         with OutOfSyncError (MMM_ALLOW_OUT_OF_SYNC=1 overrides)
+│   ├── release.py            python -m mmm.release YYYY.MM.DD.N - stamps every module
 │   ├── run_pipeline.py       run() - ties the stages together
 │   ├── app_job.py            what demo.ipynb does: the uploaded config with only
 │   │                         the job-owned keys replaced, run, publish to the
@@ -84,10 +88,12 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 
 | I want to… | File |
 |---|---|
+| continue development (module map, invariants, change recipes, open issues) | `CLAUDE.md` in this folder |
 | change a setting | `config.yaml` (reference: `docs/CONFIG_GUIDE.md`) |
 | change a feature's prior | the prior CSV (reference: `docs/FEATURE_PRIOR_GUIDE.md`) |
 | generate a prior file from a vendor decomposition or shares | `mmm/data/prior_builder.py` |
 | change how vendor and our variables are matched | `mmm/data/mapping.py` |
+| understand what the model is (equation, pooling, sampler) | `docs/MODEL_GUIDE.md` |
 | understand an output column | `docs/OUTPUTS_GUIDE.md` |
 | read a check (VIF … exogeneity, CV) and decide what to change | `docs/CHECKS_GUIDE.md` |
 | find out whether a problem has happened before | `docs/cases/README.md` |
@@ -171,6 +177,7 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 
 | File | Use it for |
 |---|---|
+| `MODEL_GUIDE.md` | the core model term by term: the equation, pooling (hierarchical / global / independent), buckets, priors, noise, the NUTS sampler and its settings |
 | `CONFIG_GUIDE.md` | every `config.yaml` key: meaning, default, when to change |
 | `FEATURE_PRIOR_GUIDE.md` | every prior-CSV column, and how to generate the file |
 | `METHODOLOGY.md` | the staged build, the prior ladder, updating a prior with no benchmark, raising an under-credited variable, how to check collinearity |
@@ -183,7 +190,7 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 
 ## Tests
 
-`../tests/run_all.py` — 2096 checks, ~1 min, no PyMC needed. They import the
+`../tests/run_all.py` — 2136 checks, ~1 min, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

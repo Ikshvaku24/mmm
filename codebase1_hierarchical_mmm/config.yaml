@@ -75,10 +75,10 @@ model:
   # add a pooled per-region linear time trend
   include_trend: false
   # keep the region intercept alpha_g. false removes it entirely, so no ESTIMATED term can
-  # absorb sales the drivers should be explaining - reach for it when the intercept has eaten
-  # the decomposition. Note the level does not vanish: with run.dv_center: mean the baseline
-  # becomes the FIXED historical mean (zero posterior width) instead of a free parameter. Only
-  # sane with run.dv_center: mean
+  # absorb sales the drivers should be explaining. false with run.dv_center: none is a
+  # decomposition VERSUS ZERO (the vendor convention): the uncentred always-on level variables
+  # carry the level. false with run.dv_center: mean makes the training mean a FIXED baseline
+  # instead
   include_intercept: false
   # prior sd of the POPULATION intercept (KPI is standardised, so 0.5 is wide)
   alpha_prior_sd: 0.5
@@ -138,12 +138,18 @@ run:
 sampler:
   # posterior draws kept per chain
   draws: 1000
-  # warmup/adaptation steps per chain (discarded)
+  # warm-up (burn-in) steps per chain: step size + mass matrix adapt here, then discarded
   tune: 1000
   # independent chains. 4 is the minimum for a trustworthy R-hat
   chains: 4
   # NUTS acceptance target. Raise toward 0.99 to clear divergences
   target_accept: 0.92
+  # NUTS cap: at most 2^depth - 1 leapfrog steps per draw (10 = 1023). Saturated = a geometry problem - centre/merge first, then raise
+  max_treedepth: 10
+  # learn a full mass matrix in warm-up, not a diagonal one. Helps when coefficients trade off; slower per step, needs enough tune
+  dense_mass: false
+  # start each chain from a jittered point, so R-hat can see chains that disagree
+  jitter: true
   # random seed - set it, so a run is reproducible
   seed: 42
   # 'numpyro' (JAX/GPU) | 'pymc' | 'advi'

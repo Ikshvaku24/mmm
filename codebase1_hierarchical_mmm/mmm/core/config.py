@@ -69,7 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.3"   # must equal mmm.__version__
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import math
 import warnings
@@ -482,11 +482,14 @@ class FeatureSpec:
                                        # for every sign.
                                        # Consider "mean" for always-on LEVEL
                                        # variables (distribution, price index,
-                                       # ACV): uncentred they are near-constant
-                                       # and trade off against the region
-                                       # intercept (the sampler, not the
-                                       # prior, suffers). Pair it with
-                                       # contribution_reference="zero".
+                                       # ACV) WHEN THE MODEL HAS AN INTERCEPT:
+                                       # uncentred they are near-constant and
+                                       # trade off against it (the sampler,
+                                       # not the prior, suffers). Pair it with
+                                       # contribution_reference="zero". In a
+                                       # decomposition versus zero (no
+                                       # intercept, dv_center="none") leave
+                                       # them "none" - they carry the level.
     prior_sd_basis: str = "log"        # how to READ prior_sd / regional_sd:
                                        # "log" (as-is), "relative" (a fraction,
                                        # 0.2 = +/-20%), "absolute" (coefficient
@@ -885,15 +888,19 @@ class ModelConfig:
                                         # no ESTIMATED term can absorb sales the
                                         # drivers should be explaining (the vendor
                                         # decomposition works this way).
-                                        # The level does NOT disappear: with
-                                        # dv_center="mean" the inverse transform
-                                        # still adds the training mean back, so
-                                        # __baseline_core__ becomes that FIXED
-                                        # number, with zero posterior width,
-                                        # rather than a free parameter.
-                                        # Only sane with dv_center="mean": with
-                                        # dv_center="none" the KPI keeps its level
-                                        # and nothing is left to carry it.
+                                        # Two ways to run without it:
+                                        #  dv_center="none" - a decomposition
+                                        #   VERSUS ZERO, the vendor convention
+                                        #   (the "Secondary" type): the
+                                        #   uncentred always-on level variables
+                                        #   carry the level of sales. Keep them
+                                        #   uncentred; prepare_data warns
+                                        #   (no_level_term) if nothing can.
+                                        #  dv_center="mean" - the training mean
+                                        #   is added back as a FIXED
+                                        #   __baseline_core__ (zero posterior
+                                        #   width); the drivers explain the
+                                        #   movement around it.
     alpha_prior_sd: float = 0.5         # population intercept prior (dv is standardised)
     alpha_regional_sd: float = 0.5
     pool_sigma: bool = True             # partial-pool region noise on the log scale
@@ -914,10 +921,29 @@ class ModelConfig:
 
 @dataclass
 class SamplerConfig:
-    draws: int = 1000
-    tune: int = 1000
+    draws: int = 1000                   # kept draws per chain, after warm-up
+    tune: int = 1000                    # warm-up ("burn-in") per chain: the step
+                                        # size and mass matrix adapt here, and
+                                        # these draws are discarded
     chains: int = 4
     target_accept: float = 0.92
+    max_treedepth: int = 10             # NUTS doubles each trajectory up to this
+                                        # depth: at most 2^depth - 1 leapfrog
+                                        # steps per draw (10 -> 1023). Hitting
+                                        # it ("saturated") is a geometry
+                                        # problem first - centre/merge, then
+                                        # raise. Spelled max_tree_depth for
+                                        # NumPyro and max_treedepth for PyMC;
+                                        # fit.py translates
+    dense_mass: bool = False            # learn a FULL mass matrix in warm-up
+                                        # instead of a diagonal one. Helps when
+                                        # coefficients trade off (a correlated
+                                        # posterior); slower per step and needs
+                                        # enough `tune` to estimate
+    jitter: bool = True                 # start each chain from a randomly
+                                        # jittered point, so chains begin in
+                                        # different places and R-hat can see it
+                                        # if they end up in different places
     seed: int = 42
     sampler: str = "numpyro"            # "numpyro" (JAX/GPU) | "pymc" | "advi"
     chain_method: str = "sequential"    # NumPyro chain execution: "sequential" |
@@ -946,6 +972,11 @@ class SamplerConfig:
             raise ValueError("draws/chains must be > 0 and tune >= 0")
         if not 0 < self.target_accept < 1:
             raise ValueError("target_accept must be between 0 and 1")
+        if not 1 <= int(self.max_treedepth) <= 20:
+            raise ValueError("max_treedepth must be between 1 and 20 (each "
+                             "level doubles the cost of a draw; 10 is the "
+                             f"default), got {self.max_treedepth}")
+        self.max_treedepth = int(self.max_treedepth)
 
 
 @dataclass

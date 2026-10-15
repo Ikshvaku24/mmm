@@ -209,7 +209,7 @@ Paths are relative **to the YAML file**, not the working directory.
 | `fourier_order` | `0` | 0+ | annual seasonality harmonics. Each costs 2 parameters. **2 is a good start**; 0 if seasonality is already carried by dummies |
 | `fourier_period_days` | `365.25` | | period of the cycle. Leave it |
 | `include_trend` | `false` | | a pooled per-region linear time trend. Powerful and dangerous — it extrapolates into the holdout |
-| `include_intercept` | `true` | | the region intercept. **`false` removes it entirely** so no estimated term can absorb sales the drivers should explain |
+| `include_intercept` | `true` | | the region intercept. **`false` removes it entirely** so no estimated term can absorb sales the drivers should explain. With `run.dv_center: none` that is a **decomposition versus zero** (the vendor convention; the team's config and the Secondary type) |
 | `alpha_prior_sd` | `0.5` | | prior sd of the population intercept. **`0.05` pins it near zero** |
 | `alpha_regional_sd` | `0.5` | | how far region intercepts may spread around it |
 | `pool_sigma` | `true` | | partial-pool the per-region noise level. `false` = independent sigma per region |
@@ -219,9 +219,14 @@ Paths are relative **to the YAML file**, not the working directory.
 This is the lever for "my baseline is eating the decomposition".
 
 1. `alpha_prior_sd: 0.05` — intercept pinned near zero but still estimated.
-2. `include_intercept: false` — gone. **Only with `run.dv_center: mean`.** The
-   level does not vanish: the baseline becomes the *fixed* training mean with
-   zero posterior width, instead of a free parameter.
+2. `include_intercept: false` — gone. Who carries the level then depends on
+   `run.dv_center` (TUNING_GUIDE §2.2):
+   - **`none` — a decomposition versus zero**, the vendor convention: the
+     uncentred always-on level variables carry the level and every contribution
+     is measured against zero. Keep those variables uncentred; if nothing can
+     carry the level, `prepare_data` warns (`no_level_term`).
+   - `mean` — the training mean becomes a *fixed* baseline (zero posterior
+     width) and the drivers explain the movement around it.
 3. Explicit region dummies as features, if you want a level you can see.
 
 > **Symptom:** `mu_alpha` near 0.9 on a KPI scaled to mean 1.0 means the
@@ -471,13 +476,16 @@ handled: `FEATURE_PRIOR_GUIDE.md` §5.
 
 | Key | Default | Meaning |
 |---|---|---|
-| `draws` / `tune` | `1000` / `1000` | kept draws / warmup, per chain |
+| `draws` / `tune` | `1000` / `1000` | kept draws / warm-up (burn-in: step size and mass matrix adapt, then discarded), per chain |
 | `chains` | `4` | minimum for a trustworthy R-hat |
 | `target_accept` | `0.92` | raise toward `0.99` to clear divergences |
+| 🆕 `max_treedepth` | `10` | NUTS cap: at most 2^depth − 1 leapfrog steps per draw (1,023). Saturated = a geometry problem — centre / merge first, then 11–12. Translated to NumPyro's `max_tree_depth` for you |
+| 🆕 `dense_mass` | `false` | learn a full mass matrix in warm-up instead of a diagonal one — helps when coefficients trade off; slower per step, needs enough `tune` |
+| 🆕 `jitter` | `true` | start each chain from a jittered point, so R-hat can see chains that disagree |
 | `seed` | `42` | set it, so a run is reproducible |
 | `sampler` | `numpyro` | `numpyro` (JAX/GPU), `pymc`, `advi` |
 | `chain_method` | `sequential` | `vectorized` is best on a single GPU — all chains in one kernel |
-| `nuts_kwargs` | `{}` | extra kwargs for the NUTS kernel only |
+| `nuts_kwargs` | `{}` | any other kernel argument (e.g. `step_size`); overrides the three settings above. Either tree-depth spelling works |
 | `prior_predictive_draws` | `500` | feeds the contraction report — **keep ≥ 500** |
 | `store_log_likelihood` | `false` | needed for LOO/WAIC; makes the trace much bigger |
 | `advi_iters` | `30000` | `sampler: advi` only |
@@ -621,13 +629,16 @@ built a prior is always the grouping that checks it.
 
 ```yaml
 model: {include_intercept: false, fourier_order: 2}
-run: {dv_center: mean, dv_scale: mean, dv_scale_scope: region}
+run: {dv_center: none, dv_scale: mean, dv_scale_scope: region}
 output: {period_split: mat}
 ```
+A decomposition **versus zero**, like the vendor's: no intercept, an uncentred
+KPI, and the always-on level variables left uncentred so they carry the level.
 Plus `prior_sd_basis: relative` with a tight `global_prior_sd` in the prior CSV.
 `dv_scale: mean` is what a prior generated from the vendor's contributions is
-expressed in. Expect `contraction ≈ 0` — and say the contributions are
-assumptions.
+expressed in; with an uncentred KPI each contribution `β × Σx × dv_scale` then
+lands on the vendor's number. Expect `contraction ≈ 0` — and say the
+contributions are assumptions.
 
 **Let the data speak**
 

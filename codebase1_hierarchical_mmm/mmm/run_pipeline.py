@@ -28,8 +28,9 @@ Typical use (e.g. from a Databricks notebook):
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import os
-import warnings
 
 import pandas as pd
 
@@ -60,6 +61,11 @@ def run(df: pd.DataFrame,
         extra_warnings: list | None = None,
         assumption_cfg: AssumptionConfig | None = None,
         benchmark_mapping: str | None = None):
+    # a partial upload stops here too, for a direct Python call (silent when
+    # the copy is consistent; run_from_yaml has already printed the version)
+    import mmm
+    mmm.announce(quiet=True)
+
     run_cfg = run_cfg or RunConfig()
     sampler_cfg = sampler_cfg or SamplerConfig()
     out_cfg = out_cfg or OutputConfig()
@@ -86,14 +92,10 @@ def run(df: pd.DataFrame,
         # report complete no matter where the config was assembled.
         [s.resolved() for s in model_cfg.features]
 
-        # dropping the intercept only makes sense on a centred KPI: with
-        # dv_center="none" the KPI keeps its level and nothing is left to carry
-        # it, so every coefficient would be dragged up to fake an intercept.
-        if not model_cfg.include_intercept and run_cfg.dv_center == "none":
-            warnings.warn(
-                "include_intercept=False with dv_center='none': the KPI still "
-                "carries its level but the model has no term to absorb it. Use "
-                "dv_center='mean', or keep the intercept.")
+        # No intercept plus an uncentred KPI (dv_center "none") is a
+        # decomposition versus zero - the vendor-style setup, legitimate
+        # (decided 2026-10-14). prepare_data warns only when no feature can
+        # carry the level (category no_level_term).
 
         result = _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg,
                              dirs, root, save_trace, assumption_cfg,
@@ -139,7 +141,8 @@ def _run_stages(df, model_cfg, run_cfg, sampler_cfg, out_cfg, dirs, root,
     extend_idata(idata, prior_idata)
 
     print("[3/5] convergence diagnostics")
-    convergence_report(idata, dirs["02_convergence"])
+    convergence_report(idata, dirs["02_convergence"],
+                       max_treedepth=sampler_cfg.max_treedepth)
     prior_posterior_report(idata, dirs["02_convergence"], out_cfg,
                            skip_prefixes=() if out_cfg.report_intercept
                            else INTERCEPT_PARAMS, pdata=pdata)

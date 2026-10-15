@@ -25,7 +25,7 @@ console just stops being the place you are expected to read them.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.3"   # must equal mmm.__version__
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import contextlib
 import os
@@ -100,8 +100,13 @@ _RULES = (
             "The split between them is then decided by the priors rather than "
             "the data - which looks like a result and is not one."),
         fix=(
-            "Centre them (`center_mode=mean`), or keep one and drop the rest. "
-            "Check `01_data/collinearity_pairs.csv` for the actual correlations."),
+            "With `run.dv_center: none` (a decomposition versus zero) they "
+            "carry the level of sales, so do NOT centre them all: keep them "
+            "uncentred and fix their split with priors (the LOCKED rows of a "
+            "secondary model, METHODOLOGY section 2c), keep one and drop the "
+            "rest, or centre all but one. With `run.dv_center: mean`, centre "
+            "them (`center_mode=mean`) or keep one. Check "
+            "`01_data/collinearity_pairs.csv` for the actual correlations."),
     ),
     dict(
         slug="pooling_collapsed",
@@ -304,19 +309,29 @@ _RULES = (
         fix="Set `run.cadence` (and `cv.cadence`) explicitly rather than 'auto'.",
     ),
     dict(
-        slug="intercept_without_centering",
+        slug="no_level_term",
         severity="high",
-        match=("include_intercept=False with dv_center",),
-        title="The intercept was removed but the KPI still carries its level",
+        match=("no feature can carry the KPI's level",),
+        title="Nothing in the model can carry the level of sales",
         means=(
-            "`model.include_intercept: false` leaves no term to hold the level "
-            "of the KPI, and `run.dv_center: none` leaves that level in the "
-            "data. Every coefficient will be dragged upwards to fake an "
-            "intercept."),
-        why="The two settings are only coherent together one way round.",
+            "The model has no intercept and the KPI is not centred - a "
+            "decomposition versus zero, the vendor-style setup - so the level "
+            "of sales must be carried by the features themselves. In these "
+            "regions every feature is centred or active in under half the "
+            "training periods, so nothing can, and every coefficient is "
+            "distorted chasing the level."),
+        why=(
+            "Usually every always-on level variable (distribution, TDP, price, "
+            "category) was given `center_mode: mean`. Without an intercept, "
+            "centring is not a harmless reparameterisation: it removes the "
+            "variable's level from the model. (No intercept with an uncentred "
+            "KPI is itself fine - it is the vendor convention.)"),
         fix=(
-            "Set `run.dv_center: mean`. The baseline then becomes the fixed "
-            "training mean instead of a free parameter. TUNING_GUIDE section 2.2."),
+            "Keep the always-on level variables uncentred "
+            "(`center_mode: none`) so they carry the level, as a vendor "
+            "decomposition does. Otherwise set `model.include_intercept: true` "
+            "(the Primary type), or `run.dv_center: mean` (the training mean "
+            "then becomes a fixed baseline). TUNING_GUIDE section 2.2."),
     ),
     dict(
         slug="scaling_uses_holdout",

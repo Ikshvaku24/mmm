@@ -6,6 +6,8 @@ draws) with the correct tools: R-hat, ESS, divergences, and HDIs.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import os
 import warnings
 
@@ -190,7 +192,14 @@ def _trace_plot(idata, summ: pd.DataFrame, path: str, n: int = 3) -> bool:
     return True
 
 
-def convergence_report(idata, outdir: str) -> pd.DataFrame:
+def convergence_report(idata, outdir: str,
+                       max_treedepth: int = 10) -> pd.DataFrame:
+    """02_convergence/convergence_report.txt + posterior_summary_full.csv.
+
+    `max_treedepth` is the cap the sampler ran with
+    (`SamplerConfig.max_treedepth`), so "saturated" means draws that hit
+    the cap actually in force, not a hard-coded 10.
+    """
     os.makedirs(outdir, exist_ok=True)
     summ = posterior_summary(idata)
     summ.to_csv(os.path.join(outdir, "posterior_summary_full.csv"))
@@ -227,10 +236,14 @@ def convergence_report(idata, outdir: str) -> pd.DataFrame:
         for key in ("tree_depth", "depth"):
             if key in ss:
                 td = ss[key].values
-                lines.append(f"max tree depth   : {int(td.max())}  "
-                             f"(saturated in {float((td >= td.max()).mean()) * 100:.1f}% "
-                             "of steps)" if td.max() >= 10 else
-                             f"max tree depth   : {int(td.max())}  (OK)")
+                cap = int(max_treedepth)
+                sat = float((td >= cap).mean()) * 100
+                lines.append(
+                    f"max tree depth   : {int(td.max())} of cap {cap}  "
+                    f"(saturated in {sat:.1f}% of draws - a geometry problem: "
+                    "centre or merge first, then raise max_treedepth)"
+                    if sat > 0 else
+                    f"max tree depth   : {int(td.max())} of cap {cap}  (OK)")
                 break
     except Exception:  # noqa: BLE001
         pass

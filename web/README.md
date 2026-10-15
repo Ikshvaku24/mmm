@@ -108,7 +108,8 @@ It says so plainly if the workspace copy is older.
      doesn't.
    - **Delete `modelling_type`.** The intercept is now `model.include_intercept`
      in Model settings.
-3. **The token** (`DATABRICKS_TOKEN`) must be able to:
+3. **The token** (`DATABRICKS_TOKEN`) - the app acts as its owner - must be able
+   to (a refused call names the owner and what to grant - `codebase._check`):
    - run the job (it already does);
    - **read the job's definition**;
    - **read the codebase 1 workspace folder**.

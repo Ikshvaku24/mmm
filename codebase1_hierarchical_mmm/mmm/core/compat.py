@@ -6,6 +6,8 @@ group merging and saving work identically on both.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 
 def has_group(idata, group_name: str) -> bool:
     """True when the inference object contains the requested group."""

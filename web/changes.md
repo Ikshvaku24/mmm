@@ -19,6 +19,35 @@ needs no redeploy.
 
 ---
 
+## Update 13 - when Databricks refuses the app's token, the app says why (2026-10-12)
+
+You saw, after deploying: *codebase 1 (the backend) could not be loaded: 403
+Client Error: Forbidden for url: .../api/2.1/jobs/get?job_id=969024452244073*.
+
+**Why.** The app calls Databricks with the token stored in `DATABRICKS_TOKEN`
+- as that token's **owner**, not as the app's own service principal (Step 1).
+Its first call reads the model job, to find the folder codebase 1 is in. 403
+means Databricks refused that call, for one of two reasons:
+- **the token's owner may not see the job** - for example a token that is not
+  yours, while the new job is yours; or
+- **the token itself is refused** - expired or revoked (personal access tokens
+  have a lifetime), or made in another workspace.
+
+**What to do** - Step 7 below. In short: give the token's owner **Can Manage
+Run** on the job (Jobs → the job → Permissions) and **Can Read** on the
+`mmm_v5` folder, then reload the app's page; or store a new token of yours in
+the secret and restart the app.
+
+**Now** the message says which: the call that failed, Databricks' own words,
+whose token it is, and what to grant. (Opening that API link in a browser
+always gives *401 Credential was not sent*: the browser sends no token - that
+says nothing about the app.)
+
+**To get this:** copy `web/` to the app's source folder and press Deploy.
+Codebase 1 is unchanged (still 2026.10.09.3).
+
+---
+
 ## Update 12 - fix: the filters, and ①'s choices, are kept when you change page (2026-10-10)
 
 | You reported | Why it happened | Now |
@@ -907,10 +936,30 @@ Then open the app's URL.
 - Under the page list on the left: *Backend: codebase 1 2026.10.09.3* - and, for the
   people under `full_access` in `app_access.yaml`, *from the workspace
   `/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm`*, with **Reload
-  codebase 1**. If it says codebase 1 could not be loaded, check two things:
+  codebase 1**. If it says codebase 1 could not be loaded, check:
   - `MDR_JOB_ID` points to the **new** job (the old one runs `mmm_v4`, which is
     too old);
-  - the token owner can read the `mmm_v5` folder.
+  - the token owner can read the `mmm_v5` folder;
+  - **HTTP 403 on the job** (`jobs/get`): the message names the token's owner.
+    Give them **Can Manage Run** on the job (Jobs → the job → Permissions →
+    add them), then reload the page - no redeploy. If it says Databricks
+    refused the token itself, it has expired or been revoked: create a new
+    token (Step 2), store it in the secret behind `DATABRICKS_TOKEN`, and
+    restart the app (it reads the secret when it starts).
+    To see whose token it is without the app, run this in a notebook (the
+    scope and key are the ones behind `DATABRICKS_TOKEN`):
+
+    ```python
+    import requests
+    token = dbutils.secrets.get("<scope>", "<key>")
+    host = "https://adb-4238848035289420.0.azuredatabricks.net"
+    me = requests.get(f"{host}/api/2.0/preview/scim/v2/Me",
+                      headers={"Authorization": f"Bearer {token}"})
+    print(me.status_code, me.json().get("userName"))   # 403 here = the token is refused
+    job = requests.get(f"{host}/api/2.1/jobs/get", params={"job_id": 969024452244073},
+                       headers={"Authorization": f"Bearer {token}"})
+    print(job.status_code, job.json().get("message"))
+    ```
 - The cluster, top right on every page (with **Start cluster** when it is
   stopped), is the one whose ID is written into `src/clusters.py`
   (`cluster_id`). If the new job uses a different cluster, change that ID.
@@ -974,7 +1023,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (2096 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2098 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.

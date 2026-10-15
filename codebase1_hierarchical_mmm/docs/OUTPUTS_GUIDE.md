@@ -386,7 +386,7 @@ out of the index.
 | `negative_values_uncentred` | high | A sign-constrained feature has negative values but is scaled without centring |
 | `collinear_with_intercept` | high | An always-on feature is ~constant after scaling and fights the region intercept. This is the defect that broke `real_data_v1` |
 | `degenerate_feature_column` | high | A column is constant, empty or non-positive over the training window; the scale fell back to 1.0 |
-| `intercept_without_centering` | high | `include_intercept: false` with `dv_center: none` — nothing is left to carry the level |
+| `no_level_term` | high | no intercept and an uncentred KPI (a decomposition versus zero — fine on its own), but in some region **no feature can carry the level**: every feature centred or active in under half the weeks. Until 2026.10.14.2 this was `intercept_without_centering`, which fired on every such run |
 | `pooling_collapsed` | medium | `regional_sd_prior` < 0.02, so hierarchical pooling is one shared coefficient in all but name |
 | `per_region_prior_sd_ignored` | medium | A per-region `prior_sd` was written but hierarchical pooling ignores it |
 | `seasonality_overfit_risk` | medium | `fourier_order` is high for the number of training periods |
@@ -585,13 +585,17 @@ divergences      : 7       (INVESTIGATE)
 max tree depth   : 8       (OK)
 ```
 
+🆕 From 2026.10.14.1 the last line names the cap in force —
+`max tree depth : 8 of cap 10 (OK)` — because `sampler.max_treedepth` can now
+change it, and "saturated" counts the draws that hit **that** cap.
+
 | Statistic | What it is | Pass mark |
 |---|---|---|
 | **R-hat** | Do the 4 chains agree? Ratio of between- to within-chain variance | < 1.01 good, > 1.05 **fail** |
 | **ESS (bulk)** | Independent-equivalent draws for the centre of the posterior | > 400 |
 | **ESS (tail)** | Same, for the interval endpoints — governs HDI stability | > 400 |
 | **Divergences** | Steps where the sampler hit curvature it couldn't follow | 0 ideal; < 1% of draws tolerable |
-| **Tree depth** | Sampler steps per iteration; "saturated" = it ran out of room | Not saturated |
+| **Tree depth** | Sampler steps per iteration; "saturated" = it hit `sampler.max_treedepth` (2^depth − 1 steps) | Not saturated |
 
 **How to read v3.** All green. The 7 divergences are 0.18% of 4,000 draws — flagged
 because it isn't zero, but far below the 1% guardrail. Tree depth 8 with no

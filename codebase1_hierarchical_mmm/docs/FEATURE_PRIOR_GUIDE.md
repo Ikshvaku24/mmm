@@ -108,14 +108,22 @@ just the number you typed.
 `01_data/prior_summary.csv` prints `implied_rel_sd` — the direct check on "did
 my 0.2 actually mean 20%?".
 
-### `center_mode=mean` for always-on LEVEL variables
+### `center_mode=mean` for always-on LEVEL variables — with an intercept
 
-Distribution, price index, ACV. Uncentred they are near-constant — TDP at
-80 ± 0.5 every week — and duplicate the region intercept, the defect that broke
-`real_data_v1` (R-hat 1.26, TDP +91% / AVP −97% cancelling out). The default
-is uncentred, so the run warns (`collinear_with_intercept`) when `sd / level`
-is under `run.near_constant_sd`. Centring does not change the coefficient's
-units, so **the prior mean stays valid**.
+Distribution, price index, ACV. **In a model with an intercept**, uncentred
+they are near-constant — TDP at 80 ± 0.5 every week — and duplicate the region
+intercept, the defect that broke `real_data_v1` (R-hat 1.26, TDP +91% / AVP
+−97% cancelling out). The default is uncentred, so the run warns
+(`collinear_with_intercept`) when `sd / level` is under `run.near_constant_sd`.
+Centring does not change the coefficient's units, so **the prior mean stays
+valid**.
+
+> **Not in a decomposition versus zero.** With no intercept and an uncentred
+> KPI (`include_intercept: false`, `dv_center: none` — the vendor convention
+> and the Secondary type), these variables **are** the level of sales: leave
+> them `center_mode: none`. Centring them takes their level out of the model,
+> and if nothing is left to carry it the run warns `no_level_term`
+> (TUNING_GUIDE §2.2).
 
 **Pair it with `contribution_reference=zero`**, or the reported contribution
 collapses to ~0: a centred column sums to zero over the training window, so
@@ -511,9 +519,11 @@ fit:
   the variable to the number you imported (an assumption); `0.3–0.5` lets the
   data speak. See §4 and `METHODOLOGY.md` §2c. Blank means the default `1.0`,
   which under `relative` is ±100%.
-- **`center_mode`** — `mean` for an always-on level (TDP, price, category).
-  The prior mean stays valid either way; pair it with
-  `contribution_reference: zero`.
+- **`center_mode`** — `mean` for an always-on level (TDP, price, category)
+  **when the model has an intercept**; pair it with
+  `contribution_reference: zero`. In a decomposition versus zero (no
+  intercept, `dv_center: none`) leave it blank (`none`) — those variables carry
+  the level. The prior mean stays valid either way.
 
 Region override rows fill **only** `variable`, `region` and
 `global_prior_mean` — the only columns a region row is read for (§3). Features
@@ -575,9 +585,11 @@ is ~0 has not validated anything.
 7. **Pointing `data.feature_priors` straight at a generated file without
    reading it.** It is a proposal, not a decision.
 8. **Ignoring the `collinear_with_intercept` warning on TDP, price and
-   category.** The builder writes `center_mode: none`; the v1 collinearity
-   failure is what happens when an always-on level stays uncentred and nobody
-   reads the warning.
+   category** in a model with an intercept. The builder writes
+   `center_mode: none`; the v1 collinearity failure is what happens when an
+   always-on level stays uncentred next to an intercept and nobody reads the
+   warning. (Without an intercept the warning does not fire: there, uncentred
+   is right.)
 9. **Writing a baseline variable's share of SALES** in the share file. It is its
    share of the *baseline*, from the stage-1 run.
 10. **Fitting a generated file with `dv_scale: sd`.** The means are per unit of

@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.09.3"   # must equal mmm.__version__
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import copy
 import dataclasses
@@ -186,11 +186,11 @@ HELP: dict[str, dict[str, str]] = {
         "fourier_period_days": "period of the seasonal cycle in days (365.25 = annual)",
         "include_trend": "add a pooled per-region linear time trend",
         "include_intercept": ("keep the region intercept alpha_g. false removes it entirely, so no "
-                              "ESTIMATED term can absorb sales the drivers should be explaining - "
-                              "reach for it when the intercept has eaten the decomposition. Note "
-                              "the level does not vanish: with run.dv_center: mean the baseline "
-                              "becomes the FIXED historical mean (zero posterior width) instead of "
-                              "a free parameter. Only sane with run.dv_center: mean"),
+                              "ESTIMATED term can absorb sales the drivers should be explaining. "
+                              "false with run.dv_center: none is a decomposition VERSUS ZERO (the "
+                              "vendor convention): the uncentred always-on level variables carry "
+                              "the level. false with run.dv_center: mean makes the training mean a "
+                              "FIXED baseline instead"),
         "alpha_prior_sd": "prior sd of the POPULATION intercept (KPI is standardised, so 0.5 is wide)",
         "alpha_regional_sd": "prior scale of how far region intercepts spread around it",
         "pool_sigma": "partial-pool the per-region noise level. false = independent sigma per region",
@@ -224,9 +224,14 @@ HELP: dict[str, dict[str, str]] = {
     },
     "sampler": {
         "draws": "posterior draws kept per chain",
-        "tune": "warmup/adaptation steps per chain (discarded)",
+        "tune": "warm-up (burn-in) steps per chain: step size + mass matrix adapt here, then discarded",
         "chains": "independent chains. 4 is the minimum for a trustworthy R-hat",
         "target_accept": "NUTS acceptance target. Raise toward 0.99 to clear divergences",
+        "max_treedepth": ("NUTS cap: at most 2^depth - 1 leapfrog steps per draw (10 = 1023). "
+                          "Saturated = a geometry problem - centre/merge first, then raise"),
+        "dense_mass": ("learn a full mass matrix in warm-up, not a diagonal one. Helps when "
+                       "coefficients trade off; slower per step, needs enough tune"),
+        "jitter": "start each chain from a jittered point, so R-hat can see chains that disagree",
         "seed": "random seed - set it, so a run is reproducible",
         "sampler": "'numpyro' (JAX/GPU) | 'pymc' | 'advi'",
         "chain_method": "numpyro only: 'sequential' | 'parallel' | 'vectorized' (best on one GPU)",

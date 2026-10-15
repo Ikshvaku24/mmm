@@ -25,6 +25,8 @@ prior mean becomes a fixed offset to the centre that region shrinks toward.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import numpy as np
 import pymc as pm
 import pytensor.tensor as pt

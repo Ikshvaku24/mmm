@@ -3,7 +3,7 @@
 
 ![Flowchart of the proposed flow for a hierarchical model across regions.](e84c7434834958f49141d04130194231_img.jpg)
 
-```
+```mermaid
 
 graph TD;
     A[Read full stacked data] --> B[Validate date, region, dv, and features];

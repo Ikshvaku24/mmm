@@ -11,3 +11,4 @@ web/local/
 web/src/local/
 # Databricks CLI / VS Code extension state
 web/.databricks/
+codebase1_hierarchical_mmm/CLAUDE.md

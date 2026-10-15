@@ -19,6 +19,8 @@ Written by `diagnostics.prior_posterior_report` into
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import os
 import re
 

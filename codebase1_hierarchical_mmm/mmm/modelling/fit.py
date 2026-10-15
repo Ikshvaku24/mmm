@@ -19,6 +19,8 @@ was used.
 """
 from __future__ import annotations
 
+__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+
 import importlib
 import json
 import os
@@ -51,6 +53,41 @@ def describe_backend() -> str:
         return f"jax not available ({e.__class__.__name__})"
 
 
+# The same NUTS setting is spelled differently by the two backends, and each
+# REJECTS the other's spelling (NumPyro: "unexpected keyword argument
+# 'max_treedepth'"). Either spelling is accepted in `nuts_kwargs` and
+# translated for the backend actually used.
+_SPELLING = {"pymc": {"max_tree_depth": "max_treedepth"},
+             "numpyro": {"max_treedepth": "max_tree_depth"}}
+
+
+def kernel_kwargs(scfg: SamplerConfig, backend: str) -> dict:
+    """The NUTS kernel settings for `backend`, spelled the way it wants them.
+
+    `max_treedepth` and `dense_mass` come from their own SamplerConfig fields;
+    anything in `nuts_kwargs` is applied on top (an explicit entry wins), after
+    translating the tree-depth spelling. For PyMC the mass matrix is not a
+    kernel argument - it is chosen by `pymc_init` - so `dense_mass` is left out.
+    """
+    if backend == "pymc":
+        kw = {"max_treedepth": scfg.max_treedepth}
+    else:
+        kw = {"max_tree_depth": scfg.max_treedepth,
+              "dense_mass": bool(scfg.dense_mass)}
+    rename = _SPELLING.get(backend, {})
+    for k, v in (scfg.nuts_kwargs or {}).items():
+        kw[rename.get(k, k)] = v
+    if backend == "pymc":
+        kw.pop("dense_mass", None)      # handled by the init string instead
+    return kw
+
+
+def pymc_init(scfg: SamplerConfig) -> str:
+    """PyMC's initialisation string: jitter the start, and pick the mass matrix."""
+    mass = "adapt_full" if scfg.dense_mass else "adapt_diag"
+    return f"jitter+{mass}" if scfg.jitter else mass
+
+
 def sample_prior(model: pm.Model, scfg: SamplerConfig):
     with model:
         return pm.sample_prior_predictive(draws=scfg.prior_predictive_draws,
@@ -79,6 +116,8 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
         "seed": scfg.seed,
         "draws": scfg.draws, "tune": scfg.tune, "chains": scfg.chains,
         "target_accept": scfg.target_accept,
+        "max_treedepth": scfg.max_treedepth,
+        "dense_mass": scfg.dense_mass, "jitter": scfg.jitter,
         "store_log_likelihood": scfg.store_log_likelihood,
         "allow_sampler_fallback": scfg.allow_sampler_fallback,
     }
@@ -89,7 +128,11 @@ def fit(model: pm.Model, scfg: SamplerConfig, outdir: str | None = None):
             with model:
                 if sampler == "pymc":
                     # cores=1: forking after JAX initialises can deadlock
-                    idata = pm.sample(init="adapt_diag", cores=1, **common)
+                    log["kernel_kwargs_used"] = kernel_kwargs(scfg, "pymc")
+                    log["init_used"] = pymc_init(scfg)
+                    idata = pm.sample(init=pymc_init(scfg), cores=1,
+                                      nuts=kernel_kwargs(scfg, "pymc"),
+                                      **common)
                 else:
                     idata = _sample_external(model, sampler, common, scfg, log)
             used = sampler
@@ -143,9 +186,8 @@ def _sample_jax_direct(model, sampler: str, common: dict,
                   chains=common["chains"],
                   target_accept=common["target_accept"],
                   random_seed=common["random_seed"], model=model,
-                  chain_method=scfg.chain_method)
-    if scfg.nuts_kwargs:
-        kwargs["nuts_kwargs"] = scfg.nuts_kwargs
+                  chain_method=scfg.chain_method, jitter=bool(scfg.jitter),
+                  nuts_kwargs=kernel_kwargs(scfg, sampler))
     if hasattr(pmjax, "sample_jax_nuts"):        # unified entry, pymc >= 5.16
         return pmjax.sample_jax_nuts(nuts_sampler=sampler, **kwargs)
     return getattr(pmjax, f"sample_{sampler}_nuts")(**kwargs)
@@ -161,22 +203,21 @@ def _sample_external(model, sampler: str, common: dict, scfg: SamplerConfig,
     nuts_sampler_kwargs), then no chain hint at all. Only signature errors
     (TypeError etc.) trigger the next attempt.
     """
+    kern = kernel_kwargs(scfg, sampler)
+    log["kernel_kwargs_used"] = kern
     try:
         idata = _sample_jax_direct(model, sampler, common, scfg)
         log["sampling_route"] = "pymc.sampling.jax (direct)"
         log["chain_method_applied"] = True
+        log["kernel_kwargs_applied"] = True
         return idata
     except (ImportError, AttributeError, TypeError) as e:
         log["direct_route_error"] = f"{e.__class__.__name__}: {e}"
         print(f"[fit] NOTE: direct JAX route unavailable "
               f"({e.__class__.__name__}) - falling back to pm.sample")
 
-    newest = {"chain_method": scfg.chain_method}
-    if scfg.nuts_kwargs:
-        newest["nuts"] = scfg.nuts_kwargs
-    legacy_inner = {"chain_method": scfg.chain_method}
-    if scfg.nuts_kwargs:
-        legacy_inner["nuts_kwargs"] = scfg.nuts_kwargs
+    newest = {"chain_method": scfg.chain_method, "nuts": kern}
+    legacy_inner = {"chain_method": scfg.chain_method, "nuts_kwargs": kern}
     attempts = [newest, {"nuts_sampler_kwargs": legacy_inner}, {}]
 
     sig_error = None
@@ -188,9 +229,11 @@ def _sample_external(model, sampler: str, common: dict, scfg: SamplerConfig,
             # sequential progress bars / a NumPyro "not enough devices"
             # warning mean it did NOT take effect
             log["chain_method_applied"] = bool(extra)
+            log["kernel_kwargs_applied"] = bool(extra)
             if not extra:
                 print("[fit] NOTE: this PyMC version accepted no chain_method "
-                      "argument - chains ran with the backend default")
+                      "or kernel argument - chains ran with the backend "
+                      "defaults (max tree depth 10, diagonal mass matrix)")
             return idata
         except TypeError as e:
             sig_error = e

@@ -149,6 +149,46 @@ def _headers() -> dict:
     return {"Authorization": f"Bearer {os.environ.get('DATABRICKS_TOKEN', '')}"}
 
 
+def _who() -> str:
+    """Whose token DATABRICKS_TOKEN is - "" when Databricks will not say (the
+    token itself is refused: expired, revoked, another workspace's)."""
+    try:
+        r = requests.get(f"{_host()}/api/2.0/preview/scim/v2/Me", headers=_headers(),
+                         timeout=15)
+        if r.status_code == 200:
+            me = r.json() or {}
+            return str(me.get("userName") or me.get("displayName") or "")
+    except Exception:  # noqa: BLE001 - only an explanation
+        pass
+    return ""
+
+
+def _check(r, what: str) -> None:
+    """r.raise_for_status(), saying what failed, with Databricks' own message
+    and - when the call was refused (401/403) - whose token it was and what to
+    do. The app acts as the OWNER of DATABRICKS_TOKEN, not as the app's own
+    service principal (web/changes.md, Step 1)."""
+    if r.status_code < 400:
+        return
+    try:
+        message = str((r.json() or {}).get("message") or "")
+    except Exception:  # noqa: BLE001 - not JSON
+        message = ""
+    text = f"{what} failed: HTTP {r.status_code}" + (f" - {message}" if message else "")
+    if r.status_code in (401, 403):
+        who = _who()
+        if who:
+            text += (f". The app calls Databricks with the token in DATABRICKS_TOKEN, which "
+                     f"belongs to {who}: give {who} Can Manage Run on the model job and Can "
+                     "Read on the codebase 1 folder - or store a token of someone who has "
+                     "both in that secret, then restart the app")
+        else:
+            text += (". Databricks refused the token in DATABRICKS_TOKEN itself (expired, "
+                     "revoked, or from another workspace): create a new token, store it in "
+                     "that secret, then restart the app")
+    raise RuntimeError(text)
+
+
 def _api_path(p: str) -> str:
     """The Workspace API wants /Users/..., not /Workspace/Users/..."""
     p = "/" + str(p).strip().strip("/")
@@ -159,7 +199,7 @@ def _job_codebase_path(job_id: str) -> str | None:
     """The workspace folder of the notebook the model job runs."""
     r = requests.get(f"{_host()}/api/2.1/jobs/get", headers=_headers(),
                      params={"job_id": job_id}, timeout=30)
-    r.raise_for_status()
+    _check(r, f"Reading the model job {job_id} (MDR_JOB_ID) to find codebase 1")
     settings = r.json().get("settings", {})
     if settings.get("git_source"):
         return None                      # a Git-sourced job has no workspace copy
@@ -173,7 +213,7 @@ def _job_codebase_path(job_id: str) -> str | None:
 def _ws_list(path: str) -> list:
     r = requests.get(f"{_host()}/api/2.0/workspace/list", headers=_headers(),
                      params={"path": _api_path(path)}, timeout=30)
-    r.raise_for_status()
+    _check(r, f"Listing the workspace folder {_api_path(path)}")
     return r.json().get("objects", []) or []
 
 
@@ -221,7 +261,7 @@ def _ws_download(path: str) -> bytes:
                                  "direct_download": "true"}, timeout=60)
         if r.status_code == 400 and fmt == "AUTO":
             continue
-        r.raise_for_status()
+        _check(r, f"Downloading {path} from the workspace")
         if "application/json" in r.headers.get("Content-Type", ""):
             import base64
             return base64.b64decode(r.json().get("content", ""))
