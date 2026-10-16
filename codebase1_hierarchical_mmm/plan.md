@@ -1,7 +1,13 @@
 # LTE (long-term effects) modelling in codebase 1 — plan
 
 > **Status: PLAN. Nothing in this document is built.** Written 2026-10-15
-> against codebase `2026.10.14.2`.
+> against codebase `2026.10.14.2`. **Revised 2026-10-16** with:
+> - the vendor's training deck (`../snapshots/UCM/LTE Methodology/Additional/`,
+>   Ekimetrics "LTE Knowledge Transfer – In-Depth");
+> - three clarifications from the team: **T1** only the UCM is retrofitted;
+>   **T2** the retrofit runs in either direction; **T3** the media-wave method.
+>
+> The revision touches §1, §2.7, §3–§6, §8, §9, §11–§13, §15 and §16.
 >
 > **Inputs:**
 > - the reference material in `../snapshots/UCM/`, transcribed in an
@@ -11,6 +17,15 @@
 >
 > **Scope:** codebase 1 (`mmm/`) and the BRIDGE web app (`../web/`). Codebase 2
 > is out of scope.
+>
+> **For discussion with management:** `methodology.md` / `methodology.html` in
+> this folder. They hold the method only — current vs proposed, the validation
+> strategy, the pipeline, the arithmetic and the open questions — without the
+> code or the app.
+>
+> **Structural and radical options** (C1–C10): `changes.md`, including a
+> one-stage model where long-term media builds the reported base. Not in this
+> plan's scope until the team picks any of them.
 
 | Tag | Meaning |
 |---|---|
@@ -69,26 +84,42 @@ It is the same pipeline that already produces the BMC's short-term model.
 
 ### 1.2 The method, as the sources define it [S]
 
-1. **Stitch** at least 3.5–4 years of sales, media and drivers.
-2. **Extract a UCM trend** from sales: statsmodels `UnobservedComponents`
-   (smooth trend + cycle + irregular); Level + Trend; refined with a
-   Hodrick–Prescott (HP) filter, λ = 300.
-3. **Regress that trend** (the long-term model) on long-term-transformed media,
-   expert and a few baseline drivers:
+The stages are the 8 on the Ekimetrics process bar.
+
+1. **Data stitching:** at least 4 years of sales, media and drivers
+   (Ekimetrics 02.1; the TEAM KT deck says 3.5–4). All pools are aggregated to
+   **brand level**, because "the UCM modelling is done at the Brand level".
+2. **UCM extraction:** a UCM trend from sales:
+   - statsmodels `UnobservedComponents` (smooth trend + cycle + irregular);
+   - Level + Trend;
+   - refined with a Hodrick–Prescott (HP) filter, λ = 300.
+3. **UCM modelling:** regress that trend (the long-term model) on
+   long-term-transformed media, expert and a few baseline drivers:
    - the media are transformed SES (α = 0.05) → Hill → adstock;
    - the priors are on contribution shares.
-4. **Nest the trend** as one extra variable (`ucm`) into the latest 2-year
-   short-term model:
+4. **UCM analysis:** each lever's share of the UCM trend.
+5. **Nested modelling:** nest the trend as one extra variable (`ucm`) into a
+   2-year short-term (AO MMM) model — **the latest or the earlier 2 years
+   [T2]**:
    - media, expert and negative-baseline variables **fixed**;
    - positive-baseline variables re-estimated.
-5. **Retrofit** the UCM contribution to the earlier years with a scalar:
-   *UCM contribution ÷ UCM trendline*.
-6. **Long-term contribution of a lever** = its share of the UCM trend × the
-   UCM's contribution to sales, week by week.
-7. **Report:**
+6. **Retrofit:** carry **only the UCM contribution [T1]** to the other years,
+   **backward or forward [T2]**, with a scalar: *UCM contribution ÷ UCM
+   trendline*.
+   - It is taken proportionally from those years' positive baseline factors.
+   - **Every other variable keeps its historically reported short-term
+     contribution.**
+7. **Nested model analysis:** the long-term contribution of a lever = its
+   share of the UCM trend × the UCM's contribution to sales, week by week.
+8. **Media wave analysis [T3]:**
+   - split each channel's raw support by calendar year;
+   - transform each year's variable, so it carries into later years;
+   - split every week's long-term contribution in the ratio of those variables.
+   - The result is each year's **indexed** long-term contribution.
+9. **Report:**
    - Years 1–2 as ST + LT;
    - multipliers (Total ÷ ST) and, optionally, ROI;
-   - media waves: each year's activity, followed into later years.
+   - media waves.
 
 ### 1.3 The shape of the solution [I]
 
@@ -96,10 +127,10 @@ Four steps. Two of them are **ordinary codebase 1 model runs**:
 
 | Step | What it is | New code |
 |---|---|---|
-| ① **UCM extraction** | Back-cast (optional burn-in) → UCM per region → HP → refined trend. Writes the datacubes for steps ② and ③ | **New** module `mmm/lte/ucm.py` (statsmodels) |
-| ② **Long-term model** | A normal codebase 1 run; `dv` = refined UCM trend; features = long-term media, expert and drivers | No model change. A stage preset plus a share-based prior generator |
-| ③ **Nested model** | A normal codebase 1 run, Secondary-style; `dv` = sales over the latest 2 years; the primary model's features plus `ucm` | No model change. A LOCKED / DONOR / CANDIDATE prior generator (METHODOLOGY §2c) |
-| ④ **LTE results** | Retrofit, long-term contributions, final decomposition, multipliers, (ROI), waves, reconciliation | **New** module `mmm/lte/combine.py`, `waves.py` (pandas / numpy) |
+| ① **UCM extraction** | Back-cast (optional burn-in) → UCM on the brand-level series → HP → refined trend. Writes the datacubes for steps ② and ③ | **New** module `mmm/lte/ucm.py` (statsmodels) |
+| ② **Long-term model** | A normal codebase 1 run, brand level; `dv` = refined UCM trend; features = long-term media, expert and drivers | No model change. A stage preset plus a share-based prior generator |
+| ③ **Nested model** | A normal codebase 1 run, Secondary-style; `dv` = sales over the AO MMM model's 2 years (latest or earlier); the primary model's features plus `ucm` | No model change. A LOCKED / DONOR / CANDIDATE prior generator (METHODOLOGY §2c) |
+| ④ **LTE results** | UCM-only retrofit (either direction), long-term contributions, final decomposition, waves (indexed), multipliers, (ROI), reconciliation | **New** module `mmm/lte/combine.py`, `waves.py` (pandas / numpy) |
 
 - `model.py`, `fit.py`, the diagnostics and the decomposition are **not
   changed**.
@@ -118,9 +149,9 @@ Four steps. Two of them are **ordinary codebase 1 model runs**:
 2. **One formula covers both windows** [I]. In the proposed setup — `ucm`
    uncentred, `scale_mode: mean`, measured against zero — the UCM scalar κ_g
    is a constant per region and is read directly from the nested coefficient.
-   The long-term contribution in sales is then simply
-   `L = κ_g × (contribution to the UCM trend)`, in the nested window and the
-   retrofit window alike (§6.7).
+   At brand level, κ = Σ_g κ_g. The long-term contribution in sales is then
+   simply `L = κ × (contribution to the UCM trend)`, in the nested window and
+   the retrofit window alike (§6.7).
 3. **Every UCM output in the material has a start-up artefact** [C]: Level ≈ 0
    for 1–2 periods, the refined trend starting at 40–50% of sales.
    - The cause [V statsmodels source]: the default *approximate diffuse* start
@@ -130,22 +161,37 @@ Four steps. Two of them are **ordinary codebase 1 model runs**:
 4. **The brief's Step 3 differs from the sources** [S]. SES is applied to
    **media**; the UCM trend is refined with an **HP filter** (deck S11–S14;
    guide §6).
-5. **Waves cannot be derived from the transformed media alone.** They need raw
-   activity plus the long-term transformation parameters, or per-year columns
-   from upstream (§12.2).
+5. **Waves cannot be derived from the transformed media alone.** The team's
+   method (T3; Ekimetrics 01.8) needs **per-year wave variables**: the raw
+   support split by calendar year and passed through the same transformations
+   (§12.2).
+   - The upstream transformation step can export them.
+   - Otherwise codebase 1 needs the raw support plus the long-term parameters.
+   - **When Hill is inside the chain, the per-wave split is not neutral** [C]:
+     at S = 2 a carried-over stock worth 14% of the total gets 6% of the
+     credit; at S = 3, 1%. A split at the stock (before Hill) avoids this
+     (W1, §12.4).
 6. **The nested `ucm` is endogenous by construction** — a smoothed piece of the
    dependent variable (codebase 1's own METHODOLOGY §2b). Its share is set
    largely by its prior and the donors, so it must be declared,
    sensitivity-tested and audited (U11).
-7. **The retrofit source conflicts** [S]. The brief (6.1) uses coefficients ×
-   earlier media; the deck (S31) and FR PDX (S3) use the historically reported
-   short-term outputs (D-03).
+7. **The retrofit source — settled by the team (T1).** Only the UCM is
+   retrofitted. Every other variable keeps the short-term contribution
+   reported by the AO MMM model that covered those years (deck S31; FR PDX S3).
+   The brief's 6.1 (coefficients × earlier media) is dropped. The retrofit
+   runs **in either direction** (T2).
 8. **λ = 300 is not cadence-neutral** [C]. It cuts at ≈26 *periods*: ≈6 months
    on weekly data (France) but ≈2 years on monthly data (Colombia) (U4, D-08).
-9. **FR PDX uses two different multiplier definitions** [I]. Slides 11–13 are
-   window-based: ST and LT measured inside 2022–23. Slide 15's waves are
-   activity-based: effects followed into later years. They give different
-   numbers for the same channel (§11.6).
+   - Keeping a 6-month cut-off on monthly data would need λ ≈ 1.
+   - λ = 300 is now confirmed as the documented method (Ekimetrics 01.2), not
+     just a notebook setting.
+9. **Indexed vs non-indexed** [C/I]. Ekimetrics: "We use **indexed** long-term
+   contributions", booked back to the activity year by the wave split.
+   - FR PDX's waves (S15) are indexed: TV's total ÷ ST is 2.44 (2022) and 2.38
+     (2023).
+   - Its ROI multiplier (S13) is **2.03**, which matches LT realised *within*
+     2022–23 (≈2.1 reconstructed).
+   - The same channel gets ≈2.0 or ≈2.4 depending on the basis (§11.6, D-14).
 
 ### 1.5 Decisions needed before building
 
@@ -153,13 +199,19 @@ The full list, with recommendations, is §15:
 
 - **D-01** pre-period handling;
 - **D-02** the order of the long-term transformations;
-- **D-03** the retrofit source;
+- **D-04** which AO MMM model to nest into, and so the retrofit direction (T2);
 - **D-05** which sales series feeds the UCM, given restatements;
-- **D-06** regional structure;
+- **D-06** how a brand-level UCM enters a pooled nested model;
 - **D-08** the smoothing cut-off.
 
-Waves additionally need **raw activity plus transformation parameters**, a data
-request.
+D-03 (the retrofit source) is **settled** by T1.
+
+Data requests:
+
+- waves need **per-year wave variables**, or raw support plus the
+  transformation parameters;
+- the retrofit years need the **historically reported short-term
+  decomposition** (T1).
 
 ### 1.6 Size [I]
 
@@ -326,8 +378,8 @@ transformed again. Traced through the design:
 | ② Long-term model | `media_residual` | a decaying pre-window media stock (deck S18) | generated by step ① or supplied (D-10) | linear, baseline |
 | ③ Nested model | short-term media, expert, trade and baseline features | **exactly the primary model's columns**: same short-term transforms, same units, else the LOCKED priors are wrong (scaling rule) | the primary model's datacube | as in the primary model |
 | ③ Nested model | `ucm` | refined UCM trend τ (sales units) | step ① | `scale_mode: mean`, uncentred, measured against zero, sign positive |
-| ④ Retrofit (coefficients mode) | short-term features, earlier years | short-term-transformed **continuously through the window boundary**: transform the full history, then cut | upstream | β × x × the **nested** scales |
-| ④ Waves | raw activity per channel | **untransformed** activity plus the long-term parameters and order | upstream (must be retained — a new data request) | re-runs the documented chain **per origin year, for attribution only**, after checking that it reproduces the supplied columns |
+| ④ Retrofit | **no media at all** — only the UCM is retrofitted (T1) | τ over the retrofit years, plus the **historically reported** short-term decomposition of those years (all variables, in sales units) | step ①; the AO MMM model of those years | κ·τ carved out of that decomposition's positive baseline (§6.6). **No coefficient is applied to any earlier media** |
+| ④ Waves | **per-year wave variables** of each long-term channel: raw support restricted to one calendar year, passed through the **same** long-term chain (T3; Ekimetrics 01.8) | the upstream transformation step exports them next to the total column. **Fallback:** raw support plus the long-term parameters and order, and codebase 1 rebuilds them | upstream (a new data request) | shares per week → split of the long-term contribution (§12). Checks additivity (Σ waves vs the total column) |
 
 **Conclusions:**
 
@@ -335,7 +387,8 @@ transformed again. Traced through the design:
   and as a long-term column (long-term model). They are different columns with
   different transforms and must never be swapped.
 - Codebase 1 transforms **nothing** that enters a model.
-- Raw activity is needed **only** for waves.
+- Wave variables are used for **attribution only**: they never enter a
+  model.
 
 ---
 
@@ -346,7 +399,9 @@ Full transcriptions, checks and open points are in each folder's
 
 | Source | What it establishes |
 |---|---|
-| `LTE Methodology/` (31 slides) | **The procedure.** 7 stages (S5); UCM spec and method (S8–S11); SES / Hill / adstock formulas and order (S12–S16); long-term model variables, including "Linear Trendline" and "Media Residuals", trade / promotion excluded (S17–S18); contribution-share priors (S19); share of the UCM trend = ratio of sums (S21); nesting steps (S22); retrofit by scalar, "taken proportionally from the positive Baseline factors" (S23–S24); the weekly long-term formula (S25); media waves (S26); report Years 1–2 only, aggregated with historically reported short-term (S28–S31) |
+| `LTE Methodology/` (31 slides) | **The procedure.** UCM spec and method (S8–S11); SES / Hill / adstock formulas and order (S12–S16); long-term model variables, including "Linear Trendline" and "Media Residuals", trade / promotion excluded (S17–S18); contribution-share priors (S19); share of the UCM trend = ratio of sums (S21); nesting steps (S22); retrofit by scalar, "taken proportionally from the positive Baseline factors" (S23–S24); the weekly long-term formula (S25); media waves (S26); report Years 1–2 only, aggregated with historically reported short-term (S28–S31) |
+| `LTE Methodology/Additional/` (27 slides; Ekimetrics x Haleon "LTE Knowledge Transfer – In-Depth") | The vendor's own deck; most slides = the above. **New:** the **8-stage process** (Data Stitching → UCM Extraction → UCM Modelling → UCM Analysis → Nested Modelling → Retrofit using Nested Model → Nested Model Analysis → Media Wave Analysis); **HP λ = 300 stated**; why SES and not a moving average (01.3.2); **media-wave attribution in 4 steps with a worked example** (01.8: 700 → 125 / 172 / 210 / 192); **indexed** LT contributions (01.8); **data stitching: ≥ 4 years, pools aggregated to brand level**, no step changes between data sources (02.1) |
+| Team clarifications (2026-10-16) | **T1** only the UCM is retrofitted; **T2** the retrofit runs latest → earlier or earlier → latest; **T3** the wave method = Ekimetrics 01.8 (`LTE Methodology/understanding.md` §6) |
 | `Step by Step Guide/` | Plain-language summary. **Per-channel benchmark ranges** for S, K, adstock and lag (§14): TV S 1.8–3, K 0.5–0.8, adstock 50–80, lag 0–2; search and e-commerce S 1.3–1.5, K 0.3–0.5, adstock 40–50, lag 0. Total ROI = ST + LT |
 | `FR PDX/` (25 slides) | **What is reported, and the arithmetic, verified:** short-term by year (S8–S9); total decomposition (S11, S21); long vs short per channel (S12); ROI and multipliers with spend (S13); benchmarks (S14); waves (S15, S25); long-term model fit (S19) and decomposition (S20); data restatement and back-cast (S23–S24). 3.5 years: 3 Jan 2022 – 23 Jun 2025, weekly |
 | `ucm code with smooth trend/` | The UCM notebook: `UnobservedComponents(level='smooth trend', cycle=True, irregular=True)`, Powell, components smoothed, `Original UCM Trend = Level + Trend`, `hpfilter(λ=300)` → refined trend. Colombia Dolex total, monthly, 2022–25 |
@@ -363,7 +418,8 @@ Verified numbers used as golden tests (§13.2):
 - deck S21, 71%;
 - FR PDX S13, overall multiplier 1.90 = Σ total ÷ Σ ST;
 - FR PDX S12 = S13 ROI × spend;
-- FR PDX S15, wave rows sum to 100%.
+- FR PDX S15, wave rows sum to 100%;
+- Ekimetrics 01.8, waves 700 → 125.4 / 172.3 / 210.0 / 192.3.
 
 ---
 
@@ -371,15 +427,15 @@ Verified numbers used as golden tests (§13.2):
 
 | Brief step | How it is done today (reference material) | What codebase 1 does today [V] | Proposed in codebase 1 | Notes / discrepancy |
 |---|---|---|---|---|
-| **1. Historical data** | ≥3.5–4 yrs (deck S6). The back-cast is a time-reversed `FORECAST.ETS` (sheet) or "fill with the earliest year's average" (deck S8). Restated data back-cast and scaled up by hand (FR PDX S24) | none | **S0**: validate and plan windows (§5.2), the deck's feasibility checklist as checks. **S1**: optional back-cast, **burn-in only** | three pre-period methods in the sources (D-01); 3-year policy §5.2 |
-| **2. UCM components** | Databricks notebooks (statsmodels), run by hand per BMC; outputs copied to Excel; failed exports and broken runs seen | none | **S2** `mmm/lte/ucm.py`: per region, parity or improved mode, diagnostics, plots, CSVs | level = baseline line; "Trend" = **slope** [C] |
+| **1. Historical data** | ≥ 4 yrs (Ekimetrics 02.1; deck S6 says 3.5–4), pools aggregated to brand level. The back-cast is a time-reversed `FORECAST.ETS` (sheet) or "fill with the earliest year's average" (deck S8). Restated data back-cast and scaled up by hand (FR PDX S24) | none | **S0**: validate and plan windows (§5.2), the deck's feasibility checklist as checks, brand-level aggregation. **S1**: optional back-cast, **burn-in only** | three pre-period methods in the sources (D-01); 3-year policy §5.2 |
+| **2. UCM components** | Databricks notebooks (statsmodels), run by hand per BMC; outputs copied to Excel; failed exports and broken runs seen | none | **S2** `mmm/lte/ucm.py`: on the brand-level series (per pool only if D-06 says so), parity or improved mode, diagnostics, plots, CSVs | level = baseline line; "Trend" = **slope** [C] |
 | **3. Refine the trend** | **HP filter λ = 300** on Level + slope (notebooks; deck S11) | none | **S2**: HP with an explicit cut-off (U4) | the brief says **SES** on the trend; the sources apply SES to **media** and HP to the trend [S] |
 | **4. UCM modelling** (long-term model) | Bayesian regression of the trend on long-term media; contribution-share priors (deck S17–S19); vendor-side | can fit it as-is if given a datacube with `dv` = trend | **S3**: a normal codebase 1 run with the long-term preset (intercept + linear trend), share-file priors, `media_residual` | trade / promotion excluded [S] |
 | **5. Nested modelling** | Duplicate the core MMM, add the UCM, fix media / expert / negative baseline, remodel positive baseline, iterate the UCM prior (deck S22) | **METHODOLOGY §2c already describes it**: LOCKED / DONOR / CANDIDATE, Stage A/B, donor audit | **S4**: a Secondary-style run plus the LOCKED / DONOR / CANDIDATE prior generator, Stage A reference, donor audit, at most one prior correction (§2d) | brief: "priors locked except baseline"; deck adds **negative** baseline to the locked set [S] |
-| **6. Retrofit** | κ = UCM contribution ÷ trendline (19%) × earlier trendline; taken proportionally from positive baseline (deck S24). Earlier short-term = historically reported (S31) | none | **S5** `combine.py`: κ_g from the nested coefficients; two modes, `historical` and `coefficients`; proportional positive-baseline allocation | **6.1 conflicts with deck S31** (D-03) |
+| **6. Retrofit** | κ = UCM contribution ÷ trendline (19%) × the other years' trendline; taken proportionally from positive baseline (deck S24). Other variables = historically reported short-term (S31). **Only the UCM is retrofitted (T1); either direction (T2)** | none | **S5** `combine.py`: κ from the nested coefficients; U = κ·τ in the retrofit years; carved proportionally out of the reported decomposition's positive baseline. Backward or forward | the brief's 6.1 (coefficients × earlier media) is **dropped** (T1) |
 | **7. LT and ST contributions** | Weekly: share of the UCM trend × UCM contribution (deck S25); aggregate (FR PDX S21) | none | **S5**: L = κ_g × c^τ, weekly per region; exactly the deck's formula with denominator = trend (D-07) | the brief's product formula holds when κ is constant [C] (§6.9) |
 | **8. Final calculations** | ST + LT per lever, UCM row redistributed, Total Media = TV + Digital; ROI (value) and multipliers (FR PDX S11–S13, S21) | none | **S5 / S7**: FR PDX-layout tables, multipliers both ways, ROI opt-in | ROI vs the team's volume-only rule (D-13); two multiplier definitions (D-14) |
-| **9. Waves** | Short/long by activity year, spill-over into later years (deck S26; FR PDX S15, S25); method not documented | none | **S6** `waves.py`: exact origin-year attribution through SES / adstock, proportional through Hill; tail beyond the data | needs raw activity + parameters (D-02, §12.2) |
+| **9. Waves** | Short/long by activity year, spill-over into later years (deck S26; FR PDX S15, S25). **Method (T3; Ekimetrics 01.8):** raw support split by calendar year; each year's variable transformed with the same chain; each week's LT split in the ratio of the transformed wave variables; summed per wave = **indexed** LT | none | **S6** `waves.py`: the team's method on the upstream per-wave variables; additivity check; **proposed W1**: split at the pre-Hill stock when Hill is in the chain; tail beyond the data | needs per-wave variables (or raw support + parameters) (D-02, D-26, §12.2) |
 
 ---
 
@@ -392,21 +448,23 @@ Verified numbers used as golden tests (§13.2):
  datacube ─►│ S0 validate + window plan  ─►  S1 back-cast (optional burn-in)│
  (sales,    │                                     │                        │
   ST + LT   │                                     ▼                        │
-  columns)  │                  S2 UCM extraction (per region) ─► τ, ucm    │
+  columns)  │           S2 UCM extraction (brand level) ─► τ, ucm         │
             └───────────────┬──────────────────────────────┬───────────────┘
-                            │ lt datacube                  │ nested + retrofit datacubes
+                            │ lt datacube                  │ nested datacube
                             ▼                              ▼
              S3 long-term model (codebase 1 run)   S4 nested model (codebase 1 run)
-              dv = τ ; LT media + drivers           dv = sales (latest 2 yrs);
-              priors: contribution shares           primary features + ucm;
+              dv = τ ; LT media + drivers           dv = sales (the AO MMM model's
+              priors: contribution shares           2 years: latest OR earlier);
+                            │                       primary features + ucm;
                             │                       LOCKED / DONOR / CANDIDATE
                             │                              │   (iterate ≤ 1 correction)
                             └──────────────┬───────────────┘
                                            ▼
-                S5 combine: κ_g, retrofit, L = κ·c^τ, final decomposition,
-                            multipliers, (ROI), reconciliation
+     S5 combine: κ, UCM-only retrofit (backward or forward, carved from the
+        reported positive baseline), L = κ·c^τ, final decomposition, reconciliation
                                            ▼
-                S6 waves (needs raw activity + LT parameters)  ─►  S7 report
+     S6 media waves (per-year wave variables → weekly shares → indexed LT),
+        multipliers (indexed + non-indexed), (ROI)  ─►  S7 report
 ```
 
 - S3 and S4 depend only on S2, so they can run **in parallel**.
@@ -419,20 +477,35 @@ year:
 
 | Window | Definition | Source |
 |---|---|---|
-| **N** — nested | the **latest 2 years**: 104 weeks / 24 months | deck S22, S29; brief Step 5 [S] |
-| **R** — retrofit | everything observed **before** N | deck S23–S24 [S] |
+| **N** — nested | the **2-year window of the AO MMM model the UCM is nested into**: 104 weeks / 24 months. Either the **latest** 2 years or the **earlier** 2 years of H | deck S22, S29; **T2** |
+| **R** — retrofit | everything in H outside N: **before** N (backward retrofit) or **after** N (forward retrofit). **Only the UCM** is computed there; every other variable comes from the AO MMM model that covered those years (T1) | deck S23–S24, S31; **T1, T2** |
 | **H** — long-term model | R ∪ N, all observed history | deck S28 ("over the 4-year period") [S] |
 | **B** — burn-in | optional back-cast periods before H. **UCM extraction only; never modelled** | U14 [I] |
-| **Reported years** | Year 1, Year 2 = the first two years of H; calendar or 52-week blocks (D-11) | deck S31; FR PDX S12–S15 [S] |
+| **Reported years** | Year 1, Year 2 = the first two **calendar** years of H, the media waves 1–2 (Ekimetrics 01.8: "media is planned on a calendar year basis") | deck S31; FR PDX S12–S15; D-11 |
+
+**Which direction** [I]: whichever AO MMM model is used. A model covering the
+latest 2 years gives a backward retrofit (the deck's 2020–23 example); a model
+covering the first 2 years gives a forward one. FR PDX most likely did the
+latter: its primary model ended 2023 Q4 (FR PDX S23).
+
+**When AO MMM models cover both windows,** nest into both. Comparing the two
+κ's is a direct test of the retrofit's "no step change" assumption (V5, §13).
+
+**Why a retrofit is needed either way:**
+
+- The reported years' waves carry long-term effects into the later years.
+- The full-period decomposition needs U_t in every week of H.
 
 **What each history length gives** (weekly; monthly is the same in months):
 
-| Observed history | n (wk) | R | N | H | Years reported (default) | Follow-up after Year 2 |
+| Observed history | n (wk) | N | R (backward / forward) | H | Years reported (default) | Follow-up after Year 2 |
 |---|---|---|---|---|---|---|
-| 4.0 years | 208 | 104 | 104 | 208 | Y1, Y2 | 2 years: deck S4, ≈96% of a Year-2 effect observed |
-| 3.5 years (FR PDX) | 182 | 78 | 104 | 182 | Y1, Y2 | 1.5 years |
-| 3.0 years | 156 | 52 | 104 | 156 | **Y1**; Y2 **flagged** as truncated (or tail-projected, U15) | 1 year: ≈13% of a Year-2 effect unobserved in the deck's example |
+| 4.0 years | 208 | 104 | 104 before / 104 after | 208 | Y1, Y2 | 2 years: deck S4, ≈96% of a Year-2 effect observed |
+| 3.5 years (FR PDX) | 182 | 104 | 78 before / 78 after | 182 | Y1, Y2 | 1.5 years |
+| 3.0 years | 156 | 104 | 52 before / 52 after | 156 | **Y1**; Y2 **flagged** as truncated (or tail-projected, U15) | 1 year: ≈13% of a Year-2 effect unobserved in the deck's example |
 | < 3 years | — | — | — | — | **refuse LTE** (a nested-only run is still possible) | — |
+
+The Ekimetrics minimum is 4 years (02.1); 3–3.5 years runs with the flags above.
 
 **Answer to the brief's 3-year question [I]:**
 
@@ -472,7 +545,7 @@ practice is treated as a burn-in.
 |---|---|
 | **Purpose** | Give the UCM smoother history before the first modelled period, so its start-up does not land in the reported years |
 | **Method** | **Time-reversed ETS**: reverse the series onto an ascending synthetic weekly timeline; fit Holt–Winters additive (error, trend and seasonality additive — the AAA form behind `FORECAST.ETS`) with seasonal period 52 / 12; forecast h periods; reverse back (§6.2). Alternative from deck S8: fill the burn-in with the **average of the earliest year** |
-| **Inputs** | sales per region over H; `lte.backcast_periods` (0 = off), `lte.backcast_method` (`ets` \| `average_year`) |
+| **Inputs** | brand-level sales over H (per pool only if D-06 says so); `lte.backcast_periods` (0 = off), `lte.backcast_method` (`ets` \| `average_year`) |
 | **Outputs** | `01_ucm/backcast.csv` (region, date, value, `is_backcast`); a chart |
 | **Rule** | back-cast periods are dropped after S2; they never enter S3–S7 (U14) |
 | **Note** | statsmodels' ETS will not reproduce Excel's `FORECAST.ETS` exactly, which uses its own AAA estimation (D-19). Parity is checked on the trend, not on the back-cast values |
@@ -481,12 +554,12 @@ practice is treated as a burn-in.
 
 | | |
 |---|---|
-| **Purpose** | Produce the refined UCM trend τ per region: the long-term model's `dv` and the nested model's `ucm` |
+| **Purpose** | Produce the refined UCM trend τ: the long-term model's `dv` and the nested model's `ucm`. **Brand level** (Ekimetrics 02.1: pools summed); per pool only if D-06 decides so |
 | **Method — parity mode** | Exactly the notebooks: `UnobservedComponents(level='smooth trend', cycle=True, irregular=True)`, `fit(method='powell')`, raw scale, approximate diffuse start, no frequency; `Original = Level + Trend(slope)`; `hpfilter(λ = 300)` |
 | **Method — improved mode** | **U1** scale (÷ mean) and exact diffuse start. **U2** a dated index with frequency, cycle bounded or dropped. **U5** seasonal tested. **U4** λ set from a stated cut-off. **U7** diagnostics. **U8** end-point handling (§7) |
-| **Inputs** | sales (+ burn-in) per region; `lte.ucm_*` settings; region list |
-| **Outputs** | `01_ucm/ucm_components.csv` (§8.3), `ucm_parameters.csv` (variances, cycle period, log-likelihood, AIC, optimiser status), `ucm_diagnostics.csv` (Ljung–Box, normality, heteroskedasticity, start-up check, permanent-component check), `ucm_<region>.png` (the vendor's 8 panels) |
-| **Also writes** | the **window-cut datacubes** for S3 and S4 (§8.3): `lte_long_term_datacube.csv` (`dv` = τ, long-term columns, H); `lte_nested_datacube.csv` (`dv` = sales, short-term columns + `ucm` = τ, N); `lte_retrofit_datacube.csv` (sales, short-term columns + `ucm`, R) |
+| **Inputs** | brand-level sales (+ burn-in); `lte.ucm_*` settings |
+| **Outputs** | `01_ucm/ucm_components.csv` (§8.3), `ucm_parameters.csv` (variances, cycle period, log-likelihood, AIC, optimiser status), `ucm_diagnostics.csv` (Ljung–Box, normality, heteroskedasticity, start-up check, permanent-component check), `ucm_<series>.png` (the vendor's 8 panels) |
+| **Also writes** | the **window-cut datacubes** for S3 and S4 (§8.3): `lte_long_term_datacube.csv` (`dv` = τ, long-term columns, H, brand level); `lte_nested_datacube.csv` (`dv` = sales, the AO MMM model's columns + `ucm`, N, at the AO MMM model's pools — the brand-level τ entered in every pool, D-06). **No retrofit datacube:** only τ is needed in R (T1) |
 | **Checks** | identity checks (§13.7); τ > 0 everywhere; start-up check: \|τ_first / sales-level\| within a band; a warning when σ²_ζ = 0 (no permanent component, U6) |
 
 ### 5.6 S3 — the long-term model (a codebase 1 run)
@@ -505,7 +578,7 @@ practice is treated as a burn-in.
 
 | | |
 |---|---|
-| **Purpose** | The UCM's contribution to sales in the latest 2 years, with media held at the primary model's values (deck S22) |
+| **Purpose** | The UCM's contribution to sales in the AO MMM model's 2 years — the latest or the earlier ones (T2) — with media held at the primary model's values (deck S22) |
 | **Data** | `lte_nested_datacube.csv` over N |
 | **Features** | the primary (AO MMM) model's features, identical columns, plus `ucm` |
 | **Stage preset** [I] | Secondary-style: `include_intercept: false`, `dv_center: none`, `dv_scale: mean`. `ucm`: `sign_constraint: positive`, `center_mode: none`, `scale_mode: mean` (so β^u reads as "share of the trendline", §6.5), `contribution_reference: zero`, `baseline: 1`, `pillar: UCM`. `include_trend: false` when the primary had a trend the UCM replaces (D-16) |
@@ -519,17 +592,24 @@ practice is treated as a burn-in.
 
 | | |
 |---|---|
-| **Purpose** | κ_g; the UCM contribution in R; long-term contributions in H; the final decomposition; multipliers; optional ROI; reconciliation |
-| **Inputs** | S2 (τ), S3 and S4 output trees, the retrofit datacube; optionally the **history file** (`historical` mode) and spend / price (ROI) |
+| **Purpose** | κ; the UCM contribution in R; long-term contributions in H; the final decomposition; multipliers; optional ROI; reconciliation |
+| **Inputs** | S2 (τ over H), S3 and S4 output trees, the **history file** (the reported short-term decomposition of R, required — T1); optionally spend / price (ROI) |
 | **Calculations** | §6.5–§6.10 and §11 |
-| **Retrofit modes** (D-03) | `historical`: the reported short-term decomposition of the earlier years plus κ·τ, with positive baseline reduced proportionally (deck S24, S31). `coefficients`: nested coefficients × earlier short-term columns plus κ·τ, the residual absorbed proportionally by the positive baseline (brief 6.1–6.3) |
-| **Outputs** | `04_lte/ucm_scalar.csv`, `retrofit_timeseries.csv`, `lte_timeseries.csv`, `lte_summary.csv`, `lte_multipliers.csv`, `lte_roi.csv` (opt-in), `lte_reconciliation.csv`, `lte_contribution_math.csv` (§11.4) |
-| **Checks** | κ constant over N (else the `ucm` was centred or re-referenced — stop); U ≤ positive baseline in R (else flag the week); every invariant in §13.7 |
+| **Retrofit** (T1, T2) | **UCM only.** U_t = κ·τ_t for every week of R, before or after N. Every other variable's short-term contribution in R is the reported one. U is carved proportionally out of the reported **positive baseline** factors of each week (deck S24). No coefficient is applied to earlier or later media |
+| **Outputs** | `04_lte/ucm_scalar.csv`, `retrofit_timeseries.csv`, `lte_timeseries.csv`, `lte_summary.csv`, `lte_reconciliation.csv`, `lte_contribution_math.csv` (§11.4) |
+| **Checks** | κ constant over N (else the `ucm` was centred or re-referenced — stop); U ≤ positive baseline in R (else flag the week); no step change in U/P⁺ at the N/R boundary; when both windows have an AO MMM model, κ from each (V5); every invariant in §13.7 |
 
 ### 5.9 S6 — media waves
 
-See §12. Inputs: S5 outputs, raw activity, long-term parameters. Outputs:
-`04_lte/lte_waves.csv`, `lte_wave_tail.csv`, the charts.
+See §12. Inputs: S5 outputs (the weekly LT contribution of each channel over
+H), the **per-year wave variables** of each long-term channel. Outputs:
+
+- `04_lte/lte_waves.csv` (indexed LT per wave, and its split by year of
+  realisation);
+- `lte_wave_tail.csv`;
+- `lte_multipliers.csv` (indexed and non-indexed);
+- `lte_roi.csv` (opt-in);
+- the charts.
 
 ### 5.10 S7 — report
 
@@ -544,9 +624,18 @@ See §12. Inputs: S5 outputs, raw activity, long-term parameters. Outputs:
 
 ### 6.0 Notation
 
+**Brand level vs pools.** The UCM side (τ, c^τ, p) is **brand level** by
+default, per Ekimetrics 02.1 ("the UCM modelling is done at the Brand level").
+Read τ_{g,t} as the same brand series τ_t in every pool g of the nested model.
+
+- κ_g is then per pool, and the brand scalar is κ = Σ_g κ_g.
+- If D-06 chooses a UCM per pool, τ_{g,t} is that pool's own trend.
+
+Every formula below holds in both cases.
+
 | Symbol | Meaning |
 |---|---|
-| g, t | region, period (week or month) |
+| g, t | pool of the AO MMM model (region, sub-brand × channel…), period (week or month) |
 | i, j | i = a long-term media / expert feature; j = any nested-model feature |
 | ℓ | a lever (codebase 1 `pillar`): TV, Digital Media, Expert, Trade, Baseline… |
 | S_{g,t} | observed sales (the KPI, volume) |
@@ -636,6 +725,10 @@ U_{g,t} = β^u_g · τ_{g,t} · d^S_g / s^u_g
 - Because d^S_g ≈ mean sales and s^u_g ≈ mean τ ≈ mean sales, **κ_g ≈ β^u_g**.
   The coefficient reads as "the share of the trendline credited to the UCM".
   That is why `scale_mode: mean` is proposed for `ucm`.
+- **Brand level** (the default, D-06): the same brand τ_t enters every pool,
+  so κ = Σ_g κ_g and U_t = Σ_g U_{g,t} = κ·τ_t. The brand-level scale s^u_g is
+  the mean of τ over N, the same for every pool. Each pool's coefficient
+  absorbs that pool's sales scale through d^S_g.
 - **Prior conversion when the windows differ.** LOCKED means come from the
   primary model's coefficients. If the primary's dv scale d^S_prim differs
   from the nested model's, the means become:
@@ -646,23 +739,36 @@ U_{g,t} = β^u_g · τ_{g,t} · d^S_g / s^u_g
 
   This is the scaling rule; the generator does it and prints both scales.
 
-### 6.6 Retrofit (S5, t ∈ R)
+### 6.6 Retrofit (S5, t ∈ R — before or after N)
+
+**Only the UCM is retrofitted (T1). The direction can be backward or forward
+(T2).**
 
 ```
-U_{g,t} = κ_g · τ_{g,t}                                                    (deck S24; brief 6.2)
+U_{g,t} = κ_g · τ_{g,t}          every t in R, whether R lies before N or after it     (deck S24; brief 6.2; T2)
 
-historical mode (deck S31):     C_{g,t,j} = reported short-term contribution (history file)
-coefficients mode (brief 6.1):  C_{g,t,j} = β̂_{g,j} · x_{g,t,j} · d^S_g        nested medians and NESTED scales
-                                                                          (never re-scaled on R: the scaling rule)
+Every other variable (T1; deck S31):
+    C_{g,t,j} = the short-term contribution REPORTED by the AO MMM model that covered week t (history file).
+    No coefficient is applied to any earlier or later media.
 
 Positive-baseline allocation (brief 6.3; deck S24 "taken proportionally from the positive Baseline factors"),
 with B⁺ = the positive baseline features and P⁺_{g,t} = Σ_{j∈B⁺} C_{g,t,j}:
 
-historical:    C'_{g,t,j} = C_{g,t,j} · (1 − U_{g,t} / P⁺_{g,t})                        j ∈ B⁺
-coefficients:  r_{g,t} = S_{g,t} − Σ_j C_{g,t,j} − U_{g,t}     (the retrofit residual)
-               C'_{g,t,j} = C_{g,t,j} · (1 + r_{g,t} / P⁺_{g,t})                        j ∈ B⁺
-flags:   U_{g,t} > P⁺_{g,t}  (UCM larger than the positive baseline)    |r / P⁺| > 20%  (poor extrapolation)
+    C'_{g,t,j} = C_{g,t,j} · (1 − U_{g,t} / P⁺_{g,t})          j ∈ B⁺
+    ⇒  Σ_{j∈B⁺} C'_{g,t,j} + U_{g,t} = P⁺_{g,t}                 the reported total, and every other variable, unchanged
+
+flags:   U_{g,t} > P⁺_{g,t}                                   the UCM would exceed the positive baseline
+         U/P⁺ jumps at the N/R boundary                        a step change: the retrofit assumption (deck S30) under strain
 ```
+
+**When the history file is needed.** The reported decomposition of R is needed
+only for numbers that use C in R:
+
+- the full-period ST + LT decomposition (FR PDX S11 / S21);
+- a **backward** retrofit, where R holds the reported Years 1–2.
+
+The waves need only L in R, so a forward retrofit into years without an AO
+MMM model still gives complete waves.
 
 ### 6.7 Long-term contributions in sales (S5, t ∈ H = R ∪ N)
 
@@ -670,6 +776,8 @@ flags:   U_{g,t} > P⁺_{g,t}  (UCM larger than the positive baseline)    |r / P
 L_{g,t,i}    = p_{g,t,i} · U_{g,t}             the deck S25 formula, weekly
              = κ_g · c^τ_{g,t,i}               the same thing, since U = κ·τ in both windows   [I]
 L_{g,t,base} = U_{g,t} − Σ_{i∈M} L_{g,t,i}     the long-term model's baseline share of U goes to Baseline
+
+brand level:  L_{t,i} = Σ_g L_{g,t,i} = κ · c^τ_{t,i};  per-pool LT (if needed) splits it in proportion to κ_g
 ```
 
 ### 6.8 The final decomposition
@@ -690,19 +798,23 @@ For a period P and any set of regions:
 ST%_i = Σ C_i / Σ S        LT%_i = Σ L_i / Σ S        Total%_i = ST%_i + LT%_i
 UCM%  = Σ U / Σ S
 
-Identity (per region, with κ constant and denominator τ):
+Identity (with κ constant and denominator τ):
    LT%_i(P) = share_i^τ(P) × UCM%(P)                                                     [C FR PDX S21]
    proof:  Σ_P L_i = κ Σ_P c^τ_i = (Σ_P c^τ_i / Σ_P τ) · κ Σ_P τ = share_i^τ · Σ_P U
-Across regions with different κ_g the identity holds only τ-weighted.
-⇒ always compute per region, then sum. Never apply a national share to regional U.
+At brand level (one τ, κ = Σ_g κ_g) it holds exactly.
+With a UCM per pool, it holds per pool, and nationally only τ-weighted
+⇒ then compute per pool and sum; never apply a national share to pool-level U.
 ```
 
 ### 6.10 Multipliers and ROI
 
 ```
-Window-based  (FR PDX S11–S13):   M_i = (Σ_{t∈W} C_i + Σ_{t∈W} L_i) / Σ_{t∈W} C_i
-                                   overall M = Σ_i (…) / Σ_i Σ C_i      (effect-weighted; 1.90 = 7.237 / 3.811) [C]
-Activity-based (from the waves):   M_i^wave(y) = W_{i,y} / ST_{i,y}     (§12)
+Non-indexed (LT realised inside window W; FR PDX S11–S13):
+     M_i(W) = (Σ_{t∈W} C_i + Σ_{t∈W} L_i) / Σ_{t∈W} C_i
+     overall M = Σ_i (…) / Σ_i Σ C_i      (effect-weighted; 1.90 = 7.237 / 3.811) [C]
+Indexed (LT of year y's activity, wherever realised; Ekimetrics 01.8 "we use indexed"):
+     M_i(y) = (ST_{i,y} + LT^idx_{i,y}) / ST_{i,y}                                  (§6.11, §12)
+     FR PDX TV [C]: indexed 100/41 = 2.44 (2022), 100/42 = 2.38 (2023)  vs  non-indexed 2.03 (S13)
 ROI (opt-in, D-13):  ROI_i^{ST|LT|Total} = value_i / spend_i ,  value = volume × price
                      (FR PDX: value ≈ 0.07 × volume, constant across channels) [C]
 ```
@@ -710,9 +822,18 @@ ROI (opt-in, D-13):  ROI_i^{ST|LT|Total} = value_i / spend_i ,  value = volume �
 ### 6.11 Waves (S6) — summary; the full design is §12
 
 ```
-m̃_{g,t,i} = Σ_y m̃^{(y)}_{g,t,i}                        origin-year split of the long-term input
-L_{g,t,i,y} = L_{g,t,i} · m̃^{(y)}_{g,t,i} / m̃_{g,t,i}
-W_{i,y} = ST_{i,y} + Σ_{Y ≥ y} LT_{i,y→Y} [+ projected tail];   reported as shares of W_{i,y}
+Team method (T3; Ekimetrics 01.8):
+  wave variable  w^{(y)}_{t,i} = T_i(a_i · 1[t ∈ calendar year y])_t      raw support of year y only, SAME chain T_i
+  share          s_{t,i,y} = w^{(y)}_{t,i} / Σ_k w^{(k)}_{t,i}              (step 3)
+  split          L_{t,i,y} = s_{t,i,y} · L_{t,i}                            (step 4; L from §6.7)
+  indexed LT     LT^idx_{i,y} = Σ_{t∈H} L_{t,i,y}     realised in year Y:  LT_{i,y→Y} = Σ_{t∈Y} L_{t,i,y}
+  wave table     W_{i,y} = ST_{i,y} + LT^idx_{i,y} [+ projected tail];  cells ST_{i,y}/W_{i,y}, LT_{i,y→Y}/W_{i,y}
+
+Proposed W1 (§12.4): split every linear step by origin year exactly; at the Hill step give each wave
+  its share of the stock, h^{(y)}_t = h_t · e^{(y)}_t / e_t (e = the stock entering Hill); carry it through
+  any later linear step; s_{t,i,y} = m̃^{(y)}_{t,i} / m̃_{t,i}
+  — exact and additive; identical to the team's method when the chain has no Hill
+Additivity check (both):  A_{t,i} = Σ_k w^{(k)}_{t,i} / m̃_{t,i}   (= 1 for a linear chain)
 ```
 
 ### 6.12 Uncertainty [I]
@@ -757,11 +878,14 @@ documentation and source. Full list: Appendix A.
 | U10 | Guards against spurious regression in the long-term model | **Essential** (reporting); AR(1) errors optional |
 | U11 | Control and declare the nested UCM's endogeneity | **Essential** |
 | U12 | Extract the UCM from base sales where a full-window short-term decomposition exists | Optional |
-| U13 | Regional consistency of UCMs | **Decision** |
+| U13 | Brand-level UCM (the method), entered in every pool of the nested model | **Decision** |
 | U14 | Back-cast = burn-in only; media never back-cast | **Essential** (rule) |
 | U15 | Project the wave tail beyond the data | Optional |
 | U16 | A vendor-parity mode | **Essential** (validation) |
 | U17 | Column definitions (irregular, "Original" trend) | Optional (cosmetic) |
+| W1 | Waves: split at the stock before Hill, not at the per-wave response (§12.4) | Recommended (decision D-26) |
+| W2 | Waves and multipliers: report indexed **and** non-indexed, labelled (§11.6) | **Essential** (reporting) |
+| V5 | Retrofit: a two-way κ check when AO MMM models cover both windows (§13.5) | Recommended (validation) |
 
 ### U1 — Fix the start-up artefact at its source (essential)
 
@@ -1018,19 +1142,29 @@ documentation and source. Full list: Appendix A.
    available for the retrofit years. A different trend from the vendor's.
 6. **Optional.**
 
-### U13 — Regional consistency (decision)
+### U13 — Brand level vs pools (decision)
 
-1. **Current.** Separate univariate UCMs per region and for "All". The regional
-   trends do not sum to All's: 14.00M vs 14.64M in Jul 2021 [C].
-2. **Limitation.** Mixing levels (a national long-term model with regional
-   nesting) breaks the additivity of LT%.
-3. **Proposal.**
-   - The **same region list** in S2, S3 and S4; regional UCMs.
-   - National numbers = sums of regional results (§6.9).
-   - A national UCM only when every model is national.
+1. **Current.**
+   - The method (Ekimetrics 02.1): "UCM modelling is done at the Brand
+     level", with all pools aggregated.
+   - The Colombia notebook instead runs a separate UCM per pool and for
+     "All". The pool trends do not sum to All's: 14.00M vs 14.64M in Jul 2021
+     [C].
+2. **Limitation.**
+   - Per-pool UCMs on short, small series are noisier, and more exposed to
+     the start-up artefact (U1).
+   - Mixing levels breaks the additivity of LT% — for example a national
+     long-term model with pool-level nesting.
+3. **Proposal — follow the method, keep it additive.**
+   - UCM extraction and the long-term model at **brand level**.
+   - In a pooled nested model, the **same brand τ** enters every pool. Each
+     pool's coefficient carries its scale, κ = Σ_g κ_g, and U and L are
+     brand-level sums (§6.5, §6.7).
+   - Pool-level LT, if anyone needs it, splits L in proportion to κ_g.
+   - Per-pool UCMs only by decision, with the same pool list in S2–S4.
    - Optional later: a pooled (hierarchical) Bayesian local linear trend
-     (`pymc_extras.statespace`) to share the variances across regions.
-4. **Benefit.** Additive, consistent reporting.
+     (`pymc_extras.statespace`) to share the variances across pools.
+4. **Benefit.** One trend, additive by construction, as the method intends.
 5. **Cost.** None for the default.
 6. **Decision** (D-06).
 
@@ -1058,8 +1192,10 @@ documentation and source. Full list: Appendix A.
 3. **Proposal.** Project each wave forward with zero further activity through
    the same transformation (§12.5). Report "% unobserved" per wave.
 4. **Benefit.** An honest Year-2 wave; a usable Year 2 at 3 years of data.
-5. **Cost.** Needs raw activity and parameters, as waves do. The projection
-   assumes κ and b stay at their last values.
+5. **Cost.**
+   - Needs the wave variables carried past the last date with zero activity:
+     from the upstream step, or rebuilt from raw support plus parameters.
+   - The projection assumes κ and b stay at their last values.
 6. **Optional.**
 
 ### U16 — Vendor-parity mode (essential for validation)
@@ -1088,6 +1224,23 @@ documentation and source. Full list: Appendix A.
 5. **Cost.** Trivial.
 6. **Optional.**
 
+### W1, W2, V5 — the waves and the retrofit (added 2026-10-16)
+
+These come from the team's wave method (T3) and the two-way retrofit (T2). They
+are set out in full where they apply:
+
+- **W1** — split at the stock: §12.4;
+- **W2** — indexed and non-indexed multipliers: §11.6;
+- **V5** — the two-way κ check: §13.5.
+
+In brief:
+
+| ID | Current | Issue | Proposal | Essential? |
+|---|---|---|---|---|
+| W1 | Each wave's raw support goes through the whole chain, Hill included; the week's LT is split in the ratio of the results | Hill is nonlinear: the waves no longer add up, and the split depends on the curve's shape. At S = 2 a carried-over stock worth 14% gets 6% of the credit; at S = 3, 1%; at S = 1 it gets 23%. So spill-over is under-credited for the S-curves the deck expects for long-term media (S 1.1–3.0) | Split at the linear stock before Hill (SES / adstock / lag), and give each wave that share of the week's response. Exact, additive; the same as today when there is no Hill | Recommended — needs the team (D-26) |
+| W2 | FR PDX reports a non-indexed multiplier (TV 2.03, S13) but indexed waves (≈2.4, S15); Ekimetrics says LTE uses indexed | The same channel has two multipliers, unlabelled | Report both, labelled: **indexed** (all effects of the year's activity — the investment view) and **non-indexed** (realised in the window — the calendar view) | Essential (reporting) |
+| V5 | κ is estimated in one window and assumed to hold in the other (deck S30, "no step change") | The assumption is never tested | When AO MMM models cover both windows, nest into both and compare κ_early with κ_late. Otherwise check U/P⁺ at the boundary | Recommended (validation) |
+
 ---
 
 ## 8. Data requirements and contracts
@@ -1096,11 +1249,11 @@ documentation and source. Full list: Appendix A.
 
 | # | Input | Required | Columns / content | Rules |
 |---|---|---|---|---|
-| 1 | **LTE datacube** (one per BMC) | yes | `date`, `region`, `dv` (sales volume), **short-term columns** (the primary model's, unchanged), **long-term columns** (identified by a suffix, default `_lt`, or listed in `lte.long_term_features`), long-term drivers | long format, one row per region × date; weekly or monthly; ≥ 3 years; the same sales measure over all of H; no NaN (zero-fill inactivity upstream, as `prepare_data` requires [V `data_prep.py:225-229`]); short-term columns transformed **continuously** over the full history |
-| 2 | **Primary model reference** | yes | a codebase 1 primary run folder (its `coefficient_report.csv`, `panel_summary.csv`, `feature_scaling_stats.csv`, prior file), **or** a vendor contribution mapping file (the existing format) | covers window N (D-04) |
+| 1 | **LTE datacube** (one per BMC) — the "LTE model database" (Ekimetrics 02.1) | yes | `date`, `region` (pool), `dv` (sales volume), **short-term columns** (the primary model's, unchanged), **long-term columns** (identified by a suffix, default `_lt`, or listed in `lte.long_term_features`), long-term drivers | long format, one row per pool × date; weekly or monthly; **≥ 4 years** (Ekimetrics), 3–3.5 with flags (§5.2); the same sales measure over all of H, no step changes between stitched sources; no NaN (zero-fill inactivity upstream, as `prepare_data` requires [V `data_prep.py:225-229`]). Pools are summed to brand level for S2–S3 |
+| 2 | **Primary model reference** | yes | the AO MMM model to nest into: a codebase 1 primary run folder (its `coefficient_report.csv`, `panel_summary.csv`, `feature_scaling_stats.csv`, prior file), **or** a vendor contribution mapping file (the existing format) | covers window N — the latest **or** the earlier 2 years (D-04, T2) |
 | 3 | **Long-term share priors** | yes (or a long-term prior CSV) | the share file format (`section, pillar, pillar_share_pct, variable, spend, variable_share_pct[, sign_constraint]`) with deck S19's ranges | sections `media`, `expert`, `baseline` |
-| 4 | **History file** | `historical` retrofit mode only | `region, date, feature, volume` (+ `pillar`); a codebase 1 `contribution_timeseries.csv` is accepted as-is | covers R; lever mapping via the existing mapping-file reader where names differ (D-23) |
-| 5 | **Wave inputs** | waves only | raw activity per channel (`region, date, channel, activity`); long-term parameters per channel (`channel, alpha, K, S, K_basis, lambda, lag, order`); optional short-term parameters | must reproduce the supplied `_lt` columns within 1e-6 relative (§12.3) |
+| 4 | **History file** — the reported short-term decomposition of R | **yes** for a backward retrofit (R holds the reported years) and for any full-period decomposition; not needed for waves alone | `region, date, feature, volume` (+ `pillar`); a codebase 1 `contribution_timeseries.csv` is accepted as-is | covers R; from the AO MMM model(s) that covered those years (T1); lever mapping via the existing mapping-file reader where names differ (D-23) |
+| 5 | **Wave inputs** | waves only | **per-year wave variables** of each long-term channel, `<channel>_lt__w<year>`: raw support restricted to one calendar year, through the same long-term chain — the upstream export of Ekimetrics 01.8 step 2. **Fallback:** raw support per channel (`region, date, channel, activity`) plus the long-term parameters (`channel, alpha, K, S, K_basis, lambda, lag, order`), and codebase 1 rebuilds the waves. For W1, also the pre-Hill stock per wave (or the fallback) | Σ waves vs the `_lt` column reported (additivity, §12.3); the fallback must reproduce the `_lt` columns within 1e-6 relative |
 | 6 | **Spend and price** | ROI only (opt-in) | spend per channel × year (× region); a price (value per volume unit) per region × year | D-13 |
 
 ### 8.2 The media representation contract
@@ -1114,8 +1267,10 @@ Restating §2.7 as rules:
   [+ lag]) with the long-term parameters (guide §14 ranges as checks, not
   defaults).
 - **(d)** Short-term columns are the primary model's.
-- **(e)** Raw activity enters only the wave attribution, after the
-  reproduction check.
+- **(e)** Wave variables (and, in the fallback, raw activity) enter only the
+  wave attribution, never a model.
+- **(e2)** In the retrofit years, no media column is used at all: only τ and
+  the reported decomposition (T1).
 - **(f)** Trade and promotion columns are refused in the long-term model
   (deck S18).
 
@@ -1129,20 +1284,19 @@ Restating §2.7 as rules:
 | S2 | `01_ucm/ucm_components.csv` | region, date, `is_backcast`, observed, level, slope (vendor `Trend`), cycle, [seasonal], irregular (vendor), irregular_model, original_ucm_trend, refined_cycle, **refined_ucm_trend** (τ) |
 | S2 | `01_ucm/ucm_parameters.csv` | region, mode, spec, σ²_ε, σ²_ζ, cycle period / amplitude, seasonal (y/n, harmonics), log-likelihood, AIC, optimiser, converged, λ, cut-off |
 | S2 | `01_ucm/ucm_diagnostics.csv` | region, test, statistic, p-value, verdict (Ljung–Box, normality, heteroskedasticity, start-up, permanent component, start-points agree) |
-| S2 | `01_ucm/lte_long_term_datacube.csv` | date, region, `dv` = τ, long-term columns, drivers, `media_residual`; H only |
-| S2 | `01_ucm/lte_nested_datacube.csv` | date, region, `dv` = sales, short-term columns, `ucm` = τ; N only |
-| S2 | `01_ucm/lte_retrofit_datacube.csv` | the same columns as nested; R only |
+| S2 | `01_ucm/lte_long_term_datacube.csv` | date, region (= the brand), `dv` = τ, long-term columns, drivers, `media_residual`; H only |
+| S2 | `01_ucm/lte_nested_datacube.csv` | date, region (pool), `dv` = sales, short-term columns, `ucm` = τ (the brand τ in every pool by default); N only |
 | S3, S4 | standard codebase 1 trees | as documented in `docs/OUTPUTS_GUIDE.md` |
 | S4 | `03_nested/donor_audit.csv` | feature, role, contribution A, contribution B, Δ, Δ% |
 | S5 | `04_lte/ucm_scalar.csv` | region, β^u (median, HDI), d^S, s^u, κ (median, HDI), check `max\|U/τ − κ\|` |
-| S5 | `04_lte/retrofit_timeseries.csv` | region, date, feature, pillar, group, volume, source (history / coefficients / ucm / allocation) |
+| S5 | `04_lte/retrofit_timeseries.csv` | region, date, feature, pillar, group, volume, source (`reported` / `ucm` / `allocation`), direction (backward / forward) |
 | S5 | `04_lte/lte_timeseries.csv` | region, date, window (R / N), lever, feature, `st_volume`, `lt_volume`, `total_volume`; rows `__ucm__`, `__lt_baseline__`, `__actual__` |
 | S5 | `04_lte/lte_summary.csv` | period, region (incl. `__portfolio__`), lever, `st_pct`, `lt_pct`, `total_pct`, volumes — FR PDX S11 / S21 layout |
-| S5 | `04_lte/lte_multipliers.csv` | channel, window, ST, LT, total, multiplier (window-based); overall |
-| S5 | `04_lte/lte_roi.csv` (opt-in) | channel, spend, value ST / LT / total, ROI ST / LT / total |
 | S5 | `04_lte/lte_reconciliation.csv` | the chain sales → short-term components → UCM → long-term redistribution → final, per region × period |
-| S6 | `04_lte/lte_waves.csv` | channel, wave (activity year), year, short_pct, long_pct, volume |
+| S6 | `04_lte/lte_waves.csv` | channel, wave (activity year), year of realisation, short_pct, long_pct, volume, **indexed LT total**, method (team / W1), additivity A |
 | S6 | `04_lte/lte_wave_tail.csv` | channel, wave, observed_pct, projected_unobserved_pct |
+| S6 | `04_lte/lte_multipliers.csv` | channel, basis (**indexed** / **non-indexed**), window or wave, ST, LT, total, multiplier; overall |
+| S6 | `04_lte/lte_roi.csv` (opt-in) | channel, basis, spend, value ST / LT / total, ROI ST / LT / total |
 | all | `lte_manifest.json` | input hashes (sha256), codebase version, statsmodels / PyMC versions, seeds, settings per stage, timings |
 
 ### 8.4 Validation rules
@@ -1158,7 +1312,8 @@ Restating §2.7 as rules:
 - trade or promotion in the long-term feature list;
 - τ ≤ 0 anywhere in H;
 - κ not constant over N (> 1e-6 relative): `ucm` centred or re-referenced;
-- the wave reproduction check failing.
+- a backward retrofit without the history file for the reported years (T1);
+- the fallback wave rebuild not reproducing the `_lt` columns.
 
 **Warnings:**
 
@@ -1169,7 +1324,9 @@ Restating §2.7 as rules:
 - no permanent component;
 - start-up check failing in parity mode;
 - U > P⁺ in a retrofit week;
-- |r / P⁺| > 20%;
+- a step in U/P⁺ at the N/R boundary;
+- κ from the two windows differing by more than the agreed band (V5);
+- wave additivity A outside 1 ± 1% (Hill in the chain; W1);
 - Year 2 truncated;
 - contraction < 0.2 for `ucm` or a long-term media coefficient;
 - Stage A not reproducing the primary within 3%.
@@ -1200,7 +1357,7 @@ Each warning is a new `warnings_report._RULES` category (§9).
 
 | File | Change |
 |---|---|
-| `mmm/core/config.py` | `LTEConfig` dataclass (stage, windows, back-cast, UCM, λ / cut-off, mode, retrofit mode, denominators, wave settings, file keys) and its `VALID_*` enums. `resolve_lte_windows(dates, cadence, lte_cfg)` beside `resolve_period_plan` |
+| `mmm/core/config.py` | `LTEConfig` dataclass (stage, windows, nested window position `latest`/`earlier` and so the retrofit direction, back-cast, UCM, brand vs pool level, λ / cut-off, mode, denominators, wave method `team`/`stock`, multiplier basis, file keys) and its `VALID_*` enums. `resolve_lte_windows(dates, cadence, lte_cfg)` beside `resolve_period_plan` |
 | `mmm/core/settings.py` | register `lte` in `SECTIONS`, plus `HELP` lines (test_v11), `CHOICES` (test_v19) and `DATA_KEYS` additions (`history_file`, `wave_file`, `spend_file`); `config_schema()` then carries the section to the app |
 | `mmm/app_job.py` | read `lte_stage` / `lte_inputs` from `run_request.json` (`_read_request` already reads that file [V `app_job.py:417`]); dispatch to `mmm.lte.stages`; resolve upstream run names inside the group, following `renames.json` and the `Results Reported/` / `Archived/` subfolders; publish as today |
 | `mmm/checks/warnings_report.py` | new `_RULES`: `lte_window`, `ucm_startup`, `ucm_cycle`, `ucm_no_permanent_component`, `ucm_diagnostics`, `lte_scalar`, `lte_retrofit`, `lte_wave_truncated`, `lte_assumption_driven`, `lte_donor_audit` |
@@ -1216,12 +1373,12 @@ Each warning is a new `warnings_report._RULES` category (§9).
 | `__init__.py` | public names | — |
 | `windows.py` | window plan, feasibility checks (S0) | 200 |
 | `backcast.py` | time-reversed ETS; average-year fill (S1) | 120 |
-| `ucm.py` | per-region fit (parity and improved), HP, cut-off ↔ λ, diagnostics, plots, component CSVs, datacube writers (S2) | 450 |
+| `ucm.py` | brand-level fit, per pool by decision (parity and improved); HP, cut-off ↔ λ, diagnostics, plots, component CSVs, datacube writers (S2) | 450 |
 | `presets.py` | the long-term and nested stage presets, with invariant checks (e.g. refuse a centred `ucm`) | 80 |
 | `priors.py` | long-term priors from deck S19 ranges via `priors_from_shares`; nested LOCKED / DONOR / CANDIDATE from a primary run (with scale conversion, §6.5) or a mapping file; Stage A / B helpers; donor audit | 300 |
-| `combine.py` | κ, retrofit (two modes), L, final decomposition, aggregates, multipliers, ROI (opt-in), reconciliation (S5) | 450 |
-| `transforms.py` | numpy SES (first non-zero start), Hill, adstock, lag, origin-year decomposition. **Wave attribution only**. Conventions checked against codebase 2's `transforms.py` (`hill_np`, `apply_adstock_np`) but not imported from it (codebase 2 is not current; the direction of travel is codebase 1 → 2) | 150 |
-| `waves.py` | wave tables, tail projection (S6) | 250 |
+| `combine.py` | κ (per pool and brand), the **UCM-only** retrofit in either direction, with proportional positive-baseline allocation; L, final decomposition, aggregates, reconciliation (S5) | 350 |
+| `transforms.py` | **Only for the wave fallback and W1** (when upstream supplies raw support, not wave variables): numpy SES (first non-zero start), Hill, adstock, lag, per-year wave variables, the pre-Hill stock. Conventions checked against codebase 2's `transforms.py` (`hill_np`, `apply_adstock_np`) but not imported from it (codebase 2 is not current; the direction of travel is codebase 1 → 2) | 150 |
+| `waves.py` | the team's wave split (Ekimetrics 01.8) on the upstream wave variables; the additivity check; W1 (split at the stock); indexed LT; wave tables; indexed and non-indexed multipliers; ROI (opt-in); tail projection (S6) | 300 |
 | `report.py` | FR PDX-layout tables, charts, `lte_report.md` (S7) | 300 |
 | `pipeline.py` / `__main__.py` | `run_lte(config, stages=..., resume=...)`; `python -m mmm.lte config.yaml [--stage s2]`; manifest | 250 |
 
@@ -1353,22 +1510,24 @@ results". METHODOLOGY §2d shows why repeated corrections oscillate. The rule
 |---|---|---|---|---|
 | 1 | N | short-term components C (incl. U) | nested model | `03_nested/.../contribution_timeseries.csv` |
 | 2 | N | κ_g | U / τ (§6.5) | `ucm_scalar.csv` |
-| 3 | R | U = κ·τ | §6.6 | `retrofit_timeseries.csv` |
-| 4 | R | short-term components C | history or coefficients (§6.6) | `retrofit_timeseries.csv` |
-| 5 | R | positive-baseline allocation | §6.6 | `retrofit_timeseries.csv` |
+| 3 | R (before or after N) | U = κ·τ — **the only retrofitted quantity** (T1, T2) | §6.6 | `retrofit_timeseries.csv` |
+| 4 | R | short-term components C | **as reported** by the AO MMM model of those years (history file) | `retrofit_timeseries.csv` |
+| 5 | R | positive-baseline allocation: U carved out of the reported positive baseline | §6.6 | `retrofit_timeseries.csv` |
 | 6 | H | c^τ, τ | long-term model | `02_long_term/.../contribution_timeseries.csv`, S2 |
 | 7 | H | L = κ·c^τ; L_base = U − ΣL | §6.7 | `lte_timeseries.csv` |
 | 8 | H | Final = C + L; UCM removed | §6.8 | `lte_timeseries.csv` |
-| 9 | periods | ST%, LT%, Total%, UCM%, multipliers | §6.9–6.10 | `lte_summary.csv`, `lte_multipliers.csv` |
+| 9 | periods | ST%, LT%, Total%, UCM% | §6.9 | `lte_summary.csv` |
+| 10 | waves | wave shares → L split by wave → indexed LT; multipliers indexed and non-indexed | §6.10–6.11, §12 | `lte_waves.csv`, `lte_multipliers.csv` |
 
 ### 11.2 What each block means
 
 | Block | Meaning |
 |---|---|
-| **Short-term** | the nested model's incremental contributions in N; history or coefficients in R. **Equal to the primary model's** for every LOCKED variable (Stage A check) |
+| **Short-term** | the nested model's incremental contributions in N; the **reported** ones in R (T1). **Equal to the primary model's** for every LOCKED variable (Stage A check) |
 | **Long-term** | L — the part of the UCM's sales contribution that the long-term model attributes to each media / expert lever |
 | **Baseline** | the nested baseline minus the UCM (positive donors after the UCM took its share), plus the long-term model's baseline share of U (L_base) |
-| **Retrofit** | the earlier years built from the scalar, with the UCM taken proportionally from the positive baseline |
+| **Retrofit** | the other years (before or after N): the reported decomposition, with only the UCM added — κ·τ, taken proportionally from the positive baseline |
+| **Indexed LT** | L re-booked to the year of the activity that caused it, through the wave split (Ekimetrics 01.8) |
 | **Final** | ST + LT per lever; the UCM row redistributed; Σ = actual sales |
 
 ### 11.3 Worked checks against the reference material [C]
@@ -1391,6 +1550,9 @@ results". METHODOLOGY §2d shows why repeated corrections oscillate. The rule
 - **Deck S21:** (11 + 92) / (11 + 92 + 6 + 30 + 6) = **71%**. The formula's
   denominator includes the baseline; the example's does not (deck D5).
 - **Deck S24:** the scalar 19% applied to the 2020–21 trendline.
+- **Ekimetrics 01.8 waves:** the weekly LT contributions 100 / 150 / 200 / 250
+  split in the ratio of the transformed wave variables give **125.4 / 172.3 /
+  210.0 / 192.3**, summing to 700 (the slide shows 125 / 172 / 210 / 192).
 
 ### 11.4 Invariants and reconciliation files
 
@@ -1400,11 +1562,11 @@ results". METHODOLOGY §2d shows why repeated corrections oscillate. The rule
 | I2 | κ_g constant over N | 1e-6 relative |
 | I3 | Long-term model: Σ_i c^τ + c^τ_base = τ (residual in base) | exact |
 | I4 | Σ_i L_{g,t,i} + L_{g,t,base} = U_{g,t} | exact |
-| I5 | Retrofit window: Σ components' = actual sales | exact (by allocation) |
+| I5 | Retrofit window: Σ components' (with U) = the reported decomposition's total; every non-baseline variable unchanged | exact (by allocation) |
 | I6 | Short-term contribution of every LOCKED variable in N = Stage A / primary | ≤ 3% (warning), ≤ 10% (stop) |
 | I7 | Final: Σ levers = actual sales, every region × week | exact |
 | I8 | Aggregate identity (§6.9) per region | 1e-9 relative |
-| I9 | Waves: Σ_y L_{g,t,i,y} = L_{g,t,i}; each wave's shares sum to 100% | exact |
+| I9 | Waves: Σ_y L_{t,i,y} = L_{t,i} every week (shares sum to 1); each wave's ST + LT = 100%; Σ_y indexed LT = Σ_t L | exact |
 | I10 | `lte_summary.csv` percentages sum to 100 per period × region | exact |
 
 `lte_reconciliation.csv` prints the chain (sales → short-term components → UCM
@@ -1426,11 +1588,11 @@ side, so any reported number is re-derivable by hand. This is codebase 1's
 
 | | |
 |---|---|
-| **Periods** | `lte_summary.csv` reports per calendar year (FR PDX: CY 2022, CY 2023, CY 2024, 2025-H1), the reported window (Years 1–2) and the full H. D-11 decides calendar vs MAT; codebase 1's own `period_labels` (MAT) stays in the model trees |
-| **Window-based multiplier** | (ST + LT measured **inside** the window) ÷ ST — FR PDX S11–S13. TV: 2.03 [S] |
-| **Activity-based multiplier** | (all effects of the window's **activity**, including later spill-over) ÷ ST, from the waves. FR PDX S15's TV waves imply ≈2.4 (100/41 and 100/42) [C] |
-| **They differ, and S13's 2.03 is the window-based one** | a quick reconstruction from the wave shares, assuming wave volume ∝ spend, gives ≈2.1 window-based [I] |
-| **Proposal** | report both, labelled (D-14) |
+| **Periods** | `lte_summary.csv` reports per **calendar** year (FR PDX: CY 2022, CY 2023, CY 2024, 2025-H1; Ekimetrics 01.8: media is planned by calendar year), the reported window (Years 1–2) and the full H. Codebase 1's own `period_labels` (MAT) stays in the model trees |
+| **Non-indexed multiplier** | (ST + LT **realised inside** the window) ÷ ST — what FR PDX S11–S13 report. TV: 2.03 [S] |
+| **Indexed multiplier** | (ST + **all** LT caused by the window's activity, wherever realised) ÷ ST, from the waves. Ekimetrics 01.8: "We use **indexed** long-term contributions". FR PDX S15's TV waves give 100/41 = 2.44 (2022) and 100/42 = 2.38 (2023) [C] |
+| **They differ, and S13's 2.03 is the non-indexed one** | a reconstruction from the wave shares, with wave effect ∝ TV spend (3.09M in 2022, 2.55M in 2023), gives 2.12 non-indexed and 2.42 indexed [C/I] |
+| **Proposal (W2)** | report both, labelled: **indexed** for "what did this year's money buy" (ROI by activity year, the method's stated basis); **non-indexed** for "how much of this year's sales is long-term" (the calendar decomposition). The team picks the headline (D-14) |
 
 ---
 
@@ -1448,79 +1610,122 @@ FR PDX S15, S25 and deck S26. For one channel and one **activity year** (a
 Together they make 100%. Example — TV 2022: 41% short-term, 37% long-term in
 2022, 20% in 2023, 2% in 2024. Short-term is booked to the activity year only.
 
-### 12.2 Can it be derived from the existing transformed media? No [I]
+The wave's total — short-term plus **all** its long-term effect — is the
+**indexed** contribution of that year's activity (Ekimetrics 01.8).
 
-- The long-term column m̃_t mixes the stock built by every earlier period's
-  activity. The model sees only the sum.
-- Splitting it by origin year needs the **raw activity** and the
-  **transformation**:
-  - for the linear steps (SES, adstock, lag), with the parameters, the split is
-    exact;
-  - Hill is nonlinear, so the split through it needs a convention.
-- Without the raw activity, a purely linear chain (no Hill) can in principle be
-  **deconvolved**. With Hill and unknown parameters it cannot.
-- **So the media transformation pipeline must retain intermediate data.**
-  Either:
-  - **(a)** supply raw activity plus the long-term parameters (and the order,
-    D-02), and codebase 1 reproduces the chain per origin year; or
-  - **(b)** the upstream tool exports **per-wave long-term columns**
-    (`tv_lt__w2022`, …) that sum to the long-term column.
+### 12.2 The team's method (T3; Ekimetrics 01.8) [S]
 
-  (a) is preferred: one source of truth, checked by reproduction.
+"We divide support for each year and then add the adstock on support for each
+year variable, thus it flows to the next year … we divide that year's
+contribution in the ratio." — the team. The Ekimetrics slides give the same
+four steps:
 
-### 12.3 Origin-year decomposition
+| Step | What happens | In our notation |
+|---|---|---|
+| 1 | A weekly dataframe of the **raw** model inputs (media and expert only), **split by media wave** (calendar year): wave y holds the support of year y and zero elsewhere | a^{(y)}_t = a_t · 1[t ∈ y] |
+| 2 | **The same media transformations** applied to each wave variable; the transformed features exported. Through SES / adstock, a wave carries into later years | w^{(y)}_t = T(a^{(y)})_t |
+| 3 | **% share** of each wave in each week | s_{y,t} = w^{(y)}_t / Σ_k w^{(k)}_t |
+| 4 | Each week's **long-term contribution** — "Result from Retrofitted Nested model", i.e. L_t of §6.7 over all of H — × the shares; summed per wave | L_{y,t} = s_{y,t} · L_t; indexed LT_y = Σ_t L_{y,t} |
 
-For channel i, region g, activity year y, with the activity mask
-`a^{(y)}_t = a_t·1[t ∈ y]`:
+**Worked example (the slide's numbers), verified [C]:**
+
+| Week (one per year) | LT contribution | Wave variables after step 2 (w1, w2, w3, w4) | Shares | Split |
+|---|---|---|---|---|
+| Year 1 | 100 | 10, 0, 0, 0 | 100%, 0, 0, 0 | 100, 0, 0, 0 |
+| Year 2 | 150 | 2.5, 15, 0, 0 | 14.3%, 85.7%, 0, 0 | 21.4, 128.6, 0, 0 |
+| Year 3 | 200 | 0.5, 4.5, 20, 0 | 2%, 18%, 80%, 0 | 4, 36, 160, 0 |
+| Year 4 | 250 | 0, 1, 6.5, 25 | 0, 3.1%, 20%, 76.9% | 0, 7.7, 50, 192.3 |
+| **Indexed LT per wave** | **700** | | | **125.4, 172.3, 210.0, 192.3** |
+
+Wave 1's 125.4 is realised as 100 in year 1, 21.4 in year 2 and 4.0 in year 3:
+the FR PDX wave-table rows.
+
+### 12.3 What it needs from the data
+
+- **The transformed total m̃_t alone cannot be split.** It mixes the stock
+  left by every earlier year's activity, and the model sees only the sum.
+- **Preferred: the upstream step exports the wave variables** — exactly the
+  team's step 2, "export transformed media features". Naming:
+  `<channel>_lt__w<year>`, one per calendar year of H, from the same
+  transformation run that produced `<channel>_lt`.
+  - Codebase 1 then needs no transformation code for waves.
+  - It checks **additivity**: A_t = Σ_y w^{(y)}_t / m̃_t, which is 1 for a
+    linear chain.
+- **Fallback:** raw support plus the long-term parameters and order (D-02).
+  Codebase 1 rebuilds the wave variables, after a blocking check that its
+  chain reproduces `<channel>_lt` within 1e-6 relative.
+- **SES start convention.** The "first non-zero value" start (deck S14)
+  belongs to the year of that first activity.
+
+### 12.4 Hill inside the chain — proposed refinement W1
+
+**The issue [C].**
+
+- Step 2 applies the **whole** chain, Hill included, to each wave separately.
+- Hill is nonlinear, so Σ_y w^{(y)}_t ≠ m̃_t. Step 3's shares re-normalise
+  this silently. The deck's example is linear, so it does not show it.
+- The split then depends on the **shape** of the curve. Example: a 0.1
+  carried-over stock next to a 0.6 current one, K = 0.5, so the carried-over
+  wave holds 14.3% of the stock:
+
+| Hill slope S | 0.8 | 1.0 | 1.5 | 2.0 | 3.0 |
+|---|---|---|---|---|---|
+| Carried-over wave's share of the week's LT, per-wave method | 28.7% | 23.4% | 12.6% | 6.1% | 1.2% |
+| Its share of the stock | 14.3% | 14.3% | 14.3% | 14.3% | 14.3% |
+
+- The deck expects S > 1 for long-term media (S16; guide §14: S 1.1–3.0). For
+  those curves, **the spill-over into later years — the very thing the waves
+  measure — is under-credited**, often by a lot.
+- The bias goes the other way for S ≤ 1.
+
+**W1 — split at the stock, not at the response.**
+
+- Split each linear step (SES, adstock, lag) by origin year exactly.
+- At the Hill step, give each wave the share of the response equal to its
+  share of the stock: h^{(y)}_t = h_t · e^{(y)}_t / e_t.
+- Carry those shares through any later linear step.
 
 ```
-SES (linear):     e^{(y)}_t = α·a^{(y)}_t + (1−α)·e^{(y)}_{t−1}          ⇒ Σ_y e^{(y)}_t = e_t   (exact)
-Hill (nonlinear): h^{(y)}_t = h_t · e^{(y)}_t / e_t                        proportional "share of stock"
-                                                                           ⇒ Σ_y h^{(y)}_t = h_t   (exact by construction)
-Adstock (linear): m̃^{(y)}_t = h^{(y)}_{t−lag} + λ·m̃^{(y)}_{t−1}          ⇒ Σ_y m̃^{(y)}_t = m̃_t   (exact)
+SES → Hill → adstock:   e^{(y)} = SES(a^{(y)})       h^{(y)}_t = h_t · e^{(y)}_t / e_t       m̃^{(y)} = adstock(h^{(y)})
+SES → adstock → Hill:   e^{(y)} = adstock(SES(a^{(y)}))                    m̃^{(y)}_t = m̃_t · e^{(y)}_t / e_t
+share:                  s_{y,t} = m̃^{(y)}_t / m̃_t          ⇒ Σ_y m̃^{(y)}_t = m̃_t exactly
 ```
 
-**The SES start convention** ("first non-zero value", deck S14) is assigned to
-the year of that first activity.
+- **Benefit.** The split is exact and additive. It does not depend on S or K.
+  It is **identical to the team's method whenever the chain has no Hill.**
+- **Cost.**
+  - It needs each wave's **pre-Hill stock**: an extra upstream export, or the
+    fallback.
+  - Results move for channels with a strong S-curve.
+  - Run both side by side on one BMC before switching.
+- **Status:** recommended; **decision D-26**. Until it is decided, the team's
+  method is the default and the additivity A_t is reported for every channel.
 
-**Reproduction check (blocking):** the full chain on a_t must reproduce the
-supplied `_lt` column within 1e-6 relative. Otherwise the parameters or the
-order are not the ones used.
+**Other conventions considered:** marginal removal (x minus x without year y,
+normalised) and Shapley values over years. The share of stock is chosen
+because it is exact, cheap and order-free across years.
 
-**For the other order** (SES → adstock → Hill): split linearly through SES and
-adstock, then proportionally through Hill. The same code with the steps
-reordered.
-
-**Alternatives to "share of stock" for Hill:**
-
-- *marginal removal* (x − x without year y), normalised;
-- Shapley over years.
-
-Share of stock is chosen because it is exact, cheap, order-free across years,
-and equals the linear answer when Hill is near-linear. **The convention is
-documented in every output.**
-
-### 12.4 From long-term inputs to sales, by wave
+### 12.5 From shares to sales, by wave
 
 ```
-c^τ_{g,t,i,y} = c^τ_{g,t,i} · m̃^{(y)}_{g,t,i} / m̃_{g,t,i}        (the long-term model is linear in m̃: exact)
-L_{g,t,i,y}   = κ_g · c^τ_{g,t,i,y}
-LT_{i,y→Y}    = Σ_{g} Σ_{t∈Y} L_{g,t,i,y}                         Y = y, y+1, … (calendar years of H)
-ST_{i,y}      = Σ_{g} Σ_{t∈y} C_{g,t,i}                            booked to the activity year (FR PDX); D-24
-W_{i,y}       = ST_{i,y} + Σ_Y LT_{i,y→Y}  [+ tail]
-table cell    = ST_{i,y} / W_{i,y}  and  LT_{i,y→Y} / W_{i,y}
+L_{t,i,y}      = s_{t,i,y} · L_{t,i}                       L_{t,i} = κ·c^τ_{t,i} (§6.7), every week of H
+LT_{i,y→Y}     = Σ_{t∈Y} L_{t,i,y}                         Y = y, y+1, … (calendar years of H)  — non-indexed cells
+LT^idx_{i,y}   = Σ_Y LT_{i,y→Y}                            the indexed LT of year y's activity
+ST_{i,y}       = Σ_{t∈y} C_{t,i}                            booked to the activity year (FR PDX); D-24
+W_{i,y}        = ST_{i,y} + LT^idx_{i,y}  [+ tail]
+table cells    = ST_{i,y} / W_{i,y}  and  LT_{i,y→Y} / W_{i,y}
 ```
 
-- **Option (D-24):** if the short-term raw activity and parameters are
-  supplied, decompose the short-term adstock by origin too. A December flight's
-  short-term carry-over into January then moves to its own wave.
-- The FR PDX convention, 0% short-term in later years, is the default.
+- **Option (D-24):** if short-term wave variables are supplied too, split the
+  short-term adstock by origin as well. A December flight's carry-over into
+  January then moves to its own wave.
+- The FR PDX convention — 0% short-term in later years — is the default.
 
-### 12.5 The tail beyond the data (U15)
+### 12.6 The tail beyond the data (U15)
 
-1. Propagate m̃^{(y)} past the last date with zero activity, which is exact
-   for the wave since its activity is over.
-2. Convert with the last year's κ_g and b_{g,i}.
+1. Carry each wave's variable past the last date with zero activity. This is
+   exact for the wave, since its activity is over.
+2. Convert with the last year's κ and b_i.
 3. Sum to a horizon where the remaining stock is below 1%.
 4. Report `projected_unobserved_pct` per wave.
 
@@ -1528,23 +1733,26 @@ This is the deck S4 / S28 "Future — yet to be observed" share, made explicit.
 It is labelled a projection, under the assumption that κ and b stay at their
 last values.
 
-### 12.6 Outputs and dependencies
+### 12.7 Outputs and dependencies
 
-- **Outputs:** `lte_waves.csv` (the FR PDX S15 layout), `lte_wave_tail.csv`, a
-  chart per channel (the deck S4 picture with the real numbers), and the
-  activity-based multipliers (§11.6).
-- **Dependencies:** S5 (κ, L, C) plus the wave inputs.
-  - The **origin-year decomposition of m̃ needs no model**, so it can run
-    alongside S2 / S3 ("alongside UCM modelling", as the brief allows).
+- **Outputs:**
+  - `lte_waves.csv` (the FR PDX S15 layout, plus indexed totals, the method,
+    and A);
+  - `lte_wave_tail.csv`;
+  - `lte_multipliers.csv` (indexed and non-indexed, W2);
+  - a chart per channel (the deck S4 picture with the real numbers).
+- **Dependencies:** S5 (L over all of H, C) plus the wave inputs.
+  - The shares s need no model, so they can be computed alongside S2 / S3 ("in
+    parallel with UCM modelling", as the brief allows).
   - Only the conversion to sales waits for S5.
 
-### 12.7 If the raw activity and parameters cannot be supplied
+### 12.8 If wave variables cannot be supplied
 
-- **Fallback 1:** upstream per-wave columns, (b) above.
+- **Fallback 1:** raw support plus parameters (§12.3).
 - **Fallback 2:** report long-term contributions by **calendar year of
-  effect**, not by activity year. These are available from S5 without waves.
-  Say plainly that spill-over by activity year is not measured.
-- Do **not** approximate waves from the transformed columns.
+  effect**, which S5 gives without waves. Say plainly that spill-over by
+  activity year is not measured.
+- Do **not** approximate waves from the transformed totals.
 
 ---
 
@@ -1560,10 +1768,11 @@ PyMC.
 | UCM identities | Irregular = S − L − T − C; Original = L + T; Original(t) = Level(t+1); refined cycle + refined trend = original — on the transcribed `ucm output` rows |
 | HP | λ ↔ cut-off round trip; P(300) = 26.1 |
 | Back-cast | reversal and re-reversal; length; flags; the average-year method |
-| Window plan | 4 / 3.5 / 3 / < 3 years, weekly and monthly; reported years; calendar vs MAT |
-| Transforms | SES first-non-zero start; Hill; adstock; lag; origin-year sums exact; Hill share-of-stock sums exact |
-| κ | constant over N for an uncentred `ucm`; the run stops for a centred one |
-| Retrofit | both modes; allocation keeps the totals; flags fire |
+| Window plan | 4 / 3.5 / 3 / < 3 years, weekly and monthly; nested window latest **and** earlier (backward / forward retrofit); reported calendar years |
+| Transforms (fallback / W1) | SES first-non-zero start; Hill; adstock; lag; rebuilt wave variables reproduce the total for a linear chain; W1 share-of-stock sums exact in both orders |
+| Waves | the team's split on supplied wave variables; additivity A; W1 equals the team's method without Hill; indexed totals; the tail |
+| κ | constant over N for an uncentred `ucm`; the run stops for a centred one; brand κ = Σ pool κ_g |
+| Retrofit | **UCM only**: every non-baseline variable unchanged; the positive-baseline allocation keeps the reported total; backward and forward give the same U = κ·τ; flags fire (U > P⁺, a boundary step) |
 | Combination | I3–I10 on synthetic frames shaped like `contribution_timeseries.csv` |
 | Priors | LOCKED / DONOR / CANDIDATE assignment; scale conversion (§6.5); share-file conversion of deck S19 ranges |
 
@@ -1578,6 +1787,8 @@ PyMC.
 | G5 | FR PDX S12 totals = S13 ROI × spend |
 | G6 | FR PDX S15: wave rows sum to 100% (±1) |
 | G7 | `ucm output` identities |
+| G8 | Ekimetrics 01.8 wave example: 700 → 125.4 / 172.3 / 210.0 / 192.3; the shares of step 3 |
+| G9 | FR PDX TV multipliers: non-indexed 2.03 (S13) vs indexed 2.44 / 2.38 (S15) reproduced from the same inputs |
 
 ### 13.3 Synthetic end-to-end with known truth
 
@@ -1618,6 +1829,8 @@ expected (D-19).
 |---|---|
 | **FR PDX re-run** | with the team's data, compare with S11 / S12 / S13 / S15 / S19 / S20 / S21 within an agreed tolerance (proposed: ±0.3 pp on shares, ±0.1 on multipliers) |
 | **Refresh stability** | drop or add one quarter; Year-1 LT% must move less than a set band; τ revisions reported (U8) |
+| **Two-way retrofit (V5)** | when AO MMM models cover both 2-year windows, nest into each. κ_early vs κ_late tests the "no step change" assumption (deck S30) directly; each window's retrofitted U is compared with the other window's nested U |
+| **Wave method (W1)** | the team's per-wave split vs the stock split on one BMC: the change in each wave's spill-over, with the additivity A per channel |
 | **Sensitivity grid** (U9) and **UCM prior sweep** (U11) | the ranges go in the report |
 | **CV** | codebase 1's CV on both models, read for the nested model mainly; long-term CV on a smooth `dv` is weakly informative (U10) |
 
@@ -1631,16 +1844,19 @@ expected (D-19).
 - A primary model with an intercept or trend (D-16).
 - A nested window not matching the primary.
 - A history file with different lever names; a restated history scale (FR PDX
-  S23–24).
+  S23–24); a forward retrofit into years with no history file (waves still
+  complete; no full-period decomposition).
 - 3-year data; Year 2 truncated.
 - Hill near-linear (wave sums still exact); λ = 0 adstock; α = 1 SES.
+- A wave with no activity (an all-zero wave variable); a channel launched
+  mid-year (the SES start).
 - Statsmodels not installed (clean SKIP / refusal message).
 
 ### 13.7 Numerical invariants
 
-I1–I10 (§11.4), plus the UCM identities (§13.1) and the reproduction check
-(§12.3). Each is asserted in tests **and** re-checked at run time, written to
-the LTE warnings.
+I1–I10 (§11.4), plus the UCM identities (§13.1), the wave additivity A and the
+fallback reproduction check (§12.3). Each is asserted in tests **and**
+re-checked at run time, written to the LTE warnings.
 
 ### 13.8 Where the tests live
 
@@ -1691,12 +1907,12 @@ Locally: `pip install --target <dir> statsmodels` (and PyMC for v29), as for
 
 | Page | Change |
 |---|---|
-| ① Project | when the type is LTE: a **stage selector**; for ②–④, **pickers of the upstream runs** (the group's finished runs of the required kind; ③ also the primary run, any group of the BMC); the window plan shown for a ① run |
+| ① Project | when the type is LTE: a **stage selector**; for ②–④, **pickers of the upstream runs** (the group's finished runs of the required kind; ③ also the primary AO MMM run, any group of the BMC, which fixes the nested window: latest or earlier 2 years, so the retrofit direction); the window plan shown for a ① run |
 | ② Data | ① uploads the LTE datacube, with the feasibility summary (blocking errors only, as the app does today) and the long-term column detection shown. ②/③ default to the datacube ① generated (no upload); an override is allowed |
 | ③ Settings | the `lte:` section appears from `config_schema()`; which keys analysts may edit is `app_access.yaml` (**the team's call**); the stage preset's values shown read-only in the difference table ("set by the LTE stage") |
 | ④ Mapping / Share | ② uses the **share file** for the deck S19 contribution priors; ③ uses the mapping file when the primary is a vendor model |
 | ⑤ Prior | ③: generate the **LOCKED / DONOR / CANDIDATE** prior with a role column in the editor (the CSV is unchanged — the role is derived); the `ucm` row highlighted; the scale conversion shown when the primary's dv scale differs. ②: generate from shares |
-| ⑥ Run | unchanged mechanics; the run panel shows the stage and its upstream runs; ④ also accepts the history / wave / spend files (three optional uploads, new folders `History/`, `Waves/`, `Spend/` under the run folder) |
+| ⑥ Run | unchanged mechanics; the run panel shows the stage and its upstream runs. ④ also takes the **history file** (required for a backward retrofit; otherwise optional), the **wave variables** and the spend / price file (ROI opt-in): new folders `History/`, `Waves/`, `Spend/` under the run folder |
 | ⑦ Runs and results | a filter by stage; **stage-specific views** (§14.4) |
 
 ### 14.4 New result views (in `web/src/charts.py`)
@@ -1706,7 +1922,7 @@ Locally: `pip install --target <dir> statsmodels` (and PyMC for v29), as for
 | ① UCM | the 8-panel components chart per region (the vendor layout); the diagnostics table; the start-up check; the cut-off and λ |
 | ② Long-term | the standard views, plus **share of the UCM trend** by lever (FR PDX S20 table) and actual vs predicted (S19) |
 | ③ Nested | the standard views, plus **κ per region** and the **donor audit** (A → B) |
-| ④ Results | **total decomposition**, short-term vs long + short (S11 / S21: table and stacked area); **long vs short per channel** (S12); **multipliers**, both definitions, with benchmark columns when provided (S13–S14); **waves** (S15 table plus the deck S4 picture); **retrofit chart** (deck S23: retrofit vs core-model period); the reconciliation chain |
+| ④ Results | **total decomposition**, short-term vs long + short (S11 / S21: table and stacked area); **long vs short per channel** (S12); **multipliers**, **indexed and non-indexed** side by side, with benchmark columns when provided (S13–S14); **waves** (S15 table plus the deck S4 picture; the wave method and the additivity shown); **retrofit chart** (deck S23 / Ekimetrics 01.6: the retrofitted vs the nested period, either direction); the reconciliation chain |
 
 ### 14.5 Backend contract (`web/src/`)
 
@@ -1752,19 +1968,19 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 | # | Pri | Question | Options | Recommendation | Source |
 |---|---|---|---|---|---|
 | D-01 | P1 | Pre-period handling | deck S8 average-year fill; 26-period time-reversed ETS (sheet); none (with U1) | U1 fix; ETS back-cast optional as **burn-in only**; never modelled | deck S8; sheet; FR PDX S24 |
-| D-02 | P1 | Order and parameters of the long-term transforms (and K's basis) | SES → Hill → adstock (deck banner, S17) vs SES → adstock → Hill (S12 formula) | confirm with the upstream owner; supply per channel (§8.1 #5). Matters for waves only | deck S12, S16, S17; guide §7, §9 |
-| D-03 | P1 | Retrofit source for earlier-year short-term | historically reported (deck S31; FR PDX S3) vs nested coefficients × earlier media (brief 6.1) | `historical` when a reported decomposition exists (consistency with what the client saw), else `coefficients`. Both use κ·τ and the proportional allocation | brief 6.1; deck S24, S31 |
-| D-04 | P1 | Nested window | latest 104 weeks / 24 months; must equal the latest primary (AO MMM) model's window | as stated; refuse a mismatch | deck S22, S29 |
+| D-02 | P1 | Order and parameters of the long-term transforms (and K's basis) | SES → Hill → adstock (deck banner, S17) vs SES → adstock → Hill (S12 formula) | confirm with the upstream owner. Matters for the waves (where W1 splits) and the wave fallback only | deck S12, S16, S17; guide §7, §9 |
+| D-03 | — | ~~Retrofit source for earlier-year short-term~~ | — | **Settled by the team (T1, 2026-10-16):** only the UCM is retrofitted; every other variable keeps its reported short-term contribution | T1; deck S31 |
+| D-04 | P1 | Nested window, and so the retrofit direction | the latest 2 years (backward retrofit) **or** the earlier 2 years (forward retrofit) — T2 | whichever AO MMM model is used; refuse a window that does not match it. Where models cover both windows, nest into both (V5) | deck S22, S29; T2 |
 | D-05 | P1 | Which sales series feeds the UCM | total sales (vendor) vs base sales (U12); and after a **restatement**, how earlier history and historical decompositions are rescaled | total sales (parity) + U12 as a sensitivity; restatements fixed upstream and documented; historical decompositions rescaled proportionally to restated sales, flagged | FR PDX S23–S24 |
-| D-06 | P1 | Regional structure | UCM per region (Colombia) vs national (France); the long-term model regional or national | the same region list in S2–S4; national = sum | region-based notebook; U13 |
+| D-06 | P1 | Brand level vs pools | brand-level UCM and long-term model (Ekimetrics 02.1) vs a UCM per pool (Colombia notebook) | **brand level**, the method; the brand τ entered in every pool of the nested model; κ = Σ κ_g (U13) | Ekimetrics 02.1; region-based notebook |
 | D-07 | P2 | Denominator of the share of the UCM trend | τ (actual; residual → baseline) vs the fitted trend | τ: makes L = κ·c^τ exact and the shares sum to 100% | deck S21, S25 |
 | D-08 | P1 | The smoothing cut-off | λ = 300 for every cadence vs one calendar cut-off | decide the cut-off in months; derive λ; keep 300 in parity mode | U4 |
 | D-09 | P2 | Seasonal component in the UCM | never (notebooks) vs when tested (deck S10) | when tested (U5) | deck S10–S11 |
 | D-10 | P2 | "Media Residuals" construction | geometric decay from the window start (retention from the long-term chain) vs the residual of a first-pass fit vs supplied | a generated decaying stock; never the model's own residual (circular) | deck S18 |
-| D-11 | P2 | Year definition for waves and reporting | calendar (FR PDX) vs 52-week blocks from the start vs MAT from the end (codebase 1) | calendar for LTE reporting (FR PDX); codebase 1's MAT stays inside each model | FR PDX S12–S15; codebase 1 [D] |
+| D-11 | P2 | Year definition for waves and reporting | calendar (FR PDX; Ekimetrics 01.8 tip "media is planned on a calendar year basis") vs 52-week blocks from the start vs MAT from the end (codebase 1) | **calendar** for LTE reporting; prefer BMCs whose data start at the beginning of a year (Ekimetrics); codebase 1's MAT stays inside each model | FR PDX S12–S15; Ekimetrics 01.8; codebase 1 [D] |
 | D-12 | P2 | Years reported with 3 / 3.5 years | Y1–2 vs Y1 only | 3.5 y: Y1–2; 3 y: Y1, plus Y2 with its tail shown (U15) | deck S4, S31 |
 | D-13 | P2 | ROI | volume-only [D] vs FR PDX value ROI | opt-in with spend and price; the multiplier always (it needs neither) | FR PDX S12–S13; codebase 1 [D] |
-| D-14 | P2 | Multiplier definition | window-based (FR PDX S11–S13) vs activity-based (waves) | report both, labelled | §11.6 |
+| D-14 | P2 | Multiplier and ROI basis | **non-indexed** (LT realised in the window; FR PDX S11–S13: TV 2.03) vs **indexed** (LT of the window's activity, wherever realised; Ekimetrics: "we use indexed"; FR PDX S15: TV ≈2.4) | report both, labelled (W2); the team picks the headline. Indexed answers "what did the money buy" | §11.6; Ekimetrics 01.8 |
 | D-15 | P2 | UCM mode by default | parity vs improved | improved, after one side-by-side BMC; parity kept | U1, U16 |
 | D-16 | P1 | Primary model with an intercept or trend | keep (competes with `ucm`) vs pin vs drop | the Secondary-style nested preset (no intercept); drop or lock the trend the UCM replaces | METHODOLOGY §2b step 4 |
 | D-17 | P2 | Donor list | auto (baseline and positive) vs explicit | auto, shown and editable | METHODOLOGY §2c |
@@ -1776,6 +1992,8 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 | D-23 | P2 | History file format and lever names | codebase 1 `contribution_timeseries.csv` vs vendor tables | both, through the mapping reader | — |
 | D-24 | P3 | Short-term carry-over in waves | booked to the activity year (FR PDX) vs decomposed by origin | FR PDX convention by default | FR PDX S15 |
 | D-25 | P3 | "Total Media" definition | TV + Digital (FR PDX) vs including Expert | FR PDX: TV + Digital; Expert separate | FR PDX S9, S11 |
+| D-26 | P2 | The wave split when Hill is in the long-term chain | the team's per-wave response (Ekimetrics 01.8) vs the share of the stock (W1) | W1, after a side-by-side on one BMC (§13.5); until then the team's method, with the additivity A reported | §12.4; Ekimetrics 01.8 |
+| D-27 | P2 | Minimum history | 4 years (Ekimetrics 02.1) vs 3.5 (FR PDX, TEAM KT S6) vs 3 | 4 by default; 3–3.5 allowed with the §5.2 flags; < 3 refused | Ekimetrics 02.1; deck S6 |
 
 ### 15.2 Methodological risks
 
@@ -1785,10 +2003,13 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 | **Long-term shares are prior-driven** (U10) | a smooth `dv` carries little information | contraction per coefficient; placebo; baseline-only comparison |
 | **The start-up artefact in Year 1** (U1) | biases the reported year | fix at source; parity side by side |
 | **Double counting short-term effects as long-term** (U12) | sustained flights leak into the trend | base-sales variant as a sensitivity; λ choice |
-| **The retrofit assumes no step change at the window boundary** | deck S30 states the assumption | report the retrofit residual and the U > P⁺ flags; plot both windows (deck S23) |
+| **The retrofit assumes no step change at the window boundary** | deck S30 states the assumption; it holds the same way backward and forward | U/P⁺ at the boundary; the U > P⁺ flags; plot both windows (deck S23); **the two-way κ check where both windows have a model (V5)** |
+| **The retrofitted UCM sits in another model's decomposition** | U is carved out of the positive baseline of a model that never contained it (T1) | the U > P⁺ flag; report how much of each reported baseline factor was given up |
 | **Restated data** | scale shifts break κ·τ across the boundary | restate upstream; level-shift check (S0) |
 | **Generated-regressor uncertainty** (U9) | intervals too narrow | sensitivity grid |
 | **Truncated waves** (U15) | Year 2 is understated with < 4 years | tail projection, labelled |
+| **The wave split depends on the Hill curve** (W1) | spill-over under-credited for S > 1 | report A; W1 side by side; decision D-26 |
+| **Two multipliers for one channel** (W2) | indexed ≈2.4 vs non-indexed ≈2.0 for FR PDX TV | label both; decision D-14 |
 
 ### 15.3 Implementation risks
 
@@ -1804,14 +2025,17 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 
 ### 15.4 Data still needed from the team
 
-1. Raw activity per channel plus the long-term parameters and their order
-   (waves) — or per-wave columns.
+1. **Per-year wave variables** of each long-term channel — the upstream export
+   of Ekimetrics 01.8 step 2. For W1, each wave's pre-Hill stock. Fallback:
+   raw support plus the long-term parameters and their order.
 2. The original notebook input series (France 182 weeks; Colombia 54 months ×
    13) and the notebooks' exact statsmodels version (parity).
-3. The primary (AO MMM) model covering the nested window: a codebase 1 run, or
-   vendor contributions.
-4. The historically reported short-term decomposition for the retrofit years
-   (`historical` mode).
+3. The primary (AO MMM) model covering the nested window — latest or earlier
+   (T2): a codebase 1 run, or vendor contributions. Ideally, models for
+   **both** windows (V5).
+4. The **historically reported short-term decomposition** for the retrofit
+   years (T1). Required for a backward retrofit and for any full-period
+   decomposition.
 5. Spend and price (only if ROI is wanted).
 6. The benchmark multipliers file (FR PDX S14) if benchmarks are to be shown.
 
@@ -1821,11 +2045,11 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 
 | Phase | Tasks | Depends on | Deliverables | Acceptance criteria |
 |---|---|---|---|---|
-| **0. Decisions and data** | Settle the P1 decisions (D-01–D-06, D-08, D-16); request the §15.4 data; agree tolerances | — | the decision log (this §15 updated); the data contract signed off (§8) | every P1 decision recorded; at least one BMC's full input set in hand |
+| **0. Decisions and data** | Settle the P1 decisions (D-01, D-02, D-04, D-05, D-06, D-08, D-16; D-03 is settled); request the §15.4 data; agree tolerances | — | the decision log (this §15 updated); the data contract signed off (§8) | every P1 decision recorded; at least one BMC's full input set in hand |
 | **1. UCM extraction** | `mmm/lte/windows.py`, `backcast.py`, `ucm.py` (parity + improved), diagnostics, plots, component CSVs; `statsmodels` in `requirements.txt`; warning rules | 0 | `test_v25`; `01_ucm/` on a real BMC | **parity** reproduces `ucm output` (1e-6 relative); **improved** shows no start-up artefact (first-period τ within ±5% of the local level); identities exact; the 3 / 3.5 / 4-year plans correct |
 | **2. Config, data and priors** | `LTEConfig` + the `lte:` section (HELP, CHOICES, schema); `presets.py`; the datacube writers; `priors.py` (shares → long-term priors; LOCKED / DONOR / CANDIDATE with scale conversion; donor audit) | 1 | `test_v28` (part); long-term and nested runs through the **unchanged** `run()` | both models run end to end (stubbed in tests, real in v29); Stage A reproduces the primary within 3% per LOCKED variable on one BMC; `test_v11` / `v19` still pass |
-| **3. Combination** | `combine.py` (κ, both retrofit modes, L, final, aggregates, multipliers, ROI opt-in), reconciliation files, `report.py` (tables) | 2 | `test_v26`; `04_lte/` on a real BMC | **G1–G5 golden tests pass**; I1–I10 hold on synthetic data; a real study's final shares sum to 100% per period and region |
-| **4. Waves** | `transforms.py`, `waves.py`, tail, charts | 3 + wave data | `test_v27`; `lte_waves.csv` | reproduction check passes on real data; wave rows sum to 100%; synthetic truth recovered; G6 |
+| **3. Combination** | `combine.py` (κ, the UCM-only retrofit in both directions, L, final, aggregates), reconciliation files, `report.py` (tables) | 2 | `test_v26`; `04_lte/` on a real BMC | **G1–G5 golden tests pass**; I1–I10 hold on synthetic data; a real study's final shares sum to 100% per period and region; backward and forward retrofits tested |
+| **4. Waves** | `waves.py` (the team's split on supplied wave variables, additivity, W1, indexed LT, multipliers both bases, ROI opt-in), tail, charts; `transforms.py` only for the fallback / W1 | 3 + wave data | `test_v27`; `lte_waves.csv` | **G6, G8, G9 pass**; wave rows sum to 100%; the W1 vs team comparison on one BMC; synthetic truth recovered |
 | **5. Orchestration and job** | `pipeline.py` / `__main__` (resume, manifest); `app_job` stage dispatch and upstream resolution (renames, Reported / Archived) | 3 (4 optional) | `test_v28` complete; a Databricks run of all stages for one BMC | one command runs S0–S7; a stage re-run reuses unchanged stages; failures publish outputs; manifest complete |
 | **6. Web app** | §14 pages, views, references, guards, access; `MIN_CODEBASE` | 5 | v20 / v21 / v22 additions; a real-browser check | a full LTE study run from the app by an analyst; the reported ④ run marked; views match the CSVs |
 | **7. Docs and release** | `LTE_GUIDE.md` and the guide updates (§9.5); a case file; `python -m mmm.release`; walkthrough | 3–6 | docs; release | docs reviewed by the team; the first real LTE study reproduced against the vendor's within the agreed tolerance, or the differences explained (start-up artefact, λ) |
@@ -1833,9 +2057,10 @@ P1 = before Phase 1; P2 = before reporting; P3 = can start on the default.
 **Minimum viable LTE:** Phases 0 → 1 → 2 → 3, run by hand (`python -m mmm.lte`
 or a notebook).
 
-- It delivers long-term and total contributions, κ, multipliers and the
-  reconciliation for one BMC.
-- Waves (Phase 4) wait for the raw activity and parameters.
+- It delivers long-term and total contributions, κ, the non-indexed multipliers
+  and the reconciliation for one BMC.
+- Waves and indexed multipliers (Phase 4) wait for the per-year wave
+  variables.
 - The app (Phase 6) comes after the method has been validated on real data.
 
 **Not in scope until decided:**
@@ -1852,7 +2077,9 @@ or a notebook).
 **Reference material** (transcribed): `../snapshots/UCM/understanding.md` and
 the `understanding.md` of each folder:
 
-- `LTE Methodology/`
+- `LTE Methodology/` — including `Additional/` (the Ekimetrics x Haleon "LTE
+  Knowledge Transfer – In-Depth" deck) and the team's clarifications T1–T3
+  (§5–§6 of that file)
 - `Step by Step Guide/`
 - `FR PDX/`
 - `ucm code with smooth trend/`

@@ -56,7 +56,7 @@ data:
   # (SUM(contribution)/SUM(support x dv_agg) - the coefficient that reproduces the national
   # TOTAL; right for pooling: global). They differ when a contribution is concentrated in a few
   # regions; the step warns and the workbook prints both
-  national_basis: average
+  national_basis: weighted
   # where the pre-model step writes feature_priors_national.csv, feature_priors_regional.csv and
   # the calculation workbook. null = pre_model_outputs/
   pre_model_dir: null

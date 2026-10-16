@@ -1,0 +1,1727 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>LTE Method Review</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="Long-term effects (LTE) modelling: the current method, proposed improvements and validation, the full pipeline, the arithmetic and the open decisions.">
+<script>
+  /* apply a saved theme before first paint */
+  try {
+    var t = localStorage.getItem("lte-method-theme");
+    if (t === "dark" || t === "light") document.documentElement.setAttribute("data-theme", t);
+  } catch (e) {}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans+Condensed:wght@500;600;700&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+<style>
+/* Layout: a methods dossier. A section index rail on the left, a reading column on the right;
+   tables, charts and diagrams use the full column width. */
+:root {
+  --bg: #f3f5f7;
+  --surface: #fcfcfd;
+  --surface-2: #eef1f4;
+  --ink: #15212c;
+  --ink-2: #47545f;
+  --muted: #66727e;
+  --rule: #dce2e7;
+  --rule-strong: #b6c0c9;
+  --grid: #e3e8ec;
+  --axis: #b6c0c9;
+  --accent: #1d5a9c;
+  --accent-ink: #ffffff;
+  --accent-soft: #e1ebf6;
+  --series-1: #2a78d6;
+  --series-2: #eb6834;
+  --band: rgba(29, 90, 156, 0.08);
+  --code-bg: #edf1f4;
+  --shadow: 0 6px 18px rgba(21, 33, 44, 0.12);
+  --font-display: "IBM Plex Sans Condensed", "Arial Narrow", "Roboto Condensed", system-ui, sans-serif;
+  --font-sans: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+  --measure: 72ch;
+  color-scheme: light;
+  padding-top: env(safe-area-inset-top, 0px);
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1217;
+    --surface: #141b21;
+    --surface-2: #1b232b;
+    --ink: #e6ecf1;
+    --ink-2: #b3bec8;
+    --muted: #8d9aa7;
+    --rule: #27313a;
+    --rule-strong: #3b4753;
+    --grid: #222b33;
+    --axis: #3b4753;
+    --accent: #80b3ea;
+    --accent-ink: #0d1217;
+    --accent-soft: #1a2a3c;
+    --series-1: #3987e5;
+    --series-2: #d95926;
+    --band: rgba(128, 179, 234, 0.09);
+    --code-bg: #1a2229;
+    --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1217;
+  --surface: #141b21;
+  --surface-2: #1b232b;
+  --ink: #e6ecf1;
+  --ink-2: #b3bec8;
+  --muted: #8d9aa7;
+  --rule: #27313a;
+  --rule-strong: #3b4753;
+  --grid: #222b33;
+  --axis: #3b4753;
+  --accent: #80b3ea;
+  --accent-ink: #0d1217;
+  --accent-soft: #1a2a3c;
+  --series-1: #3987e5;
+  --series-2: #d95926;
+  --band: rgba(128, 179, 234, 0.09);
+  --code-bg: #1a2229;
+  --shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+  color-scheme: dark;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.6;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+}
+img, svg { max-width: 100%; }
+[hidden] { display: none !important; }
+a { color: var(--accent); text-underline-offset: 2px; }
+a:focus-visible, button:focus-visible, summary:focus-visible, [tabindex]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+/* ---------- masthead ---------- */
+.masthead {
+  max-width: 1240px;
+  margin-inline: auto;
+  padding-block: 2.5rem 1.75rem;
+  border-bottom: 1px solid var(--rule);
+  display: grid;
+  gap: 1rem;
+}
+.masthead-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 1rem; flex-wrap: wrap; }
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin: 0;
+}
+h1 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(2rem, 4.2vw, 3rem);
+  line-height: 1.05;
+  letter-spacing: -0.01em;
+  margin: 0.35rem 0 0;
+  text-wrap: balance;
+}
+.deck { font-size: 1.1rem; color: var(--ink-2); max-width: 64ch; margin: 0; }
+.status-line { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; font-size: 0.92rem; color: var(--ink-2); margin: 0; }
+.sources { font-size: 0.85rem; color: var(--muted); max-width: 90ch; margin: 0; }
+.theme-toggle {
+  font: 500 0.85rem var(--font-sans);
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  padding: 0.45rem 0.8rem;
+  cursor: pointer;
+}
+.theme-toggle:hover { background: var(--surface-2); }
+
+/* ---------- layout ---------- */
+.layout {
+  max-width: 1240px;
+  margin-inline: auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem;
+  padding-block: 2rem 4rem;
+}
+@media (min-width: 1060px) {
+  .layout { grid-template-columns: 220px minmax(0, 1fr); gap: 3rem; }
+  .toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 1.25rem); align-self: start; }
+}
+.toc { font-size: 0.9rem; }
+.toc p { margin: 0 0 0.5rem; }
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.15rem; }
+.toc a {
+  display: grid;
+  grid-template-columns: 1.6rem 1fr;
+  gap: 0.25rem;
+  padding: 0.3rem 0.5rem;
+  border-radius: 5px;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.toc a span { font-family: var(--font-mono); color: var(--muted); }
+.toc a:hover { background: var(--surface-2); color: var(--ink); }
+.toc a.active { background: var(--accent-soft); color: var(--accent); }
+.toc a.active span { color: var(--accent); }
+@media (max-width: 1059px) {
+  .toc ol { grid-template-columns: repeat(auto-fill, minmax(min(100%, 15rem), 1fr)); }
+}
+
+main { min-width: 0; display: grid; gap: 3.5rem; }
+section { min-width: 0; display: grid; gap: 1.25rem; scroll-margin-top: 1rem; }
+h2 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.85rem;
+  line-height: 1.15;
+  margin: 0;
+  text-wrap: balance;
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+}
+h2 .num { font-family: var(--font-mono); font-size: 1rem; font-weight: 500; color: var(--accent); }
+h3 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  font-size: 1.3rem;
+  line-height: 1.25;
+  margin: 0.75rem 0 0;
+  text-wrap: balance;
+}
+h4 { font-size: 1.02rem; font-weight: 600; line-height: 1.35; margin: 0; text-wrap: balance; }
+p, ul, ol { margin: 0; }
+.prose { max-width: var(--measure); display: grid; gap: 0.75rem; }
+.prose ul, .prose ol, ul.plain, ol.plain { padding-left: 1.25rem; display: grid; gap: 0.4rem; }
+.lead { font-size: 1.05rem; color: var(--ink-2); max-width: var(--measure); }
+.note { font-size: 0.9rem; color: var(--ink-2); max-width: var(--measure); }
+strong { font-weight: 600; }
+.tick { color: var(--accent); font-weight: 600; }
+
+/* ---------- at a glance ---------- */
+.evidence {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+  gap: 1rem;
+}
+.evidence figure {
+  margin: 0;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1.1rem 1.2rem;
+  display: grid;
+  gap: 0.35rem;
+  align-content: start;
+}
+.evidence .big { font-family: var(--font-sans); font-weight: 600; font-size: 2.1rem; line-height: 1.1; color: var(--ink); }
+.evidence .big small { font-size: 1rem; font-weight: 500; color: var(--ink-2); }
+.evidence figcaption { font-size: 0.9rem; color: var(--ink-2); }
+.evidence .src { font-family: var(--font-mono); font-size: 0.74rem; color: var(--muted); }
+.glance {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 22rem), 1fr));
+  gap: 1rem;
+}
+.glance > div {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1.1rem 1.25rem;
+  display: grid;
+  gap: 0.6rem;
+  align-content: start;
+  min-width: 0;
+}
+.glance h3 { margin: 0; font-size: 1.1rem; }
+.glance ul, .glance ol { padding-left: 1.15rem; display: grid; gap: 0.4rem; font-size: 0.95rem; }
+
+/* ---------- chips ---------- */
+.chip {
+  display: inline-block;
+  font: 600 0.7rem/1 var(--font-sans);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  padding: 0.38em 0.6em;
+  border-radius: 4px;
+  border: 1px solid transparent;
+  white-space: nowrap;
+}
+.chip.essential { background: var(--accent); color: var(--accent-ink); }
+.chip.recommended { background: var(--accent-soft); color: var(--accent); }
+.chip.optional { background: var(--surface-2); color: var(--ink-2); border-color: var(--rule); }
+.chip.decision { background: transparent; color: var(--ink); border-color: var(--rule-strong); }
+.chip.status { background: var(--surface); color: var(--ink); border-color: var(--rule-strong); }
+.legend-chips { display: flex; flex-wrap: wrap; gap: 0.5rem 1.1rem; font-size: 0.88rem; color: var(--ink-2); align-items: center; }
+
+/* ---------- tables ---------- */
+.table-wrap {
+  overflow-x: auto;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+}
+table { border-collapse: collapse; width: 100%; font-size: 0.875rem; line-height: 1.5; }
+th, td { padding: 0.6rem 0.8rem; text-align: left; vertical-align: top; border-bottom: 1px solid var(--rule); }
+thead th {
+  background: var(--surface-2);
+  font-weight: 600;
+  color: var(--ink);
+  font-size: 0.8rem;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+tbody tr:last-child td, tbody tr:last-child th { border-bottom: 0; }
+tbody th { font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.total td, tr.total th { font-weight: 600; background: var(--surface-2); }
+.wide table { min-width: 860px; }
+.mid table { min-width: 640px; }
+.stage-no { font-family: var(--font-mono); color: var(--accent); font-weight: 500; white-space: nowrap; }
+
+/* ---------- improvements ---------- */
+.group { display: grid; gap: 0.25rem; }
+.group > h3 { margin-bottom: 0.25rem; }
+.imp {
+  border-top: 1px solid var(--rule);
+  padding-block: 1.1rem 0.6rem;
+  display: grid;
+  gap: 0.75rem;
+  min-width: 0;
+}
+.imp-head { display: flex; align-items: baseline; gap: 0.75rem; flex-wrap: wrap; }
+.imp-id { font-family: var(--font-mono); font-weight: 500; color: var(--accent); min-width: 2rem; }
+.imp-head h4 { flex: 1 1 18rem; }
+.imp dl {
+  display: grid;
+  grid-template-columns: 7rem minmax(0, 1fr);
+  gap: 0.45rem 1.25rem;
+  margin: 0;
+  max-width: 82ch;
+}
+.imp dt {
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding-top: 0.2rem;
+}
+.imp dd { margin: 0; min-width: 0; }
+@media (max-width: 640px) {
+  .imp dl { grid-template-columns: minmax(0, 1fr); gap: 0.15rem; }
+  .imp dd { margin-bottom: 0.5rem; }
+}
+
+/* ---------- figures, charts, diagrams ---------- */
+figure { margin: 0; }
+.chart {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1rem 1.1rem 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+  max-width: 82ch;
+}
+.chart-title { font-weight: 600; font-size: 0.95rem; margin: 0; }
+.chart figcaption { font-size: 0.85rem; color: var(--ink-2); }
+.key-row { display: flex; flex-wrap: wrap; gap: 0.35rem 1.1rem; font-size: 0.82rem; color: var(--ink-2); }
+.key { display: inline-flex; align-items: center; gap: 0.4rem; }
+.key i { display: inline-block; flex: none; }
+.key .k-line1 { width: 16px; height: 2px; background: var(--series-1); }
+.key .k-line2 { width: 16px; height: 2px; background: var(--series-2); }
+.key .k-bar1 { width: 10px; height: 10px; border-radius: 2px; background: var(--series-1); }
+.key .k-ref { width: 16px; height: 2px; background: var(--ink); }
+.key .k-band { width: 12px; height: 12px; border-radius: 2px; background: var(--band); border: 1px solid var(--rule-strong); }
+.plot { position: relative; min-width: 0; }
+.chart-svg { display: block; }
+.chart-svg .grid { stroke: var(--grid); stroke-width: 1; }
+.chart-svg .axis { stroke: var(--axis); stroke-width: 1; }
+.chart-svg .ax { fill: var(--muted); font-family: var(--font-sans); font-size: 11px; font-variant-numeric: tabular-nums; }
+.chart-svg .ann { fill: var(--ink-2); font-family: var(--font-sans); font-size: 12px; }
+.chart-svg .val { fill: var(--ink); font-family: var(--font-sans); font-size: 12px; font-weight: 600; }
+.chart-svg .line { fill: none; stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.chart-svg .s1-line { stroke: var(--series-1); }
+.chart-svg .s2-line { stroke: var(--series-2); }
+.chart-svg .s1-fill { fill: var(--series-1); }
+.chart-svg .s2-fill { fill: var(--series-2); }
+.chart-svg .dot { stroke: var(--surface); stroke-width: 2; }
+.chart-svg .leader { stroke: var(--ink-2); stroke-width: 1; }
+.chart-svg .ref { stroke: var(--ink); stroke-width: 1.5; }
+.chart-svg .band { fill: var(--band); }
+.chart-svg .xh { stroke: var(--ink-2); stroke-width: 1; }
+.chart-svg .hit { fill: transparent; cursor: crosshair; }
+.chart-svg .bar { cursor: default; outline: none; }
+.chart-svg .bar:hover path, .chart-svg .bar:focus path { opacity: 0.8; }
+.chart-svg .bar:focus-visible .hit { stroke: var(--accent); stroke-width: 2; }
+.tip {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  background: var(--surface);
+  color: var(--ink);
+  border: 1px solid var(--rule-strong);
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  padding: 0.45rem 0.65rem;
+  font-size: 0.8rem;
+  line-height: 1.45;
+  min-width: 9rem;
+  max-width: 16rem;
+}
+.tip-row { display: flex; align-items: center; gap: 0.45rem; }
+.tip-row.head { color: var(--ink-2); font-size: 0.76rem; }
+.tip-key { display: inline-block; width: 12px; height: 2px; flex: none; }
+.tip-key.k1 { background: var(--series-1); }
+.tip-key.k2 { background: var(--series-2); }
+.tip-label { color: var(--ink-2); }
+details.twin { font-size: 0.85rem; }
+details.twin summary { cursor: pointer; color: var(--accent); width: fit-content; }
+details.twin .table-wrap { margin-top: 0.6rem; }
+
+.diagram {
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 8px;
+  padding: 1rem 1.1rem 0.9rem;
+  display: grid;
+  gap: 0.6rem;
+  min-width: 0;
+}
+.diagram figcaption { font-size: 0.85rem; color: var(--ink-2); max-width: var(--measure); }
+.diagram-scroll { overflow-x: auto; }
+.diagram-scroll svg { display: block; width: 100%; min-width: 760px; height: auto; color: var(--ink-2); }
+.dg-box { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.2; }
+.dg-box-improved { fill: var(--surface); stroke: var(--accent); stroke-width: 1.8; }
+.dg-box-input { fill: var(--surface-2); stroke: var(--rule-strong); stroke-width: 1.2; }
+.dg-title { fill: var(--ink); font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
+.dg-desc { fill: var(--ink-2); font-family: var(--font-sans); font-size: 11.5px; }
+.dg-tag { fill: var(--muted); font-family: var(--font-mono); font-size: 10.5px; }
+.dg-tag-improved { fill: var(--accent); font-family: var(--font-mono); font-size: 10.5px; font-weight: 500; }
+.dg-edge { fill: none; stroke: currentColor; stroke-width: 1.3; }
+.dg-edge-accent { fill: none; stroke: var(--accent); stroke-width: 1.6; }
+.dg-arrowhead-accent { fill: var(--accent); }
+.dg-label { fill: var(--ink-2); font-family: var(--font-sans); font-size: 11px; font-style: italic; }
+.dg-label-accent { fill: var(--accent); font-family: var(--font-sans); font-size: 13px; font-weight: 600; font-style: italic; }
+.dg-nested { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+.dg-retro { fill: var(--surface); stroke: var(--rule-strong); stroke-width: 1.2; }
+.dg-report { fill: var(--surface-2); stroke: var(--ink-2); stroke-width: 1.2; }
+.dg-future { fill: var(--surface-2); }
+.dg-sep { stroke: var(--rule); stroke-width: 1; }
+.dg-head { fill: var(--ink); font-family: var(--font-sans); font-size: 13px; font-weight: 600; }
+.dg-sub { fill: var(--muted); font-family: var(--font-sans); font-size: 11px; }
+.dg-block { fill: var(--ink); font-family: var(--font-sans); font-size: 13px; font-weight: 500; }
+.dg-muted { fill: var(--muted); font-family: var(--font-sans); font-size: 12px; }
+
+/* ---------- formulas ---------- */
+pre.formula {
+  font-family: var(--font-mono);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  background: var(--code-bg);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 0.85rem 1rem;
+  margin: 0;
+  overflow-x: auto;
+  max-width: 100%;
+}
+.formula-inline {
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  background: var(--code-bg);
+  border-radius: 6px;
+  padding: 0.7rem 1rem;
+  max-width: var(--measure);
+  overflow-x: auto;
+}
+.math-grid { display: grid; gap: 1rem; }
+.math-grid h4 { margin-bottom: 0.4rem; }
+
+/* ---------- lists of steps ---------- */
+ol.steps { padding-left: 1.4rem; display: grid; gap: 0.55rem; max-width: var(--measure); }
+ol.steps li::marker { font-family: var(--font-mono); color: var(--accent); }
+
+/* ---------- glossary ---------- */
+dl.gloss {
+  display: grid;
+  grid-template-columns: minmax(10rem, 14rem) minmax(0, 1fr);
+  gap: 0.5rem 1.5rem;
+  margin: 0;
+  max-width: 90ch;
+}
+dl.gloss dt { font-weight: 600; }
+dl.gloss dd { margin: 0; color: var(--ink-2); }
+@media (max-width: 640px) {
+  dl.gloss { grid-template-columns: minmax(0, 1fr); gap: 0.1rem; }
+  dl.gloss dd { margin-bottom: 0.6rem; }
+}
+
+footer {
+  max-width: 1240px;
+  margin-inline: auto;
+  border-top: 1px solid var(--rule);
+  padding-block: 1.25rem 2.5rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+@media print {
+  body { background: #fff; color: #000; }
+  .toc, .theme-toggle, details.twin { display: none !important; }
+  .layout { display: block; }
+  main { gap: 2rem; }
+  .imp, figure, .table-wrap, pre.formula { break-inside: avoid; }
+  .wide table, .mid table { min-width: 0; }
+  .diagram-scroll svg { min-width: 0; }
+}
+</style>
+</head>
+<body>
+
+<header class="masthead">
+  <div class="masthead-top">
+    <div>
+      <p class="eyebrow">Method review · 16 October 2026</p>
+      <h1>Long-Term Effects (LTE) Modelling</h1>
+    </div>
+    <button class="theme-toggle" id="theme-toggle" type="button">Dark theme</button>
+  </div>
+  <p class="deck">The current method, the improvements and validation we propose, the full pipeline with those changes in place, the arithmetic behind every reported number, and the decisions still open.</p>
+  <p class="status-line"><span class="chip status">Proposal for discussion</span> Nothing in the method has been changed yet.</p>
+  <p class="sources">Based on the Ekimetrics × Haleon LTE knowledge-transfer deck, the team's LTE methodology and training guide, the France Parodontax LTE study (FR PDX, Jan 2022 – Jun 2025), the team's UCM notebooks and outputs, and three clarifications from the team (16 Oct 2026). Figures marked <span class="tick">✓</span> were recomputed from that material.</p>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Sections">
+    <p class="eyebrow">Contents</p>
+    <ol>
+      <li><a href="#glance"><span>·</span>At a glance</a></li>
+      <li><a href="#current"><span>1</span>The current methodology</a></li>
+      <li><a href="#proposed"><span>2</span>Proposed methodology</a></li>
+      <li><a href="#compare"><span>3</span>Current vs proposed</a></li>
+      <li><a href="#pipeline"><span>4</span>The complete pipeline</a></li>
+      <li><a href="#arithmetic"><span>5</span>Contributions and reconciliation</a></li>
+      <li><a href="#maths"><span>6</span>Mathematical definitions</a></li>
+      <li><a href="#risks"><span>7</span>Risks and open questions</a></li>
+      <li><a href="#glossary"><span>·</span>Glossary</a></li>
+    </ol>
+  </nav>
+
+  <main>
+
+    <!-- ===================== AT A GLANCE ===================== -->
+    <section id="glance" aria-labelledby="glance-h">
+      <h2 id="glance-h">At a glance</h2>
+      <p class="lead">Short-term MMM explains how sales respond to activity within a 2-year window. LTE measures the slower effect of media on the brand's underlying base, and adds it to the short-term contribution to give total impact, long-term multipliers and ROI. The method's structure is sound. Three findings drive most of the proposed changes.</p>
+
+      <div class="evidence">
+        <figure>
+          <div class="big">42%</div>
+          <figcaption>The UCM trend in week 1, as a share of actual sales. It takes about six weeks to catch up, inside reported Year 1.</figcaption>
+          <div class="src">FR PDX UCM output ✓ · Colombia: 52%</div>
+        </figure>
+        <figure>
+          <div class="big">2.03 <small>vs</small> 2.4</div>
+          <figcaption>FR PDX's TV multiplier on the non-indexed basis (as reported) and on the indexed basis (its own waves). Today the basis is not stated.</figcaption>
+          <div class="src">FR PDX slides 13 and 15 ✓</div>
+        </figure>
+        <figure>
+          <div class="big">6% <small>of credit for</small> 14%</div>
+          <figcaption>A carried-over wave holding 14% of the media stock gets 6% of the long-term credit under today's wave split, for an S-curve with S = 2.</figcaption>
+          <div class="src">Worked example ✓</div>
+        </figure>
+      </div>
+
+      <div class="glance">
+        <div>
+          <h3>What we keep</h3>
+          <ul>
+            <li>The eight stages, from data stitching to media wave analysis.</li>
+            <li>Nesting the UCM trend into the AO MMM model, with media, expert and negative baseline locked.</li>
+            <li>The retrofit, which carries only the UCM to the other years.</li>
+            <li>The media wave attribution by calendar year.</li>
+          </ul>
+        </div>
+        <div>
+          <h3>What we change, most important first</h3>
+          <ol>
+            <li>Fix the start-up fault in the UCM trend that understates Year 1.</li>
+            <li>Define the trend smoothing in calendar time. λ = 300 means about 6 months on weekly data and 26 months on monthly data.</li>
+            <li>Report the multiplier on a stated basis, indexed and non-indexed.</li>
+            <li>Split media waves at the stock, so spill-over is not under-credited.</li>
+            <li>Show which numbers come from the data and which come from priors. The UCM's share of sales (20.3% in FR PDX) scales every long-term number.</li>
+          </ol>
+        </div>
+        <div>
+          <h3>New: a validation layer</h3>
+          <p>The current method has no formal checks between stages. We add one gate per stage, each with a pass mark agreed in advance. The first gate reproduces today's numbers exactly before anything changes. The others check the trend, placebo-test the long-term model, confirm the nested model reproduces the AO MMM model, test the retrofit in both directions, check that the waves add up, reconcile exactly and report sensitivity ranges.</p>
+        </div>
+        <div>
+          <h3>To decide</h3>
+          <ul>
+            <li>Pre-period handling.</li>
+            <li>The smoothing cut-off, in months.</li>
+            <li>Which AO MMM model to nest into: the latest or the earlier 2 years.</li>
+            <li>Brand level or pools.</li>
+            <li>The multiplier basis.</li>
+            <li>The wave-split convention.</li>
+          </ul>
+          <p class="note">All twelve open questions are in <a href="#risks">section 7</a>.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 1 CURRENT ===================== -->
+    <section id="current" aria-labelledby="current-h">
+      <h2 id="current-h"><span class="num">1</span>The current methodology</h2>
+
+      <h3>The idea</h3>
+      <div class="prose">
+        <ul>
+          <li>Sales move for two reasons: short-term activation over weeks, and a slowly moving base over years. A 2-year MMM measures the first and puts the second in its baseline.</li>
+          <li>LTE extracts the slow base of sales as a statistical trend (the <strong>UCM trend</strong>), explains that trend with long-memory media (the <strong>UCM model</strong>), and measures how much of sales the trend accounts for by adding it to the 2-year MMM as one more variable (<strong>nesting</strong>).</li>
+          <li>The long-term contribution of a medium is its share of the trend multiplied by the trend's share of sales.</li>
+          <li>Results are reported for Years 1 and 2 of the history, and added to the short-term contribution already reported for those years.</li>
+        </ul>
+      </div>
+
+      <h3>The eight stages</h3>
+      <div class="table-wrap wide">
+        <table>
+          <thead>
+            <tr><th>#</th><th>Stage</th><th>What is done</th><th>Key settings</th><th>Output</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="stage-no">1</td><th>Data stitching</th><td>Historical data appended to the latest model database. All pools (sub-brand, store format, region) aggregated, because "the UCM modelling is done at the Brand level".</td><td>At least 4 years of sales, media and BTL (the team guide says 3.5–4). No step changes between data sources.</td><td>Brand-level weekly panel</td></tr>
+            <tr><td class="stage-no">2</td><th>UCM extraction</th><td>Sales split into level, growth, cycle and noise with an unobserved-components model (smooth trend, cycle, irregular; Powell optimiser). Level plus growth is then smoothed again with a Hodrick–Prescott (HP) filter.</td><td>HP λ = 300. A seasonal component only if the ACF shows one. A missing pre-period year filled with the first year's average, against "steep growth from 0".</td><td>The UCM trend</td></tr>
+            <tr><td class="stage-no">3</td><th>UCM modelling</th><td>Bayesian regression of the UCM trend on long-term media (hero channels only), expert and baseline drivers (market, distribution, price, competitor media), with a linear trendline and a pre-period media residual. No trade or promotion.</td><td>Media pre-treated SES (α = 0.05), then Hill (K 0.3–0.9, S 1.1–3.0), then adstock (40–95% weekly), lag 0–2. Priors on contribution shares: baseline 70–80%, TV 20–25%, offline 2–5%, digital 2–5%, expert 0.1–0.5%.</td><td>Each lever's contribution to the trend</td></tr>
+            <tr><td class="stage-no">4</td><th>UCM analysis</th><td>Each lever's share of the trend over the period, as a ratio of sums.</td><td>—</td><td>Shares of the UCM trend</td></tr>
+            <tr><td class="stage-no">5</td><th>Nested modelling</th><td>The UCM trend added as one variable to a 2-year AO MMM model. Media, expert and negative-baseline variables fixed; positive-baseline variables re-estimated; the UCM prior iterated.</td><td>The AO MMM model's 2 years, the latest or the earlier.</td><td>The UCM's share of sales in that window</td></tr>
+            <tr><td class="stage-no">6</td><th>Retrofit</th><td>A scalar (UCM contribution ÷ trendline, e.g. 19%) carries the UCM to the other years: scalar × their trendline, taken proportionally out of their positive baseline factors. Only the UCM is retrofitted. Every other variable keeps its reported short-term contribution.</td><td>Backward (latest to earlier) or forward (earlier to latest). Assumes no step change at the boundary.</td><td>UCM contribution over all years</td></tr>
+            <tr><td class="stage-no">7</td><th>Nested model analysis</th><td>Each week, a lever's long-term contribution = its share of that week's trend × the UCM's contribution that week.</td><td>—</td><td>Weekly long-term contributions</td></tr>
+            <tr><td class="stage-no">8</td><th>Media wave analysis</th><td>Each channel's raw support split by calendar year, and each year's variable put through the same transformations so it carries into later years. Each week's long-term contribution is split in the ratio of these variables and summed per year of activity: the "indexed" long-term contribution.</td><td>Calendar years ("media is planned on a calendar year basis"). Years 1–2 reported.</td><td>Long-term contribution by year of activity; wave tables; multipliers; ROI</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>How the results fit together, using FR PDX</h3>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>Step</th><th>Result</th></tr></thead>
+          <tbody>
+            <tr><th>Short-term model alone</th><td>Baseline 95.8% of sales; total media (TV + digital) 3.4%</td></tr>
+            <tr><th>Nested model</th><td>The UCM takes <strong>20.3%</strong> of sales, all of it from the baseline (75.5% + 20.3% = 95.8%). Media are unchanged.</td></tr>
+            <tr><th>UCM model, shares of the trend (2022–25)</th><td>TV 10.0%, digital 4.8%, expert 0.6%, baseline 84.7%</td></tr>
+            <tr><th>Final TV</th><td>2.1% + 10.0% × 20.3% = <strong>4.1%</strong> (reported 4.2%) <span class="tick">✓</span></td></tr>
+            <tr><th>Final digital</th><td>1.3% + 4.8% × 20.3% = <strong>2.3%</strong> <span class="tick">✓</span></td></tr>
+            <tr><th>Final total media</th><td>3.4% becomes <strong>6.4%</strong>; multiplier <strong>1.90</strong> <span class="tick">✓</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>The team's clarifications, 16 October 2026</h3>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>#</th><th>Clarification</th></tr></thead>
+          <tbody>
+            <tr><td class="stage-no">T1</td><td>In the retrofit, <strong>only the UCM is retrofitted</strong>. Every other variable keeps the short-term contribution reported by the AO MMM model that covered those years.</td></tr>
+            <tr><td class="stage-no">T2</td><td>The retrofit can run <strong>either way</strong>: the latest 2 years retrofitted to the earlier 2, or the earlier 2 to the latest 2. FR PDX's primary model ended 2023 Q4, so that study most likely went forward.</td></tr>
+            <tr><td class="stage-no">T3</td><td><strong>Media waves:</strong> support is split by year, the adstock is applied to each year's variable so it flows into the next year, and each week's contribution is divided in their ratio.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================== 2 PROPOSED ===================== -->
+    <section id="proposed" aria-labelledby="proposed-h">
+      <h2 id="proposed-h"><span class="num">2</span>Proposed methodology</h2>
+
+      <h3>Principles</h3>
+      <div class="prose">
+        <ul>
+          <li>Keep the structure and vocabulary of the current method. Nothing here changes what LTE reports.</li>
+          <li>Reproduce today's numbers exactly first. Then change one thing at a time, and show each change's effect on one BMC side by side.</li>
+          <li>Fix what produces wrong numbers, improve what makes numbers fragile, and leave the rest optional.</li>
+          <li>Make every assumption-driven number visible, with a range.</li>
+        </ul>
+      </div>
+      <div class="legend-chips">
+        <span><span class="chip essential">Essential</span> fixes a wrong number</span>
+        <span><span class="chip recommended">Recommended</span> makes a number more robust</span>
+        <span><span class="chip optional">Optional</span> useful, not required</span>
+        <span><span class="chip decision">Decision</span> needs the team's choice</span>
+      </div>
+
+      <!-- ---------- A ---------- -->
+      <div class="group">
+        <h3>A. UCM extraction</h3>
+
+        <article class="imp" id="a1">
+          <div class="imp-head"><span class="imp-id">A1</span><h4>Fix the start-up fault in the UCM trend</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>Sales are fitted in raw units with the library's default start-up setting.</dd>
+            <dt>Issue</dt><dd>The trend starts far below sales and takes weeks to catch up: 42% of sales in week 1 of the France output, and about six weeks to reach 90% <span class="tick">✓</span>. Colombia starts at 52%, and the vendor's own example jumps from about 20K to 90K. The fault falls inside reported Year 1, roughly 5% of France's Year-1 trend, concentrated in the first quarter. The cause is a default start-up variance of 10⁶, tiny next to sales of 10⁵–10⁷.</dd>
+            <dt>Proposal</dt><dd>Scale sales before fitting and use exact ("diffuse") start-up initialisation. Keep the pre-period fill as a safeguard.</dd>
+            <dt>Benefit</dt><dd>A correct trend from the first week. Year 1 is no longer understated.</dd>
+            <dt>Cost</dt><dd>Low effort. Numbers move against past studies, so we show both side by side once. FR PDX's own trend chart does not show the fault, so that study may have corrected it by hand; the material does not say.</dd>
+          </dl>
+          <figure class="chart" id="chart-startup">
+            <p class="chart-title">FR PDX, first ten weeks of 2022: weekly sales and the UCM trend from the current method</p>
+            <div class="key-row" aria-hidden="true">
+              <span class="key"><i class="k-line1"></i>Weekly sales</span>
+              <span class="key"><i class="k-line2"></i>UCM trend, current method</span>
+            </div>
+            <div class="plot"></div>
+            <figcaption>The trend should sit near the level of sales from the first week. It starts at 5.2M against 12.4M of sales and reaches 90% of sales only in mid-February. Hover or use the arrow keys on the chart for each week's values.</figcaption>
+            <details class="twin">
+              <summary>Show the numbers</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Week of</th><th class="num">Sales (M)</th><th class="num">UCM trend (M)</th><th class="num">Trend ÷ sales</th></tr></thead>
+                  <tbody>
+                    <tr><td>3 Jan 2022</td><td class="num">12.36</td><td class="num">5.16</td><td class="num">42%</td></tr>
+                    <tr><td>10 Jan</td><td class="num">11.96</td><td class="num">6.29</td><td class="num">53%</td></tr>
+                    <tr><td>17 Jan</td><td class="num">12.32</td><td class="num">7.40</td><td class="num">60%</td></tr>
+                    <tr><td>24 Jan</td><td class="num">13.00</td><td class="num">8.47</td><td class="num">65%</td></tr>
+                    <tr><td>31 Jan</td><td class="num">14.12</td><td class="num">9.46</td><td class="num">67%</td></tr>
+                    <tr><td>7 Feb</td><td class="num">13.07</td><td class="num">10.35</td><td class="num">79%</td></tr>
+                    <tr><td>14 Feb</td><td class="num">12.01</td><td class="num">11.13</td><td class="num">93%</td></tr>
+                    <tr><td>21 Feb</td><td class="num">12.58</td><td class="num">11.78</td><td class="num">94%</td></tr>
+                    <tr><td>28 Feb</td><td class="num">14.11</td><td class="num">12.31</td><td class="num">87%</td></tr>
+                    <tr><td>7 Mar</td><td class="num">13.50</td><td class="num">12.72</td><td class="num">94%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </figure>
+        </article>
+
+        <article class="imp" id="a2">
+          <div class="imp-head"><span class="imp-id">A2</span><h4>Give the model dates, and keep the cycle only when it matters</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>No dates are given to the model, and the cycle is always included.</dd>
+            <dt>Issue</dt><dd>The "cycle" is not a business cycle. In the brand-level series it is a few thousandths of a percent of sales (France; Colombia's total), and its length is unconstrained: about 3 weeks in the France output.</dd>
+            <dt>Proposal</dt><dd>Give the model dates, so cycles are bounded to 1.5–12 years. Keep the cycle only if it is material (more than 0.5% of the level) or improves the fit, and report it.</dd>
+            <dt>Benefit</dt><dd>Interpretable components and a cleaner trend.</dd>
+            <dt>Cost</dt><dd>Low. A 4-year series cannot identify a business cycle anyway, so the cycle will usually drop out.</dd>
+          </dl>
+        </article>
+
+        <article class="imp" id="a3">
+          <div class="imp-head"><span class="imp-id">A3</span><h4>Set the trend smoothing in calendar time</h4><span class="chip essential">Essential</span><span class="chip decision">Decision</span></div>
+          <dl>
+            <dt>Today</dt><dd>HP λ = 300 for every cadence.</dd>
+            <dt>Issue</dt><dd>λ = 300 removes swings shorter than about 6 months on weekly data, but about 26 months on monthly data <span class="tick">✓</span>. "Long-term" then means different things by BMC. Keeping the 6-month meaning on monthly data needs λ ≈ 1.</dd>
+            <dt>Proposal</dt><dd>Agree the cut-off in months and derive λ for each cadence. Report the sensitivity at half and double the cut-off.</dd>
+            <dt>Benefit</dt><dd>The same meaning across BMCs, written down.</dd>
+            <dt>Cost</dt><dd>A decision. Long-term shares move with the cut-off, and we show that as a range.</dd>
+          </dl>
+          <div class="table-wrap" style="max-width: 34rem;">
+            <table>
+              <thead><tr><th>Shortest swing kept in the trend</th><th class="num">λ, weekly data</th><th class="num">λ, monthly data</th></tr></thead>
+              <tbody>
+                <tr><td>6 months (today's weekly practice)</td><td class="num">≈ 300</td><td class="num">≈ 1</td></tr>
+                <tr><td>12 months</td><td class="num">≈ 4,700</td><td class="num">≈ 14</td></tr>
+                <tr><td>24 months</td><td class="num">≈ 75,000</td><td class="num">≈ 215</td></tr>
+                <tr><td>λ = 300 as used today</td><td class="num">6 months</td><td class="num">26 months</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </article>
+
+        <article class="imp" id="a4">
+          <div class="imp-head"><span class="imp-id">A4</span><h4>Test for seasonality</h4><span class="chip recommended">Recommended</span></div>
+          <dl>
+            <dt>Today</dt><dd>The method says to test for seasonality; the notebooks never do.</dd>
+            <dt>Issue</dt><dd>Seasonality left in the trend shows up as "mid-term fluctuation" that the HP filter then has to remove.</dd>
+            <dt>Proposal</dt><dd>Test automatically (ACF and a fit comparison). Include a seasonal component when it improves the fit, and report the decision.</dd>
+            <dt>Benefit</dt><dd>A cleaner trend, with less reliance on the HP filter.</dd>
+            <dt>Cost</dt><dd>Weekly seasonality on 4 years is weakly identified, so keep it simple, with few harmonics.</dd>
+          </dl>
+        </article>
+
+        <article class="imp" id="a5">
+          <div class="imp-head"><span class="imp-id">A5</span><h4>Test that sales have a persistent component</h4><span class="chip recommended">Recommended</span></div>
+          <dl>
+            <dt>Today</dt><dd>Not tested.</dd>
+            <dt>Issue</dt><dd>Reading long-term effects off a trend assumes sales have a persistent component. Without one, the "trend" is smoothed noise.</dd>
+            <dt>Proposal</dt><dd>Test it: trend variance above zero, a comparison with a straight line, and standard unit-root tests. Flag BMCs that fail.</dd>
+            <dt>Benefit</dt><dd>Stops long-term claims on series that cannot support them.</dd>
+            <dt>Cost</dt><dd>Low.</dd>
+          </dl>
+        </article>
+
+        <article class="imp" id="a6">
+          <div class="imp-head"><span class="imp-id">A6</span><h4>Stabilise the end of the trend</h4><span class="chip recommended">Recommended</span></div>
+          <dl>
+            <dt>Today</dt><dd>The HP filter runs on the full sample.</dd>
+            <dt>Issue</dt><dd>The filter is least reliable at the end of the data, which is where the latest nested window sits. Each refresh revises last year's trend.</dd>
+            <dt>Proposal</dt><dd>Extend the series by a short forecast before smoothing and trim it after. Report how far the trend moved at each refresh.</dd>
+            <dt>Benefit</dt><dd>A more stable UCM in the latest window, with revisions visible.</dd>
+            <dt>Cost</dt><dd>Moderate.</dd>
+          </dl>
+        </article>
+
+        <article class="imp" id="a7">
+          <div class="imp-head"><span class="imp-id">A7</span><h4>Use a back-cast only to warm up the trend</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>With short history, 6 months are back-cast with a time-reversed seasonal forecast.</dd>
+            <dt>Issue</dt><dd>Sales can be back-cast; media cannot. If back-cast months enter a model, media effects are biased towards zero.</dd>
+            <dt>Proposal</dt><dd>Use back-cast months only to warm up the trend, and drop them before any model.</dd>
+            <dt>Benefit</dt><dd>No invented data in any regression.</dd>
+            <dt>Cost</dt><dd>None.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- B ---------- -->
+      <div class="group">
+        <h3>B. UCM modelling</h3>
+        <article class="imp" id="b1">
+          <div class="imp-head"><span class="imp-id">B1</span><h4>Show which long-term shares the data supports</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>Fit statistics are reported (FR PDX: R² 98.5%, MAPE 1.0%).</dd>
+            <dt>Issue</dt><dd>One smooth series regressed on other smooth series always fits well, so the fit does not validate the shares. The share priors (baseline 70–80%, TV 20–25%) do much of the work.</dd>
+            <dt>Proposal</dt><dd>For every coefficient, report whether the data moved it away from its prior. Run a placebo (media shifted in time) and a baseline-only model. Label the shares the data did not move.</dd>
+            <dt>Benefit</dt><dd>Readers can tell evidence from assumption.</dd>
+            <dt>Cost</dt><dd>Two extra small fits.</dd>
+          </dl>
+        </article>
+        <article class="imp" id="b2">
+          <div class="imp-head"><span class="imp-id">B2</span><h4>Extract the trend from base sales as a sensitivity</h4><span class="chip optional">Optional</span></div>
+          <dl>
+            <dt>Today</dt><dd>The trend is taken from total sales.</dd>
+            <dt>Issue</dt><dd>Long flights or promotions can leak into the trend and be credited to long-term media, which double counts them.</dd>
+            <dt>Proposal</dt><dd>Where a full-period short-term decomposition exists, also extract the trend from sales minus short-term media and trade.</dd>
+            <dt>Benefit</dt><dd>Less double counting.</dd>
+            <dt>Cost</dt><dd>Needs that decomposition, and differs from the vendor's trend.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- C ---------- -->
+      <div class="group">
+        <h3>C. Nested modelling</h3>
+        <article class="imp" id="c1">
+          <div class="imp-head"><span class="imp-id">C1</span><h4>Control and declare the UCM's share of sales</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>The UCM prior is iterated "after reviewing the results".</dd>
+            <dt>Issue</dt><dd>The UCM is a smoothed piece of sales itself, so it can absorb almost anything. Its share (FR PDX 20.3%) is driven by its prior and by which variables may give up volume. Repeated prior corrections do not converge; we have seen this on a previous project.</dd>
+            <dt>Proposal</dt><dd>Keep the locks on media, expert and negative baseline. Allow one prior correction at most. Re-run with the UCM prior at 0.5×, 1× and 1.5× and report the range. Audit where the UCM's volume came from, which should be the positive baseline only. Label the UCM share as assumption-driven when the data does not move it.</dd>
+            <dt>Benefit</dt><dd>The one number that scales every long-term result becomes transparent and bounded.</dd>
+            <dt>Cost</dt><dd>Two or three extra nested fits.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- D ---------- -->
+      <div class="group">
+        <h3>D. Retrofit</h3>
+        <article class="imp" id="d1">
+          <div class="imp-head"><span class="imp-id">D1</span><h4>Test the retrofit assumption</h4><span class="chip recommended">Recommended</span></div>
+          <dl>
+            <dt>Today</dt><dd>The scalar from one window is applied to the other, assuming no step change.</dd>
+            <dt>Issue</dt><dd>The retrofit's key assumption is never checked, and the retrofitted UCM sits in a decomposition that never contained it.</dd>
+            <dt>Proposal</dt><dd>Flag any week where the UCM would exceed the positive baseline, and any jump at the boundary. Where AO MMM models cover both 2-year windows, nest into both and compare the two scalars. The retrofit can run either way, so this is a direct test.</dd>
+            <dt>Benefit</dt><dd>The assumption is tested rather than assumed.</dd>
+            <dt>Cost</dt><dd>One extra nested fit where two models exist.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- E ---------- -->
+      <div class="group">
+        <h3>E. Media waves</h3>
+        <article class="imp" id="e1">
+          <div class="imp-head"><span class="imp-id">E1</span><h4>Split media waves at the stock, not at the saturated response</h4><span class="chip recommended">Recommended</span><span class="chip decision">Decision</span></div>
+          <dl>
+            <dt>Today</dt><dd>Each year's support goes through the whole chain, saturation (Hill) included, and each week is split in the ratio of the results.</dd>
+            <dt>Issue</dt><dd>Hill is nonlinear, so the split depends on the curve's shape. A carried-over stock holding 14.3% of the total gets 23.4% of the credit at S = 1, 6.1% at S = 2 and 1.2% at S = 3 <span class="tick">✓</span>. The method expects S above 1 for long-term media, so spill-over, which is what waves measure, is under-credited. The deck's worked example has no Hill, so it does not show this.</dd>
+            <dt>Proposal</dt><dd>Split the linear steps (SES, adstock, lag) exactly by year. At the Hill step, give each year its share of the stock.</dd>
+            <dt>Benefit</dt><dd>Exact, adds up, and independent of the curve. Identical to today when there is no Hill.</dd>
+            <dt>Cost</dt><dd>Needs each year's pre-Hill stock from the transformation step. Spill-over shares rise for S-shaped channels, so run both methods side by side first.</dd>
+          </dl>
+          <figure class="chart" id="chart-hill">
+            <p class="chart-title">Share of a week's long-term effect credited to a carried-over wave that holds 14.3% of the media stock</p>
+            <div class="key-row" aria-hidden="true">
+              <span class="key"><i class="k-bar1"></i>Credit under today's split, by Hill slope S</span>
+              <span class="key"><i class="k-ref"></i>Its share of the stock (14.3%), which the stock split gives at any S</span>
+              <span class="key"><i class="k-band"></i>Slopes the method expects for long-term media (S 1.1–3.0)</span>
+            </div>
+            <div class="plot"></div>
+            <figcaption>Example: a carried-over stock of 0.1 next to a current stock of 0.6, half-saturation K = 0.5 (in units of peak activity). The further a bar sits from the line, the more the split depends on the curve rather than on the stock.</figcaption>
+            <details class="twin">
+              <summary>Show the numbers</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Hill slope S</th><th class="num">Credit, today's split</th><th class="num">Share of the stock</th></tr></thead>
+                  <tbody>
+                    <tr><td>0.8</td><td class="num">28.7%</td><td class="num">14.3%</td></tr>
+                    <tr><td>1.0</td><td class="num">23.4%</td><td class="num">14.3%</td></tr>
+                    <tr><td>1.5</td><td class="num">12.6%</td><td class="num">14.3%</td></tr>
+                    <tr><td>2.0</td><td class="num">6.1%</td><td class="num">14.3%</td></tr>
+                    <tr><td>3.0</td><td class="num">1.2%</td><td class="num">14.3%</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </figure>
+        </article>
+        <article class="imp" id="e2">
+          <div class="imp-head"><span class="imp-id">E2</span><h4>Project the wave tail beyond the data</h4><span class="chip optional">Optional</span></div>
+          <dl>
+            <dt>Today</dt><dd>Years 1–2 are reported, and the effect beyond the data is ignored.</dd>
+            <dt>Issue</dt><dd>Part of a wave's effect lies after the last date; the method's own example puts it at 13% for Year 3 and 47% for Year 4. With 3–3.5 years of data even Year 2 is truncated, without a flag.</dd>
+            <dt>Proposal</dt><dd>Project each wave's remaining effect with no further activity, and report the share that is unobserved.</dd>
+            <dt>Benefit</dt><dd>An honest Year-2 wave.</dd>
+            <dt>Cost</dt><dd>Assumes the scalar and coefficients hold after the data.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- F ---------- -->
+      <div class="group">
+        <h3>F. Reporting</h3>
+        <article class="imp" id="f1">
+          <div class="imp-head"><span class="imp-id">F1</span><h4>Report the multiplier on a stated basis</h4><span class="chip essential">Essential</span></div>
+          <dl>
+            <dt>Today</dt><dd>One multiplier is reported, with the basis unstated.</dd>
+            <dt>Issue</dt><dd>The method says long-term contributions are "indexed", that is, re-booked to the year of the activity. FR PDX's waves are indexed (TV about 2.4 <span class="tick">✓</span>), but its ROI slide is not: TV 2.03, which matches the long-term effect realised within 2022–23 (about 2.1 reconstructed <span class="tick">✓</span>).</dd>
+            <dt>Proposal</dt><dd>Report both, labelled. Indexed shows what the year's money bought, the investment view. Non-indexed shows how much of the year's sales is long-term, the calendar view.</dd>
+            <dt>Benefit</dt><dd>No ambiguity in the headline multiplier.</dd>
+            <dt>Cost</dt><dd>None.</dd>
+          </dl>
+          <figure class="chart" id="chart-mult">
+            <p class="chart-title">FR PDX TV multiplier, (short + long term) ÷ short term, on each basis</p>
+            <div class="plot"></div>
+            <figcaption>A multiplier of 1 means no long-term effect. The same TV activity reads 2.03 or about 2.4 depending on whether the long-term effect is counted where it is realised or booked back to the activity year.</figcaption>
+            <details class="twin">
+              <summary>Show the numbers</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead><tr><th>Basis</th><th class="num">TV multiplier</th><th>Source</th></tr></thead>
+                  <tbody>
+                    <tr><td>Non-indexed: long-term effect realised within 2022–23</td><td class="num">2.03</td><td>FR PDX slide 13, as reported</td></tr>
+                    <tr><td>Indexed: all long-term effect of the 2022 activity</td><td class="num">2.44</td><td>FR PDX slide 15: 100 ÷ 41</td></tr>
+                    <tr><td>Indexed: all long-term effect of the 2023 activity</td><td class="num">2.38</td><td>FR PDX slide 15: 100 ÷ 42</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </details>
+          </figure>
+        </article>
+        <article class="imp" id="f2">
+          <div class="imp-head"><span class="imp-id">F2</span><h4>Show ranges, not only points</h4><span class="chip recommended">Recommended</span></div>
+          <dl>
+            <dt>Today</dt><dd>Point estimates only.</dd>
+            <dt>Issue</dt><dd>Nothing shows how firm a number is.</dd>
+            <dt>Proposal</dt><dd>Show the range from the sensitivity runs (cut-off ½× and 2×, seasonal on or off, UCM prior 0.5×–1.5×) beside every headline number.</dd>
+            <dt>Benefit</dt><dd>Decision-makers see how firm each number is.</dd>
+            <dt>Cost</dt><dd>Compute only.</dd>
+          </dl>
+        </article>
+        <article class="imp" id="f3">
+          <div class="imp-head"><span class="imp-id">F3</span><h4>Keep the UCM at brand level</h4><span class="chip decision">Decision</span></div>
+          <dl>
+            <dt>Today</dt><dd>The method works at brand level, but one notebook runs the UCM per pool.</dd>
+            <dt>Issue</dt><dd>Pool-level trends do not add up to the brand's: a 4% gap <span class="tick">✓</span>.</dd>
+            <dt>Proposal</dt><dd>Brand level by default. In a pooled nested model, enter the brand trend in every pool and sum the results.</dd>
+            <dt>Benefit</dt><dd>Adds up by construction.</dd>
+            <dt>Cost</dt><dd>None.</dd>
+          </dl>
+        </article>
+      </div>
+
+      <!-- ---------- validation ---------- -->
+      <h3>Validation strategy (new)</h3>
+      <p class="prose">The current method has no formal validation between stages. We propose a gate at every stage: a check, a pass mark agreed in advance, and a defined action if it fails. The gates are reported in every study.</p>
+      <div class="table-wrap wide">
+        <table>
+          <thead><tr><th>Gate</th><th>Check</th><th>Pass mark (proposed)</th><th>If it fails</th></tr></thead>
+          <tbody>
+            <tr><th>0 · Reproduce today</th><td>Re-run the current method on FR PDX and match its published outputs</td><td>UCM trend to 6 decimals; final shares within ±0.1 pp; wave and multiplier tables exact</td><td>Change nothing until it passes</td></tr>
+            <tr><th>1 · Data</th><td>Continuity; step changes between stitched sources; coverage of the main drivers; at least 4 years</td><td>No unexplained break; a level shift at a source boundary under 15%</td><td>Fix upstream and document restatements, as FR PDX did</td></tr>
+            <tr><th>2 · UCM extraction</th><td>Optimiser converged and stable from several starting points; residual tests (autocorrelation, normality, constant variance); start-up check; persistent-component test; comparison with an alternative trend model</td><td>First-week trend within ±5% of the local sales level; tests pass or are flagged</td><td>Refit and flag; no long-term claims on a non-persistent trend</td></tr>
+            <tr><th>3 · UCM model</th><td>Sampler convergence; prior against posterior for every coefficient; placebo (media shifted ±26 weeks); baseline-only comparison; residual autocorrelation</td><td>Real media beat at least 95% of placebo fits; coefficients the data did not move are labelled</td><td>Re-specify with fewer channels, or label as assumption</td></tr>
+            <tr><th>4 · Nested model</th><td>Without the UCM it reproduces the AO MMM model; donor audit; UCM prior sweep; the scalar is constant</td><td>Each locked variable within ±3% of the AO MMM model; the UCM's volume comes only from the positive baseline; the UCM-share range is reported</td><td>Fix the locked priors, or restrict the donors</td></tr>
+            <tr><th>5 · Retrofit</th><td>UCM at or below the positive baseline in every week; continuity at the boundary; two-way scalar comparison where possible</td><td>No flagged week; the two scalars within an agreed band, for example ±20%</td><td>Investigate the step change (restatement, distribution change) and report the gap</td></tr>
+            <tr><th>6 · Waves</th><td>The wave variables add up to the total; each wave sums to 100%; the unobserved tail</td><td>Additivity within ±1%, or the stock split used; 100% exactly</td><td>Use the stock split, and report the tail</td></tr>
+            <tr><th>7 · Reconciliation</th><td>Final decomposition equals actual sales every week; shares sum to 100%</td><td>Exact</td><td>Stop: an arithmetic error</td></tr>
+            <tr><th>8 · Robustness</th><td>Sensitivity grid; refresh stability (drop or add one quarter)</td><td>Year-1 long-term share moves less than an agreed band, for example ±1 pp</td><td>Report the range and widen the caveat</td></tr>
+            <tr><th>9 · External</th><td>Multipliers against benchmarks (oral care and all category, FR PDX slide 14); the trend against brand-health indicators</td><td>Within benchmark ranges, or explained</td><td>Explain, or revisit the specification</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note"><strong>Before any client study, a simulation test.</strong> We simulate a brand with a known long-term media effect, run the whole pipeline and check the effect is recovered within a stated band. This shows the method's limits before a client number depends on them.</p>
+    </section>
+
+    <!-- ===================== 3 COMPARISON ===================== -->
+    <section id="compare" aria-labelledby="compare-h">
+      <h2 id="compare-h"><span class="num">3</span>Current vs proposed</h2>
+      <div class="table-wrap wide">
+        <table>
+          <thead><tr><th>Stage</th><th>Current</th><th>Proposed</th><th>Why</th><th>Expected effect on reported numbers</th></tr></thead>
+          <tbody>
+            <tr><th>1 · Data stitching</th><td>3.5–4 years or more; brand level; back-cast or year-average fill</td><td>At least 4 years (3–3.5 flagged); brand level; back-cast only as warm-up; step-change check</td><td>No invented data in models</td><td>None on clean data</td></tr>
+            <tr><th>2 · UCM extraction</th><td>Raw-unit fit with the default start-up; no dates; cycle always on; λ = 300 for any cadence</td><td>Scaled fit with exact start-up; dated; cycle only if material; seasonality tested; cut-off in months; end-of-sample handling; diagnostics</td><td>Removes the Year-1 fault and gives "long-term" the same meaning across BMCs</td><td>Year-1 UCM and long-term contributions rise; the rest depends on the agreed cut-off</td></tr>
+            <tr><th>3 · UCM modelling</th><td>Share priors; fit statistics</td><td>The same, plus prior-against-data evidence, placebo, baseline-only model and labels</td><td>Evidence and assumption separated</td><td>None; labels only</td></tr>
+            <tr><th>4 · UCM analysis</th><td>Ratio of sums</td><td>The same</td><td>—</td><td>None</td></tr>
+            <tr><th>5 · Nested modelling</th><td>Locks; UCM prior iterated</td><td>The same locks; one correction at most; prior sweep; donor audit; reproduction of the AO MMM model</td><td>A bounded, transparent UCM share</td><td>The UCM share is reported with a range</td></tr>
+            <tr><th>6 · Retrofit</th><td>UCM only; either direction; scalar × trendline from the positive baseline</td><td>The same, plus boundary flags and a two-way scalar test</td><td>The key assumption is tested</td><td>None unless a check fails</td></tr>
+            <tr><th>7 · Nested model analysis</th><td>Weekly share × UCM</td><td>The same</td><td>—</td><td>None</td></tr>
+            <tr><th>8 · Media waves</th><td>Each year's variable through the full chain; weekly ratio</td><td>Split at the stock; tail projected; additivity reported</td><td>Removes a bias that depends on the curve's shape</td><td>Spill-over into later years rises for S-shaped channels</td></tr>
+            <tr><th>9 · Reporting</th><td>One multiplier, basis unstated; point estimates</td><td>Indexed and non-indexed; ranges</td><td>No ambiguity</td><td>FR PDX TV, for example: 2.03 (non-indexed) and about 2.4 (indexed), both shown</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================== 4 PIPELINE ===================== -->
+    <section id="pipeline" aria-labelledby="pipeline-h">
+      <h2 id="pipeline-h"><span class="num">4</span>The complete modelling pipeline</h2>
+      <p class="lead">The current eight stages, with the improvements in place, a feasibility step in front and a reporting step at the end. Two models are fitted: the UCM model on the trend, and the nested model on sales.</p>
+
+      <figure class="diagram">
+        <div class="diagram-scroll">
+          <svg viewBox="0 0 980 420" role="img" aria-label="Pipeline: feasibility, data stitching and UCM extraction feed two models. The UCM model uses the trend as its target; the nested model uses it as a variable inside the AO MMM model. The nested model's scalar drives the retrofit; the UCM model's shares and the retrofitted UCM feed the nested model analysis, then the media wave analysis and reporting.">
+            <defs>
+              <marker id="pl-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M0,0 L10,5 L0,10 z" fill="currentColor"/>
+              </marker>
+            </defs>
+
+            <!-- edges -->
+            <line class="dg-edge" x1="210" y1="56" x2="268" y2="56" marker-end="url(#pl-arrow)"/>
+            <line class="dg-edge" x1="460" y1="56" x2="518" y2="56" marker-end="url(#pl-arrow)"/>
+            <!-- fork from UCM extraction -->
+            <line class="dg-edge" x1="615" y1="92" x2="615" y2="174" marker-end="url(#pl-arrow)"/>
+            <polyline class="dg-edge" points="615,134 115,134 115,174" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="365" y="127" text-anchor="middle">trend τ, as the target</text>
+            <text class="dg-label" x="607" y="160" text-anchor="end">trend τ, as a variable</text>
+            <!-- AO MMM input -->
+            <line class="dg-edge" x1="865" y1="92" x2="865" y2="174" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="873" y="140">reported ST</text>
+            <polyline class="dg-edge" points="800,92 800,116 690,116 690,174" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="745" y="109" text-anchor="middle">nest into</text>
+            <!-- layer 2 -->
+            <line class="dg-edge" x1="210" y1="212" x2="268" y2="212" marker-end="url(#pl-arrow)"/>
+            <line class="dg-edge" x1="710" y1="212" x2="768" y2="212" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="739" y="204" text-anchor="middle">scalar κ</text>
+            <!-- into nested model analysis -->
+            <line class="dg-edge" x1="365" y1="248" x2="365" y2="328" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="373" y="292">shares of τ</text>
+            <polyline class="dg-edge" points="865,248 865,300 430,300 430,328" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="650" y="293" text-anchor="middle">UCM in every week, κ × τ</text>
+            <!-- layer 3 -->
+            <line class="dg-edge" x1="460" y1="366" x2="518" y2="366" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="489" y="358" text-anchor="middle">weekly LT</text>
+            <line class="dg-edge" x1="710" y1="366" x2="768" y2="366" marker-end="url(#pl-arrow)"/>
+            <text class="dg-label" x="739" y="358" text-anchor="middle">indexed LT</text>
+
+            <!-- layer 1 boxes -->
+            <rect class="dg-box" x="20" y="20" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="32" y="44">0 · Feasibility</text>
+            <text class="dg-desc" x="32" y="64">≥ 4 years; set the windows</text>
+            <text class="dg-tag" x="32" y="82">checks</text>
+
+            <rect class="dg-box" x="270" y="20" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="282" y="44">1 · Data stitching</text>
+            <text class="dg-desc" x="282" y="64">pools summed to the brand</text>
+            <text class="dg-tag" x="282" y="82">gate 1</text>
+
+            <rect class="dg-box-improved" x="520" y="20" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="532" y="44">2 · UCM extraction</text>
+            <text class="dg-desc" x="532" y="64">scaled fit; cut-off in months</text>
+            <text class="dg-tag-improved" x="532" y="82">gate 2 · improved</text>
+
+            <rect class="dg-box-input" x="770" y="20" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="782" y="44">AO MMM model(s)</text>
+            <text class="dg-desc" x="782" y="64">latest or earlier 2 years</text>
+            <text class="dg-tag" x="782" y="82">input</text>
+
+            <!-- layer 2 boxes -->
+            <rect class="dg-box-improved" x="20" y="176" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="32" y="200">3 · UCM modelling</text>
+            <text class="dg-desc" x="32" y="220">τ ~ LT media + drivers</text>
+            <text class="dg-tag-improved" x="32" y="238">gate 3 · improved</text>
+
+            <rect class="dg-box" x="270" y="176" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="282" y="200">4 · UCM analysis</text>
+            <text class="dg-desc" x="282" y="220">each lever's share of τ</text>
+            <text class="dg-tag" x="282" y="238">no change</text>
+
+            <rect class="dg-box-improved" x="520" y="176" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="532" y="200">5 · Nested modelling</text>
+            <text class="dg-desc" x="532" y="220">AO MMM + τ; media locked</text>
+            <text class="dg-tag-improved" x="532" y="238">gate 4 · improved</text>
+
+            <rect class="dg-box-improved" x="770" y="176" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="782" y="200">6 · Retrofit</text>
+            <text class="dg-desc" x="782" y="220">UCM only; either direction</text>
+            <text class="dg-tag-improved" x="782" y="238">gate 5 · improved</text>
+
+            <!-- layer 3 boxes -->
+            <rect class="dg-box" x="270" y="330" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="282" y="354">7 · Nested model analysis</text>
+            <text class="dg-desc" x="282" y="374">LT = κ × contribution to τ</text>
+            <text class="dg-tag" x="282" y="392">gate 7</text>
+
+            <rect class="dg-box-improved" x="520" y="330" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="532" y="354">8 · Media wave analysis</text>
+            <text class="dg-desc" x="532" y="374">split at the stock</text>
+            <text class="dg-tag-improved" x="532" y="392">gate 6 · improved</text>
+
+            <rect class="dg-box-improved" x="770" y="330" width="190" height="72" rx="6"/>
+            <text class="dg-title" x="782" y="354">9 · Reporting</text>
+            <text class="dg-desc" x="782" y="374">both bases; ranges; labels</text>
+            <text class="dg-tag-improved" x="782" y="392">gates 8–9 · improved</text>
+          </svg>
+        </div>
+        <figcaption>The trend τ is used twice: as the target of the UCM model and as a variable in the nested model. The nested model's scalar κ carries the UCM to the other years, and the UCM model's shares turn the UCM into long-term contributions by lever. Boxes with a blue outline are the stages this proposal changes; each gate is listed in section 2.</figcaption>
+      </figure>
+
+      <figure class="diagram">
+        <div class="diagram-scroll">
+          <svg viewBox="0 0 980 282" role="img" aria-label="Which years are which. Backward retrofit: the AO MMM model of Years 3 and 4 is nested and the scalar carries the UCM back to Years 1 and 2. Forward retrofit: the AO MMM model of Years 1 and 2 is nested and the scalar carries the UCM forward to Years 3 and 4. In both cases Years 1 and 2 are reported; Years 3 and 4 are controlled for but not reported.">
+            <defs>
+              <marker id="win-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path class="dg-arrowhead-accent" d="M0,0 L10,5 L0,10 z"/>
+              </marker>
+            </defs>
+            <rect class="dg-future" x="818" y="6" width="162" height="270" rx="6"/>
+            <line class="dg-sep" x1="332" y1="12" x2="332" y2="270"/>
+            <line class="dg-sep" x1="494" y1="12" x2="494" y2="270"/>
+            <line class="dg-sep" x1="656" y1="12" x2="656" y2="270"/>
+            <text class="dg-head" x="251" y="26" text-anchor="middle">Year 1</text>
+            <text class="dg-head" x="413" y="26" text-anchor="middle">Year 2</text>
+            <text class="dg-head" x="575" y="26" text-anchor="middle">Year 3</text>
+            <text class="dg-head" x="737" y="26" text-anchor="middle">Year 4</text>
+            <text class="dg-head" x="899" y="26" text-anchor="middle">Future</text>
+            <text class="dg-sub" x="899" y="41" text-anchor="middle">yet to be observed</text>
+
+            <!-- backward -->
+            <text class="dg-head" x="14" y="84">Backward retrofit</text>
+            <text class="dg-sub" x="14" y="100">nested in the latest 2 years</text>
+            <rect class="dg-retro" x="176" y="68" width="312" height="44" rx="5"/>
+            <text class="dg-block" x="332" y="95" text-anchor="middle">Retrofit: UCM = κ × trend</text>
+            <rect class="dg-nested" x="500" y="68" width="312" height="44" rx="5"/>
+            <text class="dg-block" x="656" y="95" text-anchor="middle">Nested: AO MMM model + UCM</text>
+            <path class="dg-edge-accent" d="M 600 66 C 578 44, 422 44, 402 64" marker-end="url(#win-arrow)"/>
+            <text class="dg-label-accent" x="500" y="45" text-anchor="middle">κ</text>
+
+            <!-- forward -->
+            <text class="dg-head" x="14" y="170">Forward retrofit</text>
+            <text class="dg-sub" x="14" y="186">nested in the earlier 2 years</text>
+            <rect class="dg-nested" x="176" y="154" width="312" height="44" rx="5"/>
+            <text class="dg-block" x="332" y="181" text-anchor="middle">Nested: AO MMM model + UCM</text>
+            <rect class="dg-retro" x="500" y="154" width="312" height="44" rx="5"/>
+            <text class="dg-block" x="656" y="181" text-anchor="middle">Retrofit: UCM = κ × trend</text>
+            <path class="dg-edge-accent" d="M 402 152 C 422 130, 578 130, 598 150" marker-end="url(#win-arrow)"/>
+            <text class="dg-label-accent" x="500" y="131" text-anchor="middle">κ</text>
+
+            <!-- reported -->
+            <text class="dg-head" x="14" y="244">Reported</text>
+            <text class="dg-sub" x="14" y="260">in both cases</text>
+            <rect class="dg-report" x="176" y="224" width="312" height="40" rx="5"/>
+            <text class="dg-block" x="332" y="249" text-anchor="middle">Short + long term, by lever</text>
+            <text class="dg-muted" x="656" y="249" text-anchor="middle">Controlled for, not reported</text>
+            <text class="dg-muted" x="899" y="242" text-anchor="middle">Beyond the data:</text>
+            <text class="dg-muted" x="899" y="258" text-anchor="middle">projected (E2)</text>
+          </svg>
+        </div>
+        <figcaption>Whichever AO MMM model is used decides the direction. Only the UCM crosses the boundary; every other variable in the retrofitted years keeps its reported short-term contribution. Where models exist for both windows, nesting into both tests the retrofit directly (D1).</figcaption>
+      </figure>
+
+      <div class="table-wrap wide">
+        <table>
+          <thead><tr><th>Stage</th><th>Inputs</th><th>What happens</th><th>Outputs</th><th>Gate</th></tr></thead>
+          <tbody>
+            <tr><th>0 · Feasibility and windows</th><td>Model database; the AO MMM model to nest into</td><td>Check at least 4 years (3–3.5 flagged; under 3 refused); set the nested window, the retrofit window and the reported years</td><td>Window plan</td><td>—</td></tr>
+            <tr><th>1 · Data stitching</th><td>Historical and latest data</td><td>Append; aggregate pools to the brand; check step changes</td><td>Brand-level panel</td><td>1</td></tr>
+            <tr><th>2 · UCM extraction</th><td>Brand sales, plus an optional warm-up back-cast</td><td>The improved extraction (A1–A7)</td><td>UCM trend τ; diagnostics</td><td>2</td></tr>
+            <tr><th>3 · UCM modelling</th><td>τ; long-term media (SES, Hill, adstock, from the transformation step); expert; drivers; linear trend; media residual</td><td>Bayesian regression with share priors; placebo; baseline-only model</td><td>Contribution of each lever to τ</td><td>3</td></tr>
+            <tr><th>4 · UCM analysis</th><td>Stage 3</td><td>Shares of τ as a ratio of sums, by period</td><td>Share table</td><td>—</td></tr>
+            <tr><th>5 · Nested modelling</th><td>The AO MMM model (data, coefficients); τ</td><td>Stage A reproduces the AO MMM model; Stage B adds the UCM with locks and donors; prior sweep; at most one correction</td><td>UCM contribution in the nested window; scalar κ; donor audit</td><td>4</td></tr>
+            <tr><th>6 · Retrofit</th><td>κ; τ in the other years; their reported short-term decomposition</td><td>UCM = κ × τ; positive baseline reduced proportionally; checks</td><td>UCM over all years</td><td>5</td></tr>
+            <tr><th>7 · Nested model analysis</th><td>Stages 3–6</td><td>Long-term contribution = κ × contribution to τ, weekly; final = short + long term</td><td>Long-term and total contributions; reconciliation</td><td>7</td></tr>
+            <tr><th>8 · Media wave analysis</th><td>Weekly long-term contributions; each year's wave variables and their pre-Hill stock</td><td>Stock split; indexed long-term contribution; tail</td><td>Wave tables; indexed long-term contribution</td><td>6</td></tr>
+            <tr><th>9 · Reporting</th><td>All of the above; optional spend and price</td><td>Tables by lever and year; multipliers on both bases; ROI (optional); sensitivity ranges; labels</td><td>The LTE report</td><td>8, 9</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- ===================== 5 ARITHMETIC ===================== -->
+    <section id="arithmetic" aria-labelledby="arith-h">
+      <h2 id="arith-h"><span class="num">5</span>Contribution calculations and reconciliation</h2>
+
+      <h3>The chain</h3>
+      <ol class="steps">
+        <li><strong>UCM model.</strong> Each lever's contribution to the trend each week (c), and the trend itself (τ).</li>
+        <li><strong>Share of the trend.</strong> p = c ÷ τ each week. Over a period, Σc ÷ Στ: a ratio of sums, not an average of weekly shares.</li>
+        <li><strong>Nested model.</strong> The UCM's contribution to sales in the nested window, U.</li>
+        <li><strong>Scalar.</strong> κ = U ÷ τ, constant over the nested window. In FR PDX the UCM is 20.3% of sales; the deck's example scalar is 19% of the trendline.</li>
+        <li><strong>Retrofit.</strong> U = κ × τ in every week of the other years. The positive baseline factors of the reported decomposition are reduced proportionally, so the reported total is unchanged. Nothing else is touched.</li>
+        <li><strong>Long-term contribution</strong> of lever i: L = p × U = κ × c, every week, in both windows.</li>
+        <li><strong>Final decomposition.</strong> Lever i = its short-term contribution + L. Baseline = the short-term baseline after the UCM's carve-out, plus the UCM model's baseline share of U. The UCM row disappears and the total equals actual sales.</li>
+        <li><strong>Waves.</strong> Each week's L is split by year of activity. Summed per year, it gives the indexed long-term contribution.</li>
+        <li><strong>Multipliers.</strong> (short + long term) ÷ short term, on both bases. ROI = value ÷ spend, optional, and needs a price.</li>
+      </ol>
+
+      <h3>Worked example: FR PDX total decomposition <span class="tick">✓</span></h3>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>Lever</th><th class="num">Short-term (nested)</th><th class="num">Share of trend × UCM share</th><th class="num">Computed</th><th class="num">Reported</th></tr></thead>
+          <tbody>
+            <tr><th>Baseline</th><td class="num">75.5%</td><td class="num">84.7% × 20.3% = 17.2%</td><td class="num">92.7%</td><td class="num">92.7%</td></tr>
+            <tr><th>TV</th><td class="num">2.1%</td><td class="num">10.0% × 20.3% = 2.0%</td><td class="num">4.1%</td><td class="num">4.2%</td></tr>
+            <tr><th>Expert</th><td class="num">0.6%</td><td class="num">0.6% × 20.3% = 0.1%</td><td class="num">0.7%</td><td class="num">0.7%</td></tr>
+            <tr><th>Digital media</th><td class="num">1.3%</td><td class="num">4.8% × 20.3% = 1.0%</td><td class="num">2.3%</td><td class="num">2.3%</td></tr>
+            <tr><th>Trade</th><td class="num">0.1%</td><td class="num">—</td><td class="num">0.1%</td><td class="num">0.1%</td></tr>
+            <tr class="total"><th>Total media (TV + digital)</th><td class="num">3.4%</td><td class="num">14.8% × 20.3% = 3.0%</td><td class="num">6.4%</td><td class="num">6.4–6.5%</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Worked example: one week, from the methodology deck <span class="tick">✓</span></h3>
+      <p class="prose">In the week of 6 January 2020, TV contributes 2,193 to a UCM trend of 253,063, and the nested model's UCM contribution is 51,363.</p>
+      <div class="formula-inline">TV long-term = 2,193 ÷ 253,063 × 51,363 = <strong>445.10</strong> units</div>
+
+      <h3>Worked example: media waves, from the Ekimetrics deck <span class="tick">✓</span></h3>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>Year</th><th class="num">Week's long-term contribution</th><th>Wave variables (W1, W2, W3, W4)</th><th>Shares</th><th>Split</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td class="num">100</td><td>10, 0, 0, 0</td><td>100%, 0, 0, 0</td><td>100, 0, 0, 0</td></tr>
+            <tr><td>2</td><td class="num">150</td><td>2.5, 15, 0, 0</td><td>14%, 86%, 0, 0</td><td>21, 129, 0, 0</td></tr>
+            <tr><td>3</td><td class="num">200</td><td>0.5, 4.5, 20, 0</td><td>2%, 18%, 80%, 0</td><td>4, 36, 160, 0</td></tr>
+            <tr><td>4</td><td class="num">250</td><td>0, 1, 6.5, 25</td><td>0, 3%, 20%, 77%</td><td>0, 8, 50, 192</td></tr>
+            <tr class="total"><td>Total</td><td class="num">700</td><td></td><td></td><td>125, 172, 210, 192</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">Wave 1's indexed long-term contribution is 125: realised as 100 in year 1, 21 in year 2 and 4 in year 3. Exact figures are 125.4, 172.3, 210.0 and 192.3, summing to 700.</p>
+
+      <h3>Worked example: multipliers <span class="tick">✓</span></h3>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>Measure</th><th class="num">Value</th><th>How</th></tr></thead>
+          <tbody>
+            <tr><th>FR PDX, all media, effect-weighted</th><td class="num">1.90</td><td>Σ total effect ÷ Σ short-term effect = 7.237M ÷ 3.811M</td></tr>
+            <tr><th>FR PDX TV, non-indexed</th><td class="num">2.03</td><td>Long-term effect realised within 2022–23, as reported</td></tr>
+            <tr><th>FR PDX TV, indexed, 2022 activity</th><td class="num">2.44</td><td>100 ÷ 41 from the 2022 wave</td></tr>
+            <tr><th>FR PDX TV, indexed, 2023 activity</th><td class="num">2.38</td><td>100 ÷ 42 from the 2023 wave</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Reconciliation checks, all exact</h3>
+      <ol class="steps">
+        <li>The nested model's components add to fitted sales, and with the residual to actual sales.</li>
+        <li>The scalar κ is the same in every week of the nested window.</li>
+        <li>The UCM model's contributions add to the trend.</li>
+        <li>The long-term contributions across levers, plus the long-term baseline, equal the UCM contribution in every week.</li>
+        <li>In retrofitted years the reported total is unchanged; only the positive baseline is reduced, by exactly the UCM's contribution.</li>
+        <li>The final decomposition equals actual sales in every week.</li>
+        <li>The wave splits add up to each week's long-term contribution, and each wave's table sums to 100%.</li>
+        <li>Percentages sum to 100% in every period.</li>
+      </ol>
+      <p class="note"><strong>Two arithmetics, kept apart.</strong> Weekly tables are sums of weekly central estimates, so they add up exactly. Uncertainty intervals come from the full posterior and are reported separately; they do not add, by design.</p>
+    </section>
+
+    <!-- ===================== 6 MATHS ===================== -->
+    <section id="maths" aria-labelledby="maths-h">
+      <h2 id="maths-h"><span class="num">6</span>Mathematical definitions</h2>
+      <div class="table-wrap mid">
+        <table>
+          <thead><tr><th>Symbol</th><th>Meaning</th></tr></thead>
+          <tbody>
+            <tr><td>t, i, g</td><td>Week; a media or expert lever; a pool of the AO MMM model</td></tr>
+            <tr><td>N, R, H</td><td>The nested window, the retrofit window, and all years (H = N ∪ R)</td></tr>
+            <tr><td>S<sub>t</sub></td><td>Observed sales</td></tr>
+            <tr><td>τ<sub>t</sub></td><td>UCM trend, brand level</td></tr>
+            <tr><td>c<sub>t,i</sub></td><td>Contribution of lever i to the trend (UCM model)</td></tr>
+            <tr><td>C<sub>t,i</sub></td><td>Short-term contribution of i to sales (nested model in N; reported in R)</td></tr>
+            <tr><td>U<sub>t</sub></td><td>The UCM's contribution to sales</td></tr>
+            <tr><td>κ</td><td>The UCM scalar</td></tr>
+            <tr><td>L<sub>t,i</sub></td><td>Long-term contribution of i to sales</td></tr>
+            <tr><td>a<sub>t,i</sub></td><td>Raw support of channel i</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <div class="math-grid">
+        <div>
+          <h4>UCM extraction: smooth trend</h4>
+<pre class="formula">S_t     = μ_t + [γ_t] + ψ_t + ε_t       level μ, seasonal γ (if tested in), cycle ψ, noise ε
+μ_(t+1) = μ_t + β_t                     the level has no shock of its own
+β_(t+1) = β_t + ζ_t                     the growth (slope) drifts slowly
+τ⁰_t    = μ̂_t + β̂_t                     "Level + Trend", equal to next week's level</pre>
+        </div>
+        <div>
+          <h4>HP smoothing and the cut-off</h4>
+<pre class="formula">τ = argmin  Σ (τ⁰_t − τ_t)²  +  λ Σ (τ_(t+1) − 2τ_t + τ_(t−1))²
+half-gain period   P(λ) = 2π / arccos(1 − 1 / (2√λ))        P(300) = 26.1 periods  ✓
+same cut-off on another cadence:   λ_monthly = λ_weekly × (12/52)⁴</pre>
+        </div>
+        <div>
+          <h4>Long-term media pre-treatment (from the transformation step)</h4>
+<pre class="formula">SES       e_t = α·a_t + (1 − α)·e_(t−1)        α = 0.05; half-life ≈ 13.5 periods  ✓
+Hill      h   = e^S / (e^S + K^S)                K = half-saturation, S = steepness
+Adstock   m_t = h_t + λ_a·m_(t−1)               half-life = ln 0.5 / ln λ_a
+order     SES → Hill → adstock (deck), to be confirmed (Q5)</pre>
+        </div>
+        <div>
+          <h4>UCM model and UCM analysis</h4>
+<pre class="formula">τ_t = intercept + slope·t + Σ_i b_i·m_(t,i) + drivers + media residual + e_t
+c_(t,i) = b_i·m_(t,i)
+share of the trend over a period P:   Σ_(t∈P) c_(t,i)  ÷  Σ_(t∈P) τ_t</pre>
+        </div>
+        <div>
+          <h4>Nested model and the scalar</h4>
+<pre class="formula">S_t = Σ_j β_j·x_(t,j) + β_u·τ_t + e_t          media, expert, negative baseline fixed
+U_t = β_u·τ_t ;    κ = U_t ÷ τ_t = Σ_N U ÷ Σ_N τ     constant over N
+pooled AO MMM model:  the brand τ in every pool;   κ = Σ_g κ_g</pre>
+        </div>
+        <div>
+          <h4>Retrofit: UCM only, either direction</h4>
+<pre class="formula">U_t      = κ·τ_t                              every week of R, before or after N
+C′_(t,j) = C_(t,j)·(1 − U_t ÷ P⁺_t)              j in the positive baseline;  P⁺_t = Σ_(j∈B⁺) C_(t,j)
+every other reported C_(t,j) unchanged
+flag U_t &gt; P⁺_t, and any jump in U ÷ P⁺ at the N–R boundary</pre>
+        </div>
+        <div>
+          <h4>Long-term and final contributions</h4>
+<pre class="formula">L_(t,i)            = (c_(t,i) ÷ τ_t)·U_t = κ·c_(t,i)       every week of H
+Final_(t,i)        = C_(t,i) + L_(t,i)
+Final_(t,Baseline) = Σ C′_(t,baseline) + (U_t − Σ_i L_(t,i)) + residual
+Σ_levers Final_t   = S_t
+over a period:  LT%_i = share of the trend_i × UCM%          the FR PDX identity  ✓</pre>
+        </div>
+        <div>
+          <h4>Media waves</h4>
+<pre class="formula">wave variable (today):    w^(y)_t = T(a·1[t ∈ year y])_t       T = the whole chain
+share:                    s_(y,t) = w^(y)_t ÷ Σ_k w^(k)_t
+split:                    L_(y,t) = s_(y,t)·L_t
+indexed LT of year y:     Σ_t L_(y,t)          realised in year Y:  Σ_(t∈Y) L_(y,t)
+proposed (stock split):   linear steps split exactly by year; at the Hill step
+                          h^(y)_t = h_t·e^(y)_t ÷ e_t   (e = the stock entering Hill);
+                          identical to today when the chain has no Hill</pre>
+        </div>
+        <div>
+          <h4>Multipliers and ROI</h4>
+<pre class="formula">non-indexed (window W):    (Σ_W C_i + Σ_W L_i) ÷ Σ_W C_i
+indexed (activity year y): (ST_(i,y) + indexed LT_(i,y)) ÷ ST_(i,y)
+overall:                   Σ_i total ÷ Σ_i short-term          effect-weighted
+ROI:                       value ÷ spend,  value = volume × price      optional</pre>
+        </div>
+      </div>
+    </section>
+
+    <!-- ===================== 7 RISKS ===================== -->
+    <section id="risks" aria-labelledby="risks-h">
+      <h2 id="risks-h"><span class="num">7</span>Risks and unresolved questions</h2>
+
+      <h3>Methodological risks</h3>
+      <div class="table-wrap wide">
+        <table>
+          <thead><tr><th>Risk</th><th>Why it matters</th><th>Mitigation</th></tr></thead>
+          <tbody>
+            <tr><th>The UCM's share of sales is prior-driven</th><td>It scales every long-term number</td><td>Locks; one correction at most; prior sweep; labelled; range reported (C1)</td></tr>
+            <tr><th>Long-term shares are prior-driven</th><td>A smooth target carries little information</td><td>Prior-against-data evidence per coefficient; placebo; baseline-only comparison (B1)</td></tr>
+            <tr><th>The UCM is built from sales itself</th><td>It can absorb almost anything in the nested model</td><td>Only the positive baseline may donate; donor audit</td></tr>
+            <tr><th>Start-up fault in Year 1</th><td>Understates the reported year</td><td>Fix at source; side by side once (A1)</td></tr>
+            <tr><th>Short-term effects counted as long-term</th><td>Long flights leak into the trend</td><td>Base-sales sensitivity (B2); the cut-off choice (A3)</td></tr>
+            <tr><th>The retrofit assumes no step change</th><td>Distribution or data-source shifts break it</td><td>Boundary flags; two-way scalar test (D1)</td></tr>
+            <tr><th>Restated data</th><td>Scale shifts between sources</td><td>Fix upstream; step-change gate. FR PDX had this</td></tr>
+            <tr><th>The wave split depends on the Hill curve</th><td>Spill-over under-credited for S-shaped channels</td><td>Stock split; additivity reported (E1)</td></tr>
+            <tr><th>Two multipliers for one channel</th><td>About 2.0 against about 2.4 for FR PDX TV</td><td>Both shown and labelled (F1)</td></tr>
+            <tr><th>Truncated waves</th><td>Year 2 understated with less than 4 years of data</td><td>Tail projection, labelled (E2)</td></tr>
+            <tr><th>The trend is an estimate, not data</th><td>Intervals look tighter than they are</td><td>Sensitivity ranges (F2)</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Decisions needed</h3>
+      <div class="table-wrap wide">
+        <table>
+          <thead><tr><th>#</th><th>Question</th><th>Options</th><th>Recommendation</th><th>When</th></tr></thead>
+          <tbody>
+            <tr><td class="stage-no">Q1</td><th>Pre-period handling</th><td>Fill a year with the first year's average (deck); back-cast 6 months (team sheet); none, with the A1 fix</td><td>The A1 fix; back-cast optional and used only as a warm-up; never modelled</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q2</td><th>The smoothing cut-off</th><td>λ = 300 for every cadence; one calendar cut-off</td><td>Agree the cut-off in months (today's weekly practice is about 6 months); derive λ; report ½× and 2×</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q3</td><th>Which AO MMM model to nest into</th><td>The latest 2 years (retrofit backward); the earlier 2 years (retrofit forward)</td><td>Whichever model is used; where models cover both windows, nest into both and compare</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q4</td><th>Brand level or pools</th><td>Brand level (the method); per pool (one notebook)</td><td>Brand level, with the brand trend in every pool of the nested model</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q5</td><th>Order of the long-term transformations, and the basis of K</th><td>SES → Hill → adstock; SES → adstock → Hill</td><td>Confirm with the owner of the transformation step; it matters for the waves</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q6</td><th>Multiplier and ROI basis</th><td>Indexed (the method's stated basis); non-indexed (the FR PDX ROI slide)</td><td>Report both, labelled; choose the headline</td><td>Before reporting</td></tr>
+            <tr><td class="stage-no">Q7</td><th>Wave split when Hill is in the chain</th><td>Today's per-year response; share of the stock</td><td>Share of the stock, after one side-by-side BMC</td><td>Before reporting</td></tr>
+            <tr><td class="stage-no">Q8</td><th>Sales series for the UCM, and restatements</th><td>Total sales; base sales</td><td>Total sales, with base sales as a sensitivity; restatements fixed upstream and documented</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q9</td><th>Minimum history</th><td>4 years (Ekimetrics); 3.5 (FR PDX); 3</td><td>4 by default; 3–3.5 allowed with flags; under 3 refused</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q10</td><th>ROI in value</th><td>Volume only (our models today); value ROI (FR PDX)</td><td>Multipliers always, since they need no price; ROI when spend and a price are supplied</td><td>Before reporting</td></tr>
+            <tr><td class="stage-no">Q11</td><th>The pre-period media residual</th><td>A decaying stock from the window start; a first-pass residual; supplied</td><td>A generated decaying stock, never the model's own residual, which would be circular</td><td>Before build</td></tr>
+            <tr><td class="stage-no">Q12</td><th>Default UCM settings</th><td>Reproduce today's exactly; the improved extraction</td><td>Improved, after one side-by-side BMC; the old settings kept for comparison</td><td>Before reporting</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>Data we need</h3>
+      <ol class="steps">
+        <li><strong>Per-year media variables</strong> for each long-term channel from the transformation step, plus each year's pre-saturation stock for the stock split. Otherwise the raw support and the long-term parameters.</li>
+        <li><strong>The reported short-term decomposition</strong> of the retrofit years, from the AO MMM model that covered them.</li>
+        <li><strong>The AO MMM model</strong> covering the nested window, and ideally models for both 2-year windows for the two-way test.</li>
+        <li><strong>The original inputs</strong> of the UCM notebooks (France, 182 weeks; Colombia, 54 months × 13 series), to reproduce today's numbers exactly.</li>
+        <li><strong>Spend and a price</strong>, only if ROI is wanted, and benchmark multipliers if they are to be shown.</li>
+      </ol>
+    </section>
+
+    <!-- ===================== GLOSSARY ===================== -->
+    <section id="glossary" aria-labelledby="gloss-h">
+      <h2 id="gloss-h">Glossary</h2>
+      <dl class="gloss">
+        <dt>UCM trend</dt><dd>The slow base of sales: an unobserved-components model's level plus growth, smoothed.</dd>
+        <dt>HP filter, λ</dt><dd>A smoother; λ sets the shortest swing it keeps.</dd>
+        <dt>SES, α</dt><dd>Single exponential smoothing: a long-memory adstock whose weights sum to 1.</dd>
+        <dt>Hill, K and S</dt><dd>The saturation curve. K is the half-saturation point and S the steepness; S above 1 gives an S-shaped curve.</dd>
+        <dt>UCM model</dt><dd>The long-term model: the UCM trend regressed on long-term media.</dd>
+        <dt>AO MMM model</dt><dd>The team's 2-year short-term sales MMM.</dd>
+        <dt>Nesting</dt><dd>Adding the UCM trend to the AO MMM model as one more baseline variable.</dd>
+        <dt>Positive and negative baseline</dt><dd>Baseline drivers with positive effects (distribution, category) or negative effects (competitor media, price).</dd>
+        <dt>Donor</dt><dd>A variable allowed to give up volume when the UCM is added.</dd>
+        <dt>Scalar κ</dt><dd>The UCM's contribution divided by the trendline. It carries the UCM to the other years.</dd>
+        <dt>Retrofit</dt><dd>Carrying the UCM contribution, and only it, to the years outside the nested window.</dd>
+        <dt>Media wave</dt><dd>One calendar year of a channel's activity, followed into later years.</dd>
+        <dt>Indexed contribution</dt><dd>Long-term effect booked back to the year of the activity that caused it.</dd>
+        <dt>Non-indexed contribution</dt><dd>Long-term effect booked to the week it is realised.</dd>
+        <dt>Multiplier</dt><dd>(Short-term + long-term) ÷ short-term.</dd>
+        <dt>Contraction</dt><dd>How far the data moved a coefficient away from its prior. Near zero means the number is the prior.</dd>
+        <dt>Placebo test</dt><dd>Refitting with media shifted in time. A real effect should beat it.</dd>
+      </dl>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  Companion files in the same folder: <strong>methodology.md</strong> (this content as text), <strong>changes.md</strong> (structural and radical options beyond this review) and <strong>plan.md</strong> (the implementation plan). Detailed transcriptions of the source material: <code>snapshots/UCM/**/understanding.md</code>.
+</footer>
+
+<script>
+(function () {
+  "use strict";
+
+  /* ---------- theme toggle ---------- */
+  var root = document.documentElement;
+  var btn = document.getElementById("theme-toggle");
+  var KEY = "lte-method-theme";
+  var mq = window.matchMedia ? window.matchMedia("(prefers-color-scheme: dark)") : null;
+  function effective() {
+    var t = root.getAttribute("data-theme");
+    if (t === "dark" || t === "light") return t;
+    return mq && mq.matches ? "dark" : "light";
+  }
+  function setLabel() {
+    var next = effective() === "dark" ? "Light theme" : "Dark theme";
+    btn.textContent = next;
+    btn.setAttribute("aria-label", "Switch to the " + next.toLowerCase());
+  }
+  btn.addEventListener("click", function () {
+    var next = effective() === "dark" ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem(KEY, next); } catch (e) {}
+    setLabel();
+  });
+  if (mq && mq.addEventListener) mq.addEventListener("change", setLabel);
+  setLabel();
+
+  /* ---------- contents: highlight the section in view ---------- */
+  var links = Array.prototype.slice.call(document.querySelectorAll(".toc a"));
+  if ("IntersectionObserver" in window) {
+    var byId = {};
+    links.forEach(function (a) { byId[a.getAttribute("href").slice(1)] = a; });
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (en) {
+        if (!en.isIntersecting) return;
+        links.forEach(function (l) { l.classList.remove("active"); });
+        var a = byId[en.target.id];
+        if (a) a.classList.add("active");
+      });
+    }, { rootMargin: "-15% 0px -75% 0px" });
+    document.querySelectorAll("main > section[id]").forEach(function (s) { io.observe(s); });
+  }
+
+  /* ---------- small SVG helpers ---------- */
+  var NS = "http://www.w3.org/2000/svg";
+  function el(tag, attrs, parent) {
+    var n = document.createElementNS(NS, tag);
+    for (var k in attrs) if (Object.prototype.hasOwnProperty.call(attrs, k)) n.setAttribute(k, attrs[k]);
+    if (parent) parent.appendChild(n);
+    return n;
+  }
+  function txt(parent, x, y, s, cls, anchor) {
+    var t = el("text", { x: x, y: y, "class": cls, "text-anchor": anchor || "start" }, parent);
+    t.textContent = s;
+    return t;
+  }
+  function makeTip(host) {
+    var tip = document.createElement("div");
+    tip.className = "tip";
+    tip.setAttribute("aria-hidden", "true");
+    tip.hidden = true;
+    host.appendChild(tip);
+    return tip;
+  }
+  function showTip(tip, host, x, y, rows) {
+    tip.replaceChildren();
+    rows.forEach(function (r, idx) {
+      var row = document.createElement("div");
+      row.className = "tip-row" + (r.head ? " head" : "");
+      if (r.key) {
+        var k = document.createElement("span");
+        k.className = "tip-key " + r.key;
+        row.appendChild(k);
+      }
+      if (r.head) {
+        row.textContent = r.head;
+      } else {
+        var v = document.createElement("strong");
+        v.textContent = r.value;
+        row.appendChild(v);
+        if (r.label) {
+          var l = document.createElement("span");
+          l.className = "tip-label";
+          l.textContent = r.label;
+          row.appendChild(l);
+        }
+      }
+      tip.appendChild(row);
+    });
+    tip.hidden = false;
+    var hw = host.clientWidth, tw = tip.offsetWidth, th = tip.offsetHeight;
+    var left = x + 14;
+    if (left + tw > hw) left = x - tw - 14;
+    if (left < 0) left = Math.max(0, Math.min(hw - tw, x - tw / 2));
+    var top = Math.max(0, y - th / 2);
+    tip.style.left = left + "px";
+    tip.style.top = top + "px";
+  }
+  function svgPoint(svg, evt, W) {
+    var r = svg.getBoundingClientRect();
+    return (evt.clientX - r.left) * (W / r.width);
+  }
+
+  /* ---------- chart 1: start-up fault (line) ---------- */
+  function drawStartup(fig) {
+    var dates = ["3 Jan", "10 Jan", "17 Jan", "24 Jan", "31 Jan", "7 Feb", "14 Feb", "21 Feb", "28 Feb", "7 Mar"];
+    var sales = [12.36, 11.96, 12.32, 13.00, 14.12, 13.07, 12.01, 12.58, 14.11, 13.50];
+    var trend = [5.16, 6.29, 7.40, 8.47, 9.46, 10.35, 11.13, 11.78, 12.31, 12.72];
+    var plot = fig.querySelector(".plot");
+    plot.replaceChildren();
+    var W = Math.max(240, Math.round(plot.clientWidth)), H = 270;
+    var m = { l: 44, r: 16, t: 14, b: 34 };
+    var pw = W - m.l - m.r, ph = H - m.t - m.b, n = dates.length;
+    function X(i) { return m.l + pw * i / (n - 1); }
+    function Y(v) { return m.t + ph * (1 - v / 16); }
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, "class": "chart-svg", role: "img",
+      "aria-label": "Line chart. FR PDX weekly sales and the current UCM trend over the first ten weeks of 2022. The trend starts at 5.2 million against sales of 12.4 million and reaches 90% of sales only in mid-February." });
+    [0, 4, 8, 12, 16].forEach(function (v) {
+      el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), "class": v === 0 ? "axis" : "grid" }, svg);
+      txt(svg, m.l - 8, Y(v) + 4, v === 0 ? "0" : v + "M", "ax", "end");
+    });
+    var gap = pw / (n - 1), step = gap < 44 ? 3 : (gap < 58 ? 2 : 1);
+    dates.forEach(function (d, i) { if (i % step === 0) txt(svg, X(i), H - m.b + 19, d, "ax", "middle"); });
+    function pts(arr) { return arr.map(function (v, i) { return X(i).toFixed(1) + "," + Y(v).toFixed(1); }).join(" "); }
+    el("polyline", { points: pts(sales), "class": "line s1-line" }, svg);
+    el("polyline", { points: pts(trend), "class": "line s2-line" }, svg);
+    sales.forEach(function (v, i) { el("circle", { cx: X(i), cy: Y(v), r: 4, "class": "dot s1-fill" }, svg); });
+    trend.forEach(function (v, i) { el("circle", { cx: X(i), cy: Y(v), r: 4, "class": "dot s2-fill" }, svg); });
+    var ax0 = X(0), ay0 = Y(trend[0]);
+    el("line", { x1: ax0 + 5, y1: ay0 + 5, x2: ax0 + 16, y2: ay0 + 22, "class": "leader" }, svg);
+    txt(svg, ax0 + 19, ay0 + 33, W < 360 ? "Week 1: 42% of sales" : "Week 1: trend 5.2M, 42% of sales", "ann");
+    var xh = el("line", { x1: 0, x2: 0, y1: m.t, y2: H - m.b, "class": "xh", visibility: "hidden" }, svg);
+    var hit = el("rect", { x: m.l - 12, y: m.t, width: pw + 24, height: ph, "class": "hit", tabindex: "0",
+      "aria-label": "Weekly values. Use the left and right arrow keys to move between weeks." }, svg);
+    plot.appendChild(svg);
+    var tip = makeTip(plot);
+    var cur = 0;
+    function show(i) {
+      cur = Math.max(0, Math.min(n - 1, i));
+      var x = X(cur);
+      xh.setAttribute("x1", x); xh.setAttribute("x2", x); xh.setAttribute("visibility", "visible");
+      var pct = Math.round(trend[cur] / sales[cur] * 100);
+      showTip(tip, plot, x * (plot.clientWidth / W), Y(sales[cur]) + 40, [
+        { head: "Week of " + dates[cur] + " 2022" },
+        { value: sales[cur].toFixed(2) + "M", label: "weekly sales", key: "k1" },
+        { value: trend[cur].toFixed(2) + "M", label: "UCM trend", key: "k2" },
+        { value: pct + "%", label: "trend ÷ sales" }
+      ]);
+    }
+    function hide() { xh.setAttribute("visibility", "hidden"); tip.hidden = true; }
+    hit.addEventListener("pointermove", function (e) { show(Math.round((svgPoint(svg, e, W) - m.l) / pw * (n - 1))); });
+    hit.addEventListener("pointerleave", hide);
+    hit.addEventListener("focus", function () { show(cur); });
+    hit.addEventListener("blur", hide);
+    hit.addEventListener("keydown", function (e) {
+      if (e.key === "ArrowRight") { show(cur + 1); e.preventDefault(); }
+      if (e.key === "ArrowLeft") { show(cur - 1); e.preventDefault(); }
+      if (e.key === "Escape") { hide(); }
+    });
+  }
+
+  /* ---------- chart 2: Hill split bias (columns) ---------- */
+  function roundedTop(x, y, w, base) {
+    var h = base - y, r = Math.min(4, h, w / 2);
+    return "M" + x + "," + base + " V" + (y + r) + " Q" + x + "," + y + " " + (x + r) + "," + y +
+      " H" + (x + w - r) + " Q" + (x + w) + "," + y + " " + (x + w) + "," + (y + r) + " V" + base + " Z";
+  }
+  function drawHill(fig) {
+    var cats = ["0.8", "1.0", "1.5", "2.0", "3.0"], vals = [28.7, 23.4, 12.6, 6.1, 1.2], ref = 14.3;
+    var plot = fig.querySelector(".plot");
+    plot.replaceChildren();
+    var W = Math.max(240, Math.round(plot.clientWidth)), H = 260;
+    var m = { l: 42, r: 14, t: 26, b: 36 };
+    var pw = W - m.l - m.r, ph = H - m.t - m.b, n = cats.length, bwid = pw / n;
+    function Y(v) { return m.t + ph * (1 - v / 30); }
+    function CX(i) { return m.l + bwid * (i + 0.5); }
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, "class": "chart-svg", role: "img",
+      "aria-label": "Column chart. Credit given to a carried-over wave holding 14.3% of the stock, by Hill slope: 28.7% at S 0.8, 23.4% at S 1, 12.6% at S 1.5, 6.1% at S 2 and 1.2% at S 3." });
+    el("rect", { x: m.l + bwid * 2, y: m.t, width: bwid * 3, height: ph, "class": "band" }, svg);
+    txt(svg, m.l + bwid * 2 + 6, m.t + 13, "expected range", "ax");
+    [0, 10, 20, 30].forEach(function (v) {
+      el("line", { x1: m.l, x2: W - m.r, y1: Y(v), y2: Y(v), "class": v === 0 ? "axis" : "grid" }, svg);
+      txt(svg, m.l - 8, Y(v) + 4, v + "%", "ax", "end");
+    });
+    var tip = null;
+    var w = Math.min(24, bwid * 0.5);
+    vals.forEach(function (v, i) {
+      var g = el("g", { "class": "bar", tabindex: "0", role: "img",
+        "aria-label": "S " + cats[i] + ": " + v + "% of the week's long-term effect, against a 14.3% share of the stock" }, svg);
+      el("rect", { x: CX(i) - bwid / 2 + 3, y: m.t, width: bwid - 6, height: ph, "class": "hit" }, g);
+      el("path", { d: roundedTop(CX(i) - w / 2, Y(v), w, Y(0)), "class": "s1-fill" }, g);
+      if (v < ref && Y(v) - Y(ref) < 20) {
+        /* just under the reference line: label beside the bar so the line never strikes through it */
+        txt(g, CX(i) + w / 2 + 5, Y(v) + 12, v + "%", "val", "start");
+      } else {
+        txt(g, CX(i), Y(v) - 6, v + "%", "val", "middle");
+      }
+      txt(svg, CX(i), H - m.b + 19, bwid < 50 ? cats[i] : "S = " + cats[i], "ax", "middle");
+      function on() {
+        showTip(tip, plot, CX(i) * (plot.clientWidth / W), Y(v) + 10, [
+          { head: "Hill slope S = " + cats[i] },
+          { value: v + "%", label: "credit under today's split" },
+          { value: "14.3%", label: "its share of the stock" }
+        ]);
+      }
+      function off() { tip.hidden = true; }
+      g.addEventListener("pointerenter", on);
+      g.addEventListener("pointerleave", off);
+      g.addEventListener("focus", on);
+      g.addEventListener("blur", off);
+    });
+    el("line", { x1: m.l, x2: W - m.r, y1: Y(ref), y2: Y(ref), "class": "ref" }, svg);
+    txt(svg, W - m.r, Y(ref) - 6, "14.3%", "val", "end");
+    plot.appendChild(svg);
+    tip = makeTip(plot);
+  }
+
+  /* ---------- chart 3: multipliers (bars) ---------- */
+  function roundedRight(x0, y, x1, h) {
+    var w = x1 - x0, r = Math.min(4, w, h / 2);
+    return "M" + x0 + "," + y + " H" + (x1 - r) + " Q" + x1 + "," + y + " " + x1 + "," + (y + r) +
+      " V" + (y + h - r) + " Q" + x1 + "," + (y + h) + " " + (x1 - r) + "," + (y + h) + " H" + x0 + " Z";
+  }
+  function drawMult(fig) {
+    var rows = [
+      { l: "Non-indexed: realised in 2022–23 (as reported)", s: "Non-indexed, as reported", v: 2.03 },
+      { l: "Indexed: all effect of the 2022 activity", s: "Indexed, 2022 activity", v: 2.44 },
+      { l: "Indexed: all effect of the 2023 activity", s: "Indexed, 2023 activity", v: 2.38 }
+    ];
+    var plot = fig.querySelector(".plot");
+    plot.replaceChildren();
+    var W = Math.max(240, Math.round(plot.clientWidth));
+    var useShort = W < 380;
+    var m = { l: 4, r: 40, t: 6, b: 28 }, rowH = 52;
+    var H = m.t + rows.length * rowH + m.b;
+    var pw = W - m.l - m.r;
+    function X(v) { return m.l + pw * v / 3; }
+    var svg = el("svg", { viewBox: "0 0 " + W + " " + H, width: W, height: H, "class": "chart-svg", role: "img",
+      "aria-label": "Bar chart. FR PDX TV multiplier: 2.03 non-indexed, as reported; 2.44 indexed for the 2022 activity; 2.38 indexed for the 2023 activity." });
+    [0, 1, 2, 3].forEach(function (v) {
+      /* grid only across each bar band, so the row labels sit on a clean ground */
+      rows.forEach(function (r, i) {
+        var yb = m.t + i * rowH;
+        el("line", { x1: X(v), x2: X(v), y1: yb + 21, y2: yb + 45, "class": v === 0 ? "axis" : "grid" }, svg);
+      });
+      txt(svg, X(v), H - m.b + 18, String(v), "ax", "middle");
+    });
+    var tip = null;
+    rows.forEach(function (r, i) {
+      var y0 = m.t + i * rowH;
+      txt(svg, m.l, y0 + 15, useShort ? r.s : r.l, "ann");
+      var g = el("g", { "class": "bar", tabindex: "0", role: "img", "aria-label": r.l + ": " + r.v.toFixed(2) }, svg);
+      el("rect", { x: m.l, y: y0 + 2, width: pw, height: rowH - 6, "class": "hit" }, g);
+      el("path", { d: roundedRight(X(0), y0 + 24, X(r.v), 18), "class": "s1-fill" }, g);
+      txt(g, X(r.v) + 6, y0 + 37, r.v.toFixed(2), "val", "start");
+      function on() {
+        showTip(tip, plot, X(r.v) * (plot.clientWidth / W), y0 + 30, [
+          { head: r.l },
+          { value: r.v.toFixed(2), label: "TV multiplier" }
+        ]);
+      }
+      function off() { tip.hidden = true; }
+      g.addEventListener("pointerenter", on);
+      g.addEventListener("pointerleave", off);
+      g.addEventListener("focus", on);
+      g.addEventListener("blur", off);
+    });
+    plot.appendChild(svg);
+    tip = makeTip(plot);
+  }
+
+  /* ---------- render, and re-render at the new width ---------- */
+  var charts = [
+    [document.getElementById("chart-startup"), drawStartup],
+    [document.getElementById("chart-hill"), drawHill],
+    [document.getElementById("chart-mult"), drawMult]
+  ];
+  charts.forEach(function (c) {
+    if (!c[0]) return;
+    try { c[1](c[0]); } catch (e) { /* the table twin still carries the numbers */ }
+  });
+  if ("ResizeObserver" in window) {
+    charts.forEach(function (c) {
+      if (!c[0]) return;
+      var plot = c[0].querySelector(".plot"), lastW = plot.clientWidth, raf = 0;
+      new ResizeObserver(function () {
+        var w = plot.clientWidth;
+        if (Math.abs(w - lastW) < 2) return;
+        lastW = w;
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(function () { try { c[1](c[0]); } catch (e) {} });
+      }).observe(plot);
+    });
+  }
+})();
+</script>
+</body>
+</html>
