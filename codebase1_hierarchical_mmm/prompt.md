@@ -317,3 +317,16 @@ Follow this sequence:
 8. Review the documentation for completeness, consistency, and traceability.
 
 **Final instruction:** Focus on understanding, documenting, and planning first. Do not begin implementing the new LTE modelling pipeline until the reference documentation and `plan.md` are complete and the key modelling ambiguities have been identified.
+
+
+---------------------
+
+Analyze Web thoroughly and create a `CLAUDE.md` file inside the `web/` folder that captures everything necessary to continue development seamlessly in a new Claude session.  Also consolidate all relevant context from this chat. . Verify implementation details against the actual web codebase, distinguish verified facts from assumptions and planned changes, and preserve important details that cannot be reconstructed from the code alone.  explicitly identify any context that could not be recovered or verified. This is all required as we will be moving towards Typescript or React whichever is better
+
+<attach the image of dqm pipeline>
+
+----------------
+
+
+We need to remove FR PDX , and Colombia Dolex bmc name in the docs
+agree with methodology

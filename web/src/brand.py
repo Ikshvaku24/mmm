@@ -415,7 +415,7 @@ def icon_url(svg) -> str:
 
 # Streamlit has no Python call for the viewer's light / dark, and its own
 # switch is in the Settings dialog of the ⋮ menu - which the page hides (the
-# cluster sits there). So the button works that same switch, out of sight: it
+# top bar sits there). So the button works that same switch, out of sight: it
 # opens the hidden menu, Settings, picks Light or Dark and closes the dialog -
 # live, the session and everything on the pages intact, and Streamlit
 # remembers the choice in the browser. Then it marks the page light or dark

@@ -34,6 +34,15 @@ Runs made before the run groups existed sit directly under the BMC
 A Unity Catalog volume path (`/Volumes/<catalog>/<schema>/<volume>/...`)
 works the same way - pass it as the `base_path` job parameter.
 
+Serverless compute (the serverless GPU) has NO DBFS mounts. There the job
+reads and writes ADLS itself, with a service principal from a secret scope
+(`mmm/adls.py`; demo.ipynb connects): `run_app_job(..., adls=store)` copies
+the run folder's inputs to local disk (not its Outputs/; in the old layout
+only the named files), runs the model on the local copy, and copies the
+outputs - and the live log, every LIVE_LOG_SECONDS - back to the same ADLS
+folder. `storage_mode` picks the mount when `base_path` is visible, ADLS
+otherwise. The folders, names and files are the same either way.
+
 With `bmc_name` and `run_name` both blank, the oldest, shared layout is used:
 inputs from `<base_path>/<Folder>/<name>`, outputs to
 `<base_path>/Outputs/<run_id>` (runs made before the run folders existed, and
@@ -60,7 +69,7 @@ stands, like `run_real_data.py`, and still publishes to `Outputs/manual_<time>`.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import contextlib
 import copy
@@ -370,6 +379,50 @@ def local_output_root() -> str:
     return tempfile.mkdtemp(prefix="mmm_outputs_")
 
 
+def storage_mode(base_path: str | None = None, mode: str | None = None) -> str:
+    """"mount" or "adls" - how this compute reaches the run folders. `mode`
+    "mount" or "adls" forces it; blank or "auto" takes the mount when
+    `base_path` (blank = DEFAULT_BASE_PATH) is a folder this compute can see
+    (a classic cluster's /dbfs/mnt, a /Volumes path) and ADLS otherwise -
+    serverless compute has no DBFS mounts."""
+    mode = str(mode or "auto").strip().lower()
+    if mode in ("mount", "adls"):
+        return mode
+    if mode != "auto":
+        raise ValueError(f"storage must be auto, mount or adls - got {mode!r}")
+    return "mount" if os.path.isdir(str(base_path or DEFAULT_BASE_PATH)) else "adls"
+
+
+def adls_root(base_path: str | None = None) -> str:
+    """The folder in ADLS that `base_path` mounts: its last folder -
+    "Secondary Modelling" for DEFAULT_BASE_PATH, as the web app's ADLS_ROOT."""
+    return (os.path.basename(str(base_path or DEFAULT_BASE_PATH).rstrip("/\\"))
+            or "Secondary Modelling")
+
+
+def _fetch_inputs(store, p: dict, base_path: str, root: str | None, root_rel: str) -> int:
+    """No mount: copy the run's inputs from ADLS to the local mirror under
+    `base_path` - the whole run folder except its Outputs/, or, in the old
+    shared layout, only the files the parameters name. Returns how many."""
+    if root:
+        n = store.download_tree(root_rel, root, skip=(OUTPUT_FOLDER,))
+        if not n:
+            raise FileNotFoundError(f"the run folder {store.where(root_rel)} is missing "
+                                    "or empty in ADLS")
+        where = store.where(root_rel)
+    else:
+        n = 0
+        for param, folder in FOLDERS.items():
+            if p[param]:
+                store.download_file(f"{folder}/{p[param]}",
+                                    input_path(base_path, param, p[param]))
+                n += 1
+        where = store.where()
+    print(f"[app_job] storage  ADLS (no mount on this compute): {n} input file(s) "
+          f"from {where}")
+    return n
+
+
 def copy_tree(src: str, dst: str) -> int:
     """Copy a folder file by file - no chmod/utime, which FUSE storage refuses
     (shutil.copytree would copy everything and then fail on copystat)."""
@@ -401,13 +454,12 @@ def merge_config(base: dict | None, over: dict | None) -> dict:
     return out
 
 
-def _live_log(src: str, dst_dir: str, stop: threading.Event, every: float) -> None:
-    """Copy the log so far to Outputs/ now and every `every` s until `stop`,
-    so the web app can show a run's progress while it runs."""
+def _live_log(put, stop: threading.Event, every: float) -> None:
+    """Copy the log so far to Outputs/ (`put()`) now and every `every` s until
+    `stop`, so the web app can show a run's progress while it runs."""
     while True:
         try:
-            os.makedirs(dst_dir, exist_ok=True)
-            shutil.copyfile(src, os.path.join(dst_dir, LOG_FILE))
+            put()
         except Exception:  # noqa: BLE001 - a live copy must never stop a run
             pass
         if stop.wait(every):
@@ -488,7 +540,7 @@ def tee_log(path: str):
 def run_app_job(params: dict | None = None, *, base_path: str | None = None,
                 config_dir: str | None = None, local_root: str | None = None,
                 publish: bool = True, runner=None, copier=None,
-                live_log_every: float | None = None) -> dict:
+                live_log_every: float | None = None, adls=None) -> dict:
     """Run one model for the web app and publish its output folder.
 
     `params` are the job parameters (see PARAMS). `runner` defaults to
@@ -509,6 +561,12 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     (`merge_config`): the web app saves only the settings its user may change.
     While the run runs, its log so far is copied to the output folder every
     `live_log_every` seconds (LIVE_LOG_SECONDS; 0 = off).
+
+    `adls` (an mmm.adls.AdlsStore) is for compute without the mount
+    (serverless): the run folder's inputs are copied from ADLS to a local
+    mirror first, and the outputs and the live log go back to ADLS - the same
+    folders. A failed copy is a failed run, recorded and published like any
+    other. run_info.json then names the ADLS folders ("ADLS:...").
     """
     import mmm
 
@@ -521,12 +579,24 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     config_dir = config_dir or here
     local_root = local_root or local_output_root()
     copier = copier or copy_tree
+    if adls is not None:                 # no mount: work on a local mirror of ADLS
+        base_path = os.path.join(local_root, f"adls_{run_id}")
+        os.makedirs(base_path, exist_ok=True)
+
+    def shown(path):
+        """A path as people read it: in ADLS mode, a file of the local mirror
+        becomes its ADLS location."""
+        if adls is None or not path:
+            return path
+        rel = os.path.relpath(path, base_path)
+        return path if rel.startswith("..") else adls.where(rel.replace(os.sep, "/"))
 
     try:
         root = run_folder(base_path, p["bmc_name"], p["run_name"], p["run_group"])
         folder_error = None
     except ValueError as e:
         root, folder_error = None, e
+    root_rel = os.path.relpath(root, base_path).replace(os.sep, "/") if root else ""
     if p["config_file"]:
         cfg_src = input_path(root or base_path, "config_file", p["config_file"])
         cfg_dir = os.path.dirname(cfg_src)
@@ -537,41 +607,54 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     os.makedirs(run_dir, exist_ok=True)
     published = (os.path.join(root, OUTPUT_FOLDER) if root
                  else os.path.join(base_path, OUTPUT_FOLDER, run_id))
+    published_rel = f"{root_rel}/{OUTPUT_FOLDER}" if root else f"{OUTPUT_FOLDER}/{run_id}"
     info = {"status": "running", "run_id": run_id,
             "bmc_name": p["bmc_name"], "run_group": p["run_group"],
-            "run_name": p["run_name"], "run_folder": root,
-            "codebase": mmm.__version__, "config_source": cfg_src,
+            "run_name": p["run_name"], "run_folder": shown(root),
+            "codebase": mmm.__version__, "config_source": shown(cfg_src),
+            "storage": "adls" if adls is not None else "mount",
             "params": p, "local_dir": run_dir,
-            "output_dir": published if publish else run_dir,
+            "output_dir": shown(published) if publish else run_dir,
             "started": time.strftime("%Y-%m-%d %H:%M:%S")}
-    request = _read_request(root)
-    if request.get("submitted_by"):
-        info["submitted_by"] = request["submitted_by"]
-    if request.get("note"):
-        info["note"] = str(request["note"])
+    request = {}
     error = None
     log_path = os.path.join(run_dir, LOG_FILE)
     every = LIVE_LOG_SECONDS if live_log_every is None else live_log_every
     stop_live, live = threading.Event(), None
+
+    def put_log():
+        if adls is not None:
+            adls.upload_file(log_path, f"{published_rel}/{LOG_FILE}")
+        else:
+            os.makedirs(published, exist_ok=True)
+            shutil.copyfile(log_path, os.path.join(published, LOG_FILE))
+
     with tee_log(log_path):
         if publish and every:
             live = threading.Thread(target=_live_log, daemon=True,
-                                    args=(log_path, published, stop_live, every))
+                                    args=(put_log, stop_live, every))
             live.start()
         try:
             print(f"[app_job] codebase {mmm.__version__}  run_id={run_id}  "
                   f"started {info['started']}")
             if folder_error is not None:
                 raise folder_error
+            if adls is not None:
+                _fetch_inputs(adls, p, base_path, root, root_rel)
+            request = _read_request(root)
+            if request.get("submitted_by"):
+                info["submitted_by"] = request["submitted_by"]
+            if request.get("note"):
+                info["note"] = str(request["note"])
             if root:
                 where = " / ".join(x for x in (p["bmc_name"], p["run_group"], p["run_name"])
                                    if x)
-                print(f"[app_job] run      {where}  ->  {root}"
+                print(f"[app_job] run      {where}  ->  {shown(root)}"
                       + (f"  (submitted by {request['submitted_by']})"
                          if request.get("submitted_by") else ""))
                 if request.get("note"):
                     print(f"[app_job] note     {request['note']}")
-            print(f"[app_job] config   {cfg_src}")
+            print(f"[app_job] config   {shown(cfg_src)}")
             with open(cfg_src, encoding="utf-8") as fh:
                 raw = yaml.safe_load(fh) or {}
             # the modelling type's own settings (modelling_types.yaml) sit
@@ -634,19 +717,21 @@ def run_app_job(params: dict | None = None, *, base_path: str | None = None,
     finally:
         if publish:
             try:
-                if root and os.path.isdir(published) and [
-                        f for f in os.listdir(published) if f != LOG_FILE]:
-                    print(f"[app_job] note: {published} already had files (this run "
-                          "folder was run before) - they are overwritten")
-                n = copier(run_dir, published)
-                print(f"[app_job] published {n} files -> {published}")
+                there = (adls.files(published_rel) if adls is not None
+                         else os.listdir(published) if os.path.isdir(published) else [])
+                if root and [f for f in there if f != LOG_FILE]:
+                    print(f"[app_job] note: {shown(published)} already had files (this "
+                          "run folder was run before) - they are overwritten")
+                n = (adls.upload_tree(run_dir, published_rel) if adls is not None
+                     else copier(run_dir, published))
+                print(f"[app_job] published {n} files -> {shown(published)}")
             except Exception as e:  # noqa: BLE001 - keep the local copy
                 info["publish_error"] = f"{type(e).__name__}: {e}"
                 info["output_dir"] = run_dir
                 with open(os.path.join(run_dir, "run_info.json"), "w",
                           encoding="utf-8") as fh:
                     json.dump(info, fh, indent=2, default=str)
-                print(f"[app_job] !!! could not publish to {published}: {e}\n"
+                print(f"[app_job] !!! could not publish to {shown(published)}: {e}\n"
                       f"[app_job] the outputs are still in {run_dir}")
     if error is not None:
         raise error

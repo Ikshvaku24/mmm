@@ -24,7 +24,7 @@ env:
   # themes/capgemini.toml: colours, fonts and corners, light and dark
   - name: STREAMLIT_THEME_BASE
     value: "themes/haleon.toml"
-  # the ⋮ menu's developer items off; the page hides the menu itself (the
-  # cluster sits there) but needs it: the light / dark button uses its Settings
+  # the ⋮ menu's developer items off; the page hides the menu itself (the top
+  # bar sits there) but needs it: the light / dark button uses its Settings
   - name: STREAMLIT_CLIENT_TOOLBAR_MODE
     value: "viewer"

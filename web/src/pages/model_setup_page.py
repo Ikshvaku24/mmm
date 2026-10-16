@@ -16,7 +16,6 @@ from src.app_functions import (DEFAULTS_TEXT, describe_fill, fill_blank_priors,
                                read_uploaded_file_as_table, render_prior_editor,
                                show_prior_file_popup, show_prior_validation,
                                to_serial_index_table, validate_prior)
-from src.clusters import cluster_state, start_cluster
 from src.config_editor import (access, apply_modelling_type, config_valid, enforce_fixed,
                                has_full_access, init_config_state, job_owned_keys,
                                live_config, load_config, render_settings_section, role,
@@ -98,59 +97,12 @@ def _sentence(text):
 
 
 # --------------------------------------------------------------------------- #
-# the top bar (the cluster) and the backend status
+# the top bar and the backend status
 # --------------------------------------------------------------------------- #
-def _cluster_state():
-    """The cluster's state - asked of the Clusters API at most once per 5 s
-    for EVERY open page together (src/clusters.py), not once per page."""
-    return cluster_state()
-
-
-CLUSTER_TEXT = {"RUNNING": "running", "PENDING": "starting", "RESTARTING": "restarting",
-                "RESIZING": "resizing", "TERMINATING": "stopping", "TERMINATED": "stopped"}
-CLUSTER_TONE = {"RUNNING": "good", "TERMINATED": "off"}
-
-
-@page_state.fragment(run_every="5s")
-def render_cluster_status_controls():
-    """The model cluster's state - a dot and a word - and, when it is
-    stopped, Start cluster. Lives in the top bar on every page."""
-    ss = st.session_state
-    state = _cluster_state()
-    tone = CLUSTER_TONE.get(state, "busy" if state in CLUSTER_TEXT else "unknown")
-    label = CLUSTER_TEXT.get(state, str(state or "unknown").lower())
-    st.markdown(f'<span class="bridge-cluster bridge-cluster--{tone}" '
-                f'title="The cluster the model job runs on: {html.escape(str(state))}">'
-                f'<span class="bridge-cluster-dot" aria-hidden="true"></span>'
-                f"Cluster {html.escape(label)}</span>", unsafe_allow_html=True, width="content")
-    requested = "cluster_start_requested"
-    if state != "TERMINATED":
-        ss[requested] = False
-    if state == "TERMINATED" and not ss.get(requested, False):
-        if st.button("Start cluster", key="start_cluster_button", type="secondary",
-                     icon=":material/play_arrow:",
-                     help="Start the cluster now, so the next run does not wait for it."):
-            ss[requested] = True
-            try:
-                status_code = start_cluster()
-                if status_code in {200, 202}:
-                    st.toast("Cluster start requested - the status refreshes every 5 "
-                             "seconds.", icon="▶️")
-                else:
-                    st.toast(f"Failed to start the cluster: status code {status_code}",
-                             icon="⚠️")
-            except Exception as e:  # noqa: BLE001 - told, the button comes back
-                ss[requested] = False
-                st.toast(f"Unable to start the cluster: {e}", icon="⚠️")
-    elif state == "TERMINATED":
-        st.markdown('<span class="bridge-cluster-note">start requested</span>',
-                    unsafe_allow_html=True, width="content")
-
-
 def render_top_bar(greeting=""):
     """Top right on every page, where Streamlit's ⋮ menu was (it is hidden):
-    who is signed in, the light / dark button, and the cluster with its Start
-    button."""
+    who is signed in, and the light / dark button. (No cluster any more: the
+    job runs on serverless compute, which starts with each run.)"""
     with st.container(key="bridge_topbar", horizontal=True, vertical_alignment="center",
                       gap="small", width="content"):
         if greeting:
@@ -158,7 +110,6 @@ def render_top_bar(greeting=""):
                         f"{html.escape(greeting)}</span>", unsafe_allow_html=True,
                         width="content")
         brand.render_theme_toggle()
-        render_cluster_status_controls()
 
 
 def render_backend_status():
@@ -194,8 +145,7 @@ def render_backend_status():
 
 def render_sidebar_status():
     """Under the page list: the backend - codebase 1's version (and, for full
-    access, its folder, the worker processes and Reload). The cluster is in
-    the top bar (render_top_bar)."""
+    access, its folder, the worker processes and Reload)."""
     render_backend_status()
 
 
@@ -781,7 +731,7 @@ def _render_run_list(shown, filters, errors, signature):
                              "note", help="The modeller's note - why the run was made, what "
                                           "changed. Open the run to read all of it.")})
     st.caption("Run time = the notebook's own time (not the time queued or starting the "
-               "cluster)."
+               "compute)."
                + (f" Showing the newest {MAX_LISTED} of {total} runs - narrow the filters "
                   "to see the rest." if total > MAX_LISTED else ""))
     picked = list(getattr(getattr(event, "selection", None), "rows", []) or [])

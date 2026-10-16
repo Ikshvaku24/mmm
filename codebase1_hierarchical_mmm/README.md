@@ -142,7 +142,12 @@ notebook only reads its widgets and calls `mmm.app_job.run_app_job`, so:
 - it never edits this folder's `config.yaml`;
 - it publishes the outputs into the run's folder
   `<BMC>/<period> <modelling type>/<run name>/Outputs/` — also when the run
-  fails.
+  fails;
+- on compute without the `/dbfs/mnt` mount (the serverless GPU) it reads and
+  writes ADLS itself, as the service principal in a secret scope
+  (`mmm/adls.py`): the run's inputs are copied to local disk, the outputs and
+  the live log back. The job parameter `storage` = `auto` (default) / `mount` /
+  `adls`; `adls_secret_scope` names another scope.
 
 The app also reads three files in this folder:
 
@@ -214,7 +219,10 @@ event_dummy,,global,free,0,0.4,absolute,1,Baseline
 
   A region name that is not in the data stops the run.
 - **`baseline=1`** folds a feature into the baseline; it is still reported on
-  its own row. **`pillar`** is the reporting roll-up.
+  its own row. **`pillar`** is the reporting roll-up, **`sub_pillar`** the
+  level under it (*Search* and *Social* inside *Online Media*), and **`label`**
+  the readable name client-facing charts show. All three are reporting only;
+  `05_contributions/contribution_by_sub_pillar.csv` rolls up by the sub-pillar.
 
 Every column: `docs/FEATURE_PRIOR_GUIDE.md`.
 

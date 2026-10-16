@@ -1154,6 +1154,10 @@ PRIOR_HELP = {
     "regional_sd_prior": "How far regions may differ (same basis as the sd).",
     "baseline": "1 = fold into the baseline instead of reporting as incremental.",
     "pillar": "Reporting group (TV & DTV, Online Media, Trade, ...).",
+    "sub_pillar": "A group inside the pillar (Search, Social inside Online Media). "
+                  "Blank = directly under the pillar. Reporting only.",
+    "label": "The readable name the charts and tables show (Paid social). Blank = "
+             "the variable name. Reporting only.",
     "contribution_reference": "auto | zero | mean | min | a number. Reporting only.",
     "center_mode": "none | mean. Consider mean for always-on level variables "
                    "(TDP, price, ACV).",
@@ -1277,7 +1281,7 @@ def _impl_validate_prior_table(df, datacube_df, cfg):
 def validate_prior_table(df: pd.DataFrame, datacube_df: pd.DataFrame | None,
                          cfg: dict) -> Outcome:
     """The loader's verdict on the table, plus the name and region checks the
-    run would make - so a bad prior never reaches the cluster."""
+    run would make - so a bad prior never reaches the job."""
     return _call("validate_prior_table", df, datacube_df, cfg)
 
 

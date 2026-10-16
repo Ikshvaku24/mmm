@@ -27,6 +27,9 @@ codebase1_hierarchical_mmm/
 │   │                         with OutOfSyncError (MMM_ALLOW_OUT_OF_SYNC=1 overrides)
 │   ├── release.py            python -m mmm.release YYYY.MM.DD.N - stamps every module
 │   ├── run_pipeline.py       run() - ties the stages together
+│   ├── adls.py               serverless (no /dbfs/mnt): the run folder in ADLS,
+│   │                         read and written as the service principal in a
+│   │                         secret scope (AdlsStore, connect_from_secrets)
 │   ├── app_job.py            what demo.ipynb does: the uploaded config with only
 │   │                         the job-owned keys replaced, run, publish to the
 │   │                         run folder's Outputs/ (<BMC>/<period type>/<run>/);
@@ -105,6 +108,7 @@ python -m mmm.core.settings --write config.yaml  # regenerate the template
 | add a diagnostic | `mmm/checks/` |
 | change a diagnostic threshold | `config.yaml` under `assumptions:` — **not** code |
 | change what the web app's job does (paths, publishing) | `mmm/app_job.py` (+ `demo.ipynb`, which only reads widgets) |
+| change how the job reaches ADLS without the mount (serverless): the secret scope and keys | `mmm/adls.py` (`SECRET_SCOPE`, `SECRET_KEYS`); `app_job.storage_mode` picks mount or ADLS |
 | add a setting to the web app's editor | the dataclass field + its `HELP` line (enums in `settings.CHOICES`), then list it under `editable:` (or `advanced:`) in `app_access.yaml` so people may change it |
 | choose which settings people may change in the app | `app_access.yaml` → `editable:` for everyone, `advanced:` for `config_advanced_access` (allow-lists; the rest stay at `config.yaml`'s values) |
 | give someone every setting / the admin tools / the Advanced options | `app_access.yaml` → `config_full_access:` / `full_access:` / `config_advanced_access:` |
@@ -140,6 +144,9 @@ The saved `Config/config.yaml` holds only the settings the person may change
 (`app_access.yaml`); `app_job.merge_config` lays it over this folder's
 `config.yaml`. While the job runs, `app_job` copies `job_log.txt` into
 `Outputs/` every 30 s (`LIVE_LOG_SECONDS`), so the app can show the log live.
+On serverless compute (no `/dbfs/mnt`) `run_app_job(..., adls=store)` does the
+same through ADLS: inputs copied to local disk first, outputs and the live log
+back (`mmm/adls.py`).
 
 The app's result charts read these files - renaming a column in them means
 updating `web/src/charts.py` (and its tests, v21/v22):
@@ -190,7 +197,7 @@ pre_model_outputs/        (or data.pre_model_dir) - build_priors("config.yaml")
 
 ## Tests
 
-`../tests/run_all.py` — 2136 checks, ~1 min, no PyMC needed. They import the
+`../tests/run_all.py` — 2182 checks, ~1 min, no PyMC needed. They import the
 package the same way an entry point does (`sys.path.insert(0, CB1)` then
 `import mmm.core.config`).
 

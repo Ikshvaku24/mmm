@@ -69,7 +69,7 @@ Scale conventions (important for choosing priors):
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import math
 import warnings
@@ -477,6 +477,12 @@ class FeatureSpec:
     pillar: str = ""                   # reporting group ("Online Media", "TV & DTV",
                                        # "Expert", ...) - contributions are rolled up
                                        # by pillar in 05_contributions
+    sub_pillar: str = ""               # a group INSIDE the pillar ("Search",
+                                       # "Social" inside "Online Media") - rolled up
+                                       # in contribution_by_sub_pillar.csv
+    label: str = ""                    # the readable name charts and client
+                                       # outputs show ("Paid search"); blank = the
+                                       # variable name. Reporting only.
     center_mode: str | None = None     # "none" | "mean" - the ONLY centring
                                        # setting. None = "none" (no centring)
                                        # for every sign.
@@ -572,6 +578,8 @@ class FeatureSpec:
                 f"got {s.scale_mode!r}. " + SCALE_HELP)
         s.baseline = bool(s.baseline)
         s.pillar = "" if s.pillar is None else str(s.pillar).strip()
+        s.sub_pillar = "" if s.sub_pillar is None else str(s.sub_pillar).strip()
+        s.label = "" if s.label is None else str(s.label).strip()
         ref = s.contribution_reference
         if isinstance(ref, str):
             ref = ref.strip().lower()
@@ -762,6 +770,11 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
                hierarchical/global from the `hierarchical` column.
       baseline (0/1) 1 to fold the feature into the baseline instead of
                reporting it as an incremental effect.
+      pillar / sub_pillar  the reporting group and a group inside it
+               ("Online Media" / "Search"); contributions roll up by both
+               (contribution_by_pillar.csv, contribution_by_sub_pillar.csv).
+      label    a readable name for charts and client outputs ("Paid search");
+               blank = the variable name. Reporting only.
       prior_sd_basis    "log" (default) | "relative" | "absolute". How to read
                global_prior_sd AND regional_sd_prior. Set "relative" and write
                0.2 to mean "+/-20%" - the sqrt(log(1+r^2)) conversion is then
@@ -834,6 +847,8 @@ def load_feature_config(path: str) -> list[FeatureSpec]:
             baseline=False if baseline is None else bool(int(baseline)),
             contribution_reference=_cell(r, "contribution_reference") or "auto",
             pillar=_cell(r, "pillar") or "",
+            sub_pillar=_cell(r, "sub_pillar") or "",
+            label=_cell(r, "label") or "",
             center_mode=_cell(r, "center_mode"),
             scale_mode=_cell(r, "scale_mode"),
             prior_sd_basis=(_cell(r, "prior_sd_basis") or "log"),

@@ -40,7 +40,7 @@ from __future__ import annotations
 import os as _os
 import re as _re
 
-__version__ = "2026.10.14.2"
+__version__ = "2026.10.16.2"
 
 ALLOW_ENV = "MMM_ALLOW_OUT_OF_SYNC"
 

@@ -2,8 +2,8 @@
 
 A Databricks App is ONE Python process, and Streamlit runs each user's
 session as a thread inside it - so module-level state is shared by every
-user. `SharedCache` keeps the results of repeated calls (the cluster's
-state, a run's status, a BMC's run list, codebase 1's schema and checks, a
+user. `SharedCache` keeps the results of repeated calls (a run's status,
+a BMC's run list, codebase 1's schema and checks, a
 run's output files) for EVERYONE, keyed by content, instead of each session
 fetching its own copy. Two sessions asking for the same thing at the same
 moment get ONE computation: the second waits for the first's result.

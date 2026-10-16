@@ -444,7 +444,9 @@ still sums to the fitted value.
   incremental. Its own contribution is still reported, so the baseline stays
   expandable. Baseline features appear **twice** in `contribution_totals.csv` —
   filter on `group` before summing.
-- **`pillar`** — roll-up group for `contribution_by_pillar.csv`.
+- **`pillar`** — roll-up group for `contribution_by_pillar.csv`; **`sub_pillar`**
+  — the group inside it, for `contribution_by_sub_pillar.csv`; **`label`** — the
+  readable name the app's charts show. None of the three changes the fit.
 - **`period_split`** — `mat` | `week` | `year` | `none`; MAT length follows
   `cadence` (52 weekly / 12 monthly).
 - **`rope_scaled`** — the region of practical equivalence driving

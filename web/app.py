@@ -43,7 +43,7 @@ brand.render_logo()
 charts.use_theme(font=brand.tokens()["font"],
                  surface={kind: brand.tokens(kind=kind)["surface"] for kind in ("light", "dark")})
 # top right on every page, where Streamlit's ⋮ menu was: who is signed in, and
-# the cluster with its Start button (the user's name is escaped there)
+# the light / dark button (the user's name is escaped there)
 render_top_bar(name)
 # the settings every page reads (Model settings, the datacube check, the run)
 init_config_state()

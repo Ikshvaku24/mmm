@@ -37,7 +37,7 @@ CSV, which is a table and belongs in a table. The YAML points at it via
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import copy
 import dataclasses
@@ -159,7 +159,8 @@ HELP: dict[str, dict[str, str]] = {
                          "may carry more). Groups the benchmark sheet; WITH contributions it "
                          "also drives the pre-model prior builder (case a) and pre-fills the "
                          "sheet's benchmark cells. Sample: samples/mapping_sample.csv"),
-        "share_file": ("OPTIONAL. section, pillar, pillar_share_pct, variable, spend, "
+        "share_file": ("OPTIONAL. section, pillar, pillar_share_pct[, sub_pillar, "
+                       "sub_pillar_share_pct], variable, spend, "
                        "variable_share_pct[, sign_constraint]. Sections: media, expert, "
                        "comp_media, trade, baseline. Builds the prior file from shares of "
                        "sales when the mapping has no contributions (cases b and c); always "

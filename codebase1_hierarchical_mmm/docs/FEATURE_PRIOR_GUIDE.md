@@ -27,7 +27,9 @@ signs if you also hand it a mapping or share file. Jump to §5.
 | `center_mode` | no | **`none`** (every sign) | `none` / `mean` |
 | `scale_mode` | no | **`none`** (every sign) | `none`/`sd`/`mean`/`mean_positive`/`max` |
 | `baseline` | no | 0 | 1 = fold into the baseline instead of reporting as incremental |
-| `pillar` | no | blank | reporting roll-up group |
+| `pillar` | no | blank | reporting roll-up group - *Online Media*, *TV & DTV*, *Trade* |
+| `sub_pillar` | no | blank | a group **inside** the pillar - *Search*, *Social* inside *Online Media*. Reporting only (see below) |
+| `label` | no | blank | the readable name charts and client outputs show - *Paid social* for `media_social_meta_imps`. Blank = the variable name. Reporting only |
 | `contribution_reference` | no | `auto` | `auto`/`zero`/`mean`/`min`/a number. **Reporting only** |
 
 > **Defaults: no centring, no scaling.** A blank `center_mode` / `scale_mode`
@@ -64,6 +66,35 @@ signs if you also hand it a mapping or share file. Jump to §5.
 > file that still carries a `center` column is rejected with instructions —
 > two columns meaning the same thing is exactly how a `center=1` silently
 > became a no-op in v7, when an explicit `center_mode` won and overwrote it.
+
+### Two reporting levels - `pillar` and `sub_pillar` (and a `label`)
+
+A pillar is the line a vendor deck shows (*Online Media* 4.5%); a sub-pillar is
+the next line down (*Search* 1.8%, *Social* 1.2%, *Display* 1.5%). Both are
+**reporting only** - the fit, the priors and the pooling never read them:
+
+```csv
+variable,pillar,sub_pillar,label,sign_constraint,global_prior_mean
+media_search_google_clicks,Online Media,Search,Paid search,positive,0.004
+media_social_meta_imps,Online Media,Social,Paid social,positive,0.002
+media_social_tiktok_imps,Online Media,Social,TikTok,positive,0.001
+media_display_dv360_imps,Online Media,Display,Programmatic display,positive,0.001
+media_tv_core_grps,TV & DTV,,Linear TV,positive,0.050
+```
+
+- A **blank `sub_pillar`** is fine: the variable sits directly under its pillar
+  (`media_tv_core_grps` above). In `contribution_by_sub_pillar.csv` it is listed
+  under a sub-pillar named like its pillar, so every pillar's sub-pillars add up
+  to its line in `contribution_by_pillar.csv`.
+- Sub-pillar names only need to be unique **within** a pillar: *Display* in
+  *Online Media* and *Display* in *Retail Media* are two different groups.
+- A `baseline=1` variable rolls up into **Baseline** whatever its pillar says,
+  exactly as before.
+- **`label`** is the name a client sees. The app's charts and tables use it in
+  place of the column name; blank shows the variable name. Keep it short (the
+  charts shorten anything over ~30 characters in the middle).
+- Both columns are written by the pre-model step: `sub_pillar` from the share
+  file (§5, File 2), `label` always blank for you to fill.
 
 ---
 
@@ -225,7 +256,7 @@ always written.
 data:
   feature_priors: feature_priors_v7.csv   # the LIST the two files must sit inside
   mapping_file: mapping.csv     # vendor_variable, our_variable[, region][, contribution]
-  share_file:   shares.csv      # section, pillar, pillar_share_pct, variable, spend, variable_share_pct
+  share_file:   shares.csv      # section, pillar, pillar_share_pct[, sub_pillar, sub_pillar_share_pct], variable, spend, variable_share_pct
   dv_aggregation: mean          # keep mean - it must equal run.dv_scale
 run:
   dv_scale: mean                # REQUIRED to fit with a generated file - see "Units" below
@@ -254,8 +285,8 @@ When contributions **and** shares are both given, **the contribution wins
 wherever it exists** — it is evidence, the share is an assumption. A variable
 the vendor never reported (a channel they did not model) falls back to its
 share-based prior rather than a blank. The share file always supplies the
-**pillar** names, the **baseline** flag and the default **signs**, because
-those are definitions rather than estimates.
+**pillar** and **sub-pillar** names, the **baseline** flag and the default
+**signs**, because those are definitions rather than estimates.
 
 ### What each input file must contain
 
@@ -296,11 +327,16 @@ rather than silently skipping a row.
 | `variable` | **yes** | must be a datacube column / prior-file variable, and may appear in **one section only** |
 | `pillar` | media, expert | the roll-up group. `comp_media`, `trade` and `baseline` default to *Competitor Media* / *Trade* / *Baseline* |
 | `pillar_share_pct` | media, expert, baseline | one number **per pillar** — write it once or repeat the same value; two different values for one pillar is an error. For `baseline` it is the whole-baseline share |
+| `sub_pillar` | no | a group **inside** the pillar (*Search*, *Social* inside *Online Media*). Any section; blank = none. Becomes the prior file's `sub_pillar` |
+| `sub_pillar_share_pct` | no (media, expert) | the sub-pillar's **own share of sales** - one number per sub-pillar (once, or repeated), and **part of** its pillar's share, never extra. Blank = the sub-pillar is a reporting group only. Needs a `sub_pillar` on the row; ignored, with a warning, outside media and expert |
 | `spend` | media, expert | how the pillar's share is split. A pillar with no spend at all cannot be split and stops the run |
 | `variable_share_pct` | comp_media, trade, baseline | the variable's own share. Missing on any row of those sections is an error |
 | `sign_constraint` | no | `positive`/`negative`/`free`. Blank falls back to: negative share → negative, a dummy → free, `comp_media` → negative, else positive |
 
 - Shares are **percentages**, not fractions: write `6.0`, not `0.06`.
+- The sub-pillar shares inside one pillar may total **at most** the pillar's
+  share; more stops the run (*"A sub-pillar's share is part of its pillar's
+  share, not extra"*).
 - Baseline `variable_share_pct` is a share **of the baseline**, not of sales,
   and they should total ≤ 100 (it warns otherwise).
 - The step prints the implied total share of sales and warns if it exceeds 100%.
@@ -431,21 +467,30 @@ What share of sales each piece of the business is expected to carry. Five
 **sections**, every one optional (`samples/share_sample.csv`):
 
 ```csv
-section,pillar,pillar_share_pct,variable,spend,variable_share_pct,sign_constraint
-media,TV & DTV,6.0,media_tv_core_grps,1800000,,
-media,TV & DTV,6.0,media_tv_halo_grps,600000,,
-media,Online Media,4.5,media_digital_hero_mat1,450000,,
-comp_media,,,media_competitor_tv_grps,,3.0,
-expert,Detailing,2.0,btl_expert-calls_premium,300000,,
-trade,,,trade_tpr_depth,,4.0,
-baseline,,62.0,sales_distribution_tdp,,40.0,
-baseline,,62.0,sales_base-price,,-35.0,
-baseline,,62.0,dummy_Jul25dip,,2.0,negative
+section,pillar,pillar_share_pct,sub_pillar,sub_pillar_share_pct,variable,spend,variable_share_pct,sign_constraint
+media,TV & DTV,6.0,,,media_tv_core_grps,1800000,,
+media,TV & DTV,6.0,,,media_tv_halo_grps,600000,,
+media,Online Media,4.5,Search,1.8,media_search_google_clicks,300000,,
+media,Online Media,4.5,Social,,media_social_meta_imps,250000,,
+media,Online Media,4.5,Social,,media_social_tiktok_imps,150000,,
+media,Online Media,4.5,Display,,media_display_dv360_imps,140000,,
+comp_media,,,,,media_competitor_tv_grps,,3.0,
+expert,Detailing,2.0,,,btl_expert-calls_premium,300000,,
+trade,,,,,trade_tpr_depth,,4.0,
+baseline,,62.0,,,sales_distribution_tdp,,40.0,
+baseline,,62.0,,,sales_base-price,,-35.0,
+baseline,,62.0,,,dummy_Jul25dip,,2.0,negative
 ```
+
+The two sub-pillar columns are optional - a file without them works exactly
+as before. Here *Search* has its own share (1.8% of sales); *Social* and
+*Display* are named for reporting only.
 
 | Section | What you give | Formula for `C` |
 |---|---|---|
 | **media** | pillars inside media, **one share per pillar**, **spend per variable** | `pillar_share × sales × spend / pillar_spend` |
+| **media / expert, a sub-pillar WITH its own share** | `sub_pillar_share_pct` | `sub_pillar_share × sales × spend / sub_pillar_spend` |
+| **media / expert, the pillar's other variables** (when any sub-pillar has a share) | — | `(pillar_share − Σ sub-pillar shares) × sales × spend / their_spend` |
 | **expert** | exactly like media | `pillar_share × sales × spend / pillar_spend` |
 | **comp_media** | a share per variable — no spend split | `variable_share × sales` |
 | **trade** | trade **is** the pillar; a share per variable | `variable_share × sales` |
@@ -464,10 +509,27 @@ where `sales` is the region's total KPI over the window.
 variables in that pillar. A pillar's `pillar_share_pct` may be written once or
 repeated on every row; two different numbers for one pillar is an error.
 
-**Pillars flow into the prior file.** The `pillar` you write here becomes the
-`pillar` column of the generated file, so the reporting roll-up matches the way
-the shares were defined. `comp_media` defaults to *Competitor Media*, `trade` to
-*Trade*, `baseline` to *Baseline*.
+**Sub-pillar shares carve the pillar's share; they never add to it.** In the
+example, *Online Media* is 4.5% and *Search* takes 1.8% of it:
+
+| Variable | Sub-pillar | Share it splits | Spend split | `C` |
+|---|---|---|---|---|
+| `media_search_google_clicks` | Search (own share) | 1.8% | 300,000 / 300,000 | 1.8% × sales |
+| `media_social_meta_imps` | Social | 4.5% − 1.8% = 2.7% | 250,000 / 540,000 | 1.25% × sales |
+| `media_social_tiktok_imps` | Social | 2.7% | 150,000 / 540,000 | 0.75% × sales |
+| `media_display_dv360_imps` | Display | 2.7% | 140,000 / 540,000 | 0.70% × sales |
+
+`sub_pillar_spend` and `their_spend` are computed like `pillar_spend`: the
+spend of the sub-pillar's variables, and of the pillar's variables in no
+sub-pillar with a share. The workbook's formula column prints the remainder as
+`(4.5% - 1.8% given to sub-pillars)`. If the sub-pillar shares use up the
+whole pillar share, the other variables get **no** prior mean (a note says
+so) rather than a zero.
+
+**Pillars flow into the prior file.** The `pillar` and `sub_pillar` you write
+here become the `pillar` and `sub_pillar` columns of the generated file, so the
+reporting roll-up matches the way the shares were defined. `comp_media`
+defaults to *Competitor Media*, `trade` to *Trade*, `baseline` to *Baseline*.
 
 **The baseline section** holds the consumption data — TDP, price, category
 volume and price, dummies, sometimes price promotion. There is no separate
@@ -506,7 +568,8 @@ given is written:
 | `variable` | every datacube column (or every configured feature) | never |
 | `global_prior_mean` | the generated coefficient | neither input file covered the variable, or it has no support anywhere |
 | `sign_constraint` | the contribution's sign, or the share file's column | same — and a blank reads as `free` |
-| `pillar`, `baseline` | the **share file**, which states them in as many words | no share file, or the variable is not in it |
+| `pillar`, `sub_pillar`, `baseline` | the **share file**, which states them in as many words | no share file, or the variable is not in it (`sub_pillar` also when the share file leaves it blank) |
+| `label` | — | **always** - the client-facing name is yours to write; blank shows the variable name |
 | `prior_sd_basis`, `prior_mean_basis` | `relative` and `median`, always | never |
 | `pooling`, `global_prior_sd`, `regional_sd_prior`, `contribution_reference`, `center_mode`, `scale_mode` | — | **always.** Blank is the documented default: `hierarchical`, no centring, no scaling, `auto` reference |
 

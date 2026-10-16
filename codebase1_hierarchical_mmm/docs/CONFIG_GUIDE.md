@@ -194,7 +194,7 @@ Paths are relative **to the YAML file**, not the working directory.
 | `feature_priors` | `feature_priors.csv` | the feature/prior table — **the list of modelled columns**. Its `variable` values must match the data column names exactly. **Leave it `null` on a new project**: the pre-model step then writes one from the datacube and tells you where (see below) |
 | `date_format` | `null` | explicit strptime format. `null` = infer |
 | `mapping_file` | `null` | **optional.** `vendor_variable, our_variable[, region][, contribution]` — which vendor variable is which of ours. Every `our_variable` must be in `feature_priors` (which may carry more). Groups the benchmark sheet; **with contributions** it builds the priors (case a) and pre-fills the sheet's benchmark cells. Sample: `samples/mapping_sample.csv` |
-| `share_file` | `null` | **optional.** `section, pillar, pillar_share_pct, variable, spend, variable_share_pct[, sign_constraint]` — shares of sales by section (`media`, `expert`, `comp_media`, `trade`, `baseline`). Every `variable` must be in `feature_priors`. Builds the priors when there are no contributions (cases b, c) and always supplies pillars + the baseline flag. Sample: `samples/share_sample.csv` |
+| `share_file` | `null` | **optional.** `section, pillar, pillar_share_pct[, sub_pillar, sub_pillar_share_pct], variable, spend, variable_share_pct[, sign_constraint]` — shares of sales by section (`media`, `expert`, `comp_media`, `trade`, `baseline`). Every `variable` must be in `feature_priors`. Builds the priors when there are no contributions (cases b, c) and always supplies pillars, sub-pillars + the baseline flag. A `sub_pillar_share_pct` gives a sub-pillar its own part of its pillar's share (`FEATURE_PRIOR_GUIDE.md` §5, File 2). Sample: `samples/share_sample.csv` |
 | `dv_aggregation` | `mean` | `mean`/`sum`/`median` — the per-region KPI level a generated coefficient is expressed against. **Must equal `run.dv_scale`** — keep `mean` and set `run.dv_scale: mean` when fitting with a generated file |
 | `national_basis` | `average` | how per-region coefficients become ONE national prior. `average` = their mean (the centre of the regions — right for `hierarchical`/`independent` pooling). `weighted` = `Σ contribution / Σ(support × dv_agg)`, the coefficient that reproduces the national **total** — right for `pooling: global`. See below |
 | `pre_model_dir` | `null` | where `feature_priors_national.csv`, `feature_priors_regional.csv` and the calculation workbook go. `null` = `pre_model_outputs/` |
@@ -402,7 +402,7 @@ datacube is the list):
 ```yaml
 data:
   mapping_file: mapping.csv     # vendor_variable, our_variable[, region][, contribution]
-  share_file:   shares.csv      # section, pillar, pillar_share_pct, variable, spend, variable_share_pct
+  share_file:   shares.csv      # section, pillar, pillar_share_pct[, sub_pillar, sub_pillar_share_pct], variable, spend, variable_share_pct
   dv_aggregation: mean
 run:
   dv_scale: mean                # the generated means are per unit of the region's MEAN KPI

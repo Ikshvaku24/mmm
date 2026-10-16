@@ -32,7 +32,7 @@ so the size of the gap is visible rather than assumed.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import os
 import warnings
@@ -152,6 +152,16 @@ def _pillar_of(spec) -> str:
     if spec is None or spec.baseline:
         return "Baseline"
     return spec.pillar or "Unassigned"
+
+
+def _sub_pillar_of(spec) -> str:
+    """The group inside the pillar ("Search" in "Online Media"); "" if none."""
+    return "" if spec is None else (getattr(spec, "sub_pillar", "") or "")
+
+
+def _label_of(spec) -> str:
+    """The readable name the prior file gives the variable; "" if none."""
+    return "" if spec is None else (getattr(spec, "label", "") or "")
 
 
 def _region_col(pdata) -> np.ndarray:
@@ -315,7 +325,8 @@ def _model_input_summary(pdata) -> pd.DataFrame:
             centred = info.method == "center_scale"
             rows.append({
                 "region": rname, "feature": fname,
-                "pillar": _pillar_of(spec),
+                "pillar": _pillar_of(spec), "sub_pillar": _sub_pillar_of(spec),
+                "label": _label_of(spec),
                 "sign": "" if spec is None else spec.sign,
                 "pooling": "" if spec is None else spec.pooling,
                 "baseline": "" if spec is None else bool(spec.baseline),
@@ -415,17 +426,20 @@ def _component_frame(decomp, pdata, out_cfg: OutputConfig) -> pd.DataFrame:
     period = period_labels(pdata.dates.values, out_cfg.period_split,
                                 _mat_periods(pdata, out_cfg))
 
-    parts = [(BASELINE_CORE, "baseline_core", "Baseline", np.median(core, axis=0))]
+    parts = [(BASELINE_CORE, "baseline_core", "Baseline", "", "",
+              np.median(core, axis=0))]
     for name, vals in decomp.contrib_median.items():
+        spec = specs.get(name)
         parts.append((name,
                       "baseline_part" if name in base_feats else "incremental",
-                      _pillar_of(specs.get(name)), vals))
+                      _pillar_of(spec), _sub_pillar_of(spec), _label_of(spec), vals))
 
     frames = []
-    for name, group, pillar, vals in parts:
+    for name, group, pillar, sub_pillar, label, vals in parts:
         frames.append(pd.DataFrame({
             "region": region, "date": dates, "dataset": dataset,
-            "period": period, "pillar": pillar, "feature": name,
+            "period": period, "pillar": pillar, "sub_pillar": sub_pillar,
+            "feature": name, "label": label,
             "group": group, "volume": np.asarray(vals, dtype=float)}))
     return pd.concat(frames, ignore_index=True)
 
@@ -468,7 +482,9 @@ def write_contribution_timeseries(comp: pd.DataFrame, decomp, pdata,
             ("__residual__", "reference", pdata.y_orig - med)):
         e = ref.copy()
         e["pillar"] = ""
+        e["sub_pillar"] = ""
         e["feature"] = name
+        e["label"] = ""
         e["group"] = group
         e["volume"] = np.asarray(vals, dtype=float)
         extra.append(e)
@@ -530,22 +546,26 @@ def write_contribution_summary(comp: pd.DataFrame, decomp, pdata, outdir: str,
             actual = float(o["actual"].sum())
             fitted = float(o["fitted"].sum())
             npd = _n_periods(o["date"])
-            agg = (c.groupby(["pillar", "feature", "group"], as_index=False)["volume"]
-                   .sum())
+            keys = [k for k in ("pillar", "sub_pillar", "feature", "label", "group")
+                    if k in c.columns]
+            agg = c.groupby(keys, as_index=False)["volume"].sum()
             # split what closes the gap to actual: the model's error, and the
             # sum-of-medians artefact. Together they are exactly actual - sum(c)
             agg = pd.concat([agg, pd.DataFrame([
-                {"pillar": "Baseline", "feature": "__median_gap__",
-                 "group": "median_gap",
+                {"pillar": "Baseline", "sub_pillar": "", "label": "",
+                 "feature": "__median_gap__", "group": "median_gap",
                  "volume": fitted - float(agg["volume"].sum())},
-                {"pillar": "Baseline", "feature": "__residual__",
-                 "group": "residual", "volume": actual - fitted},
+                {"pillar": "Baseline", "sub_pillar": "", "label": "",
+                 "feature": "__residual__", "group": "residual",
+                 "volume": actual - fitted},
             ])], ignore_index=True)
 
-            def add(pillar, feature, group, row_type, volume):
+            def add(pillar, feature, group, row_type, volume, sub_pillar="",
+                    label=""):
                 rows.append({
                     "period": period, "n_periods": npd, "region": region,
-                    "pillar": pillar, "feature": feature, "group": group,
+                    "pillar": pillar, "sub_pillar": sub_pillar, "feature": feature,
+                    "label": label, "group": group,
                     "row_type": row_type, "volume": float(volume),
                     "contribution_pct": (float(volume) / actual * 100
                                          if actual else np.nan),
@@ -560,7 +580,9 @@ def write_contribution_summary(comp: pd.DataFrame, decomp, pdata, outdir: str,
                 block = block.reindex(
                     block["volume"].abs().sort_values(ascending=False).index)
                 for _, r in block.iterrows():
-                    add(pil, r["feature"], r["group"], "component", r["volume"])
+                    add(pil, r["feature"], r["group"], "component", r["volume"],
+                        sub_pillar=r.get("sub_pillar", "") or "",
+                        label=r.get("label", "") or "")
                 add(pil, f"{pil} Total", "", "pillar_total", block["volume"].sum())
             add("", "Grand Total", "", "grand_total", agg["volume"].sum())
 
@@ -791,7 +813,7 @@ def write_contribution_math(decomp, pdata, outdir: str,
             scale = float(info.scale)
             rows.append({
                 "region": rname, "feature": fname,
-                "pillar": _pillar_of(spec),
+                "pillar": _pillar_of(spec), "sub_pillar": _sub_pillar_of(spec),
                 "group": ("baseline_part" if fname in set(decomp.baseline_features or ())
                           else "incremental"),
                 "scaling_method": info.method,

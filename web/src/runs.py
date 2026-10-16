@@ -5,11 +5,11 @@ name>/, see projects.py - and, when the Jobs API knows it, by its job run. Its
 panel stays on the page until dismissed - it is no longer a popup that loses
 the run when closed. While the job runs, the panel refreshes itself every 5
 seconds - how long the run has been QUEUED (another run holds the job), how
-long the CLUSTER has been starting, or how long the notebook has been
+long the COMPUTE has been starting, or how long the notebook has been
 running; Cancel - and shows the job log as it grows (codebase 1's
 mmm/app_job.py copies job_log.txt to the run's Outputs/ every 30 s). A run's
 run time is the NOTEBOOK's time only (the Jobs API's execution time), never
-the queue or the cluster start. When it finishes it shows the notebook's real
+the queue or the compute start. When it finishes it shows the notebook's real
 error with its full traceback, or the codebase version that ran; the run's
 zip (its inputs AND its outputs); the complete job log; and the results as
 charts (src/charts.py): fit (the aggregate's R², or the chosen region's),
@@ -46,10 +46,12 @@ than "not found" - e.g. a permission error - is shown as it is.
 """
 import contextlib
 import hashlib
+import html
 import io
 import json
 import os
 import posixpath
+import re
 import shutil
 import tempfile
 import threading
@@ -103,9 +105,11 @@ ZIP_CACHE_BYTES = int(float(os.environ.get("BRIDGE_ZIP_CACHE_MB", "2048")) * 2 *
 _BUILD_LOCKS = {}
 _BUILD_GUARD = threading.Lock()
 
-RESULT_VIEWS = ("Fit", "Contributions", "Decomposition", "Collinearity",
-                "Convergence", "Warnings")
-CHART_VIEWS = {"Fit", "Contributions", "Decomposition", "Collinearity"}
+# the result views; "Summary" is the one to show a client. The sampler's
+# health (max R-hat, divergences) sits above them all - no view of its own
+RESULT_VIEWS = ("Summary", "Fit", "Contributions", "Decomposition", "Collinearity",
+                "Warnings")
+CHART_VIEWS = {"Summary", "Fit", "Contributions", "Decomposition", "Collinearity"}
 RESULT_FILES = {
     "fit": "04_fit/fit_metrics.csv",
     "avp": "04_fit/actual_vs_predicted.csv",
@@ -115,6 +119,7 @@ RESULT_FILES = {
     "collin_vif": "01_data/collinearity_vif.csv",
     "collin_summary": "01_data/collinearity_summary.csv",
     "convergence": "02_convergence/convergence_report.txt",
+    "sampling_log": "02_convergence/sampling_log.json",
     "warnings": "00_warnings/all_warnings.csv",
     "warning_texts": "00_warnings/warning_texts.csv",
 }
@@ -171,7 +176,7 @@ def fmt_seconds(seconds):
 
 
 def _duration(run):
-    """Start to end (or to now) - the whole wall time, queue and cluster
+    """Start to end (or to now) - the whole wall time, queue and compute
     start included. The run time shown is run_timing's notebook time."""
     start, end = (run or {}).get("start_time"), (run or {}).get("end_time")
     if not start:
@@ -208,7 +213,7 @@ def run_timing(run, now_ms=None):
 
     {"phase": "queued" | "pending" | "running" | "done" | "",
      "since_ms": when the current phase began (waiting / running),
-     "queue_ms", "setup_ms": time in the job queue and starting the cluster,
+     "queue_ms", "setup_ms": time in the job queue and starting the compute,
      "execution_ms": the NOTEBOOK's own time (finished: the API's execution
                      time; running: so far), "queue_reason": the API's words}"""
     run = run or {}
@@ -244,8 +249,8 @@ def run_timing(run, now_ms=None):
 
 
 def _phase_label(timing):
-    """"⏳ Queued" / "⏳ Cluster starting" / "🔄 Running" for an active run."""
-    return {"queued": "⏳ Queued", "pending": "⏳ Cluster starting",
+    """"⏳ Queued" / "⏳ Compute starting" / "🔄 Running" for an active run."""
+    return {"queued": "⏳ Queued", "pending": "⏳ Compute starting",
             "running": "🔄 Running"}.get(timing.get("phase"), "")
 
 
@@ -256,15 +261,15 @@ def timing_text(run, info=None, now_ms=None):
     now = now_ms if now_ms is not None else time.time() * 1000
     t = run_timing(run, now)
     waited = [f"queued {fmt_seconds(t['queue_ms'] / 1000)}" if t["queue_ms"] else "",
-              f"cluster start {fmt_seconds(t['setup_ms'] / 1000)}" if t["setup_ms"] else ""]
+              f"compute start {fmt_seconds(t['setup_ms'] / 1000)}" if t["setup_ms"] else ""]
     waited = " · ".join(w for w in waited if w)
     if t["phase"] == "queued":
         return (f"Queued for {fmt_seconds((now - t['since_ms']) / 1000)} - waiting for the "
                 "job to be free (another run holds it)"
                 + (f": {t['queue_reason']}" if t["queue_reason"] else ""))
     if t["phase"] == "pending":
-        return (f"Cluster pending for {fmt_seconds((now - t['since_ms']) / 1000)} - the "
-                "cluster is starting; the notebook has not begun")
+        return (f"Compute starting for {fmt_seconds((now - t['since_ms']) / 1000)} - "
+                "the job's serverless compute is starting; the notebook has not begun")
     if t["phase"] == "running":
         return (f"Running for {fmt_seconds(t['execution_ms'] / 1000)} (the notebook)"
                 + (f" · before that: {waited}" if waited else ""))
@@ -563,7 +568,7 @@ def _panel_body(ref, where, run, on_reuse):
 
         if running:
             st.caption("The results and the run's zip appear here when the run "
-                       "finishes. The job log below is copied from the cluster about "
+                       "finishes. The job log below is copied from the job about "
                        "every 30 seconds.")
             _render_job_log(ref, where, live=True)
             return
@@ -1060,10 +1065,17 @@ def _view_picker(tag):
     return st.session_state[key]
 
 
+def _md(text) -> str:
+    """Plain text made safe for st.markdown: variable names carry _ and *
+    (which would turn into italics) and a $ would start a formula."""
+    return re.sub(r"([\\`*_\[\]<>#|~$])", r"\\\1", str(text))
+
+
 def _render_results(ref, where):
     key = projects.ref_key(ref)
     tag = f"{where}_{key}"
     st.markdown("**Results**")
+    _render_health(ref, tag)
     view = _view_picker(tag)
     if not view:
         return
@@ -1072,7 +1084,9 @@ def _render_results(ref, where):
         st.caption("Charts need the plotly package (it is in web/requirements.txt - "
                    "redeploy the app to install it). Showing the tables instead.")
     mode = _theme()
-    if view == "Fit":
+    if view == "Summary":
+        _view_summary(ref, tag, mode, plotted)
+    elif view == "Fit":
         _view_fit(ref, tag, mode, plotted)
     elif view == "Contributions":
         _view_contributions(ref, tag, mode, plotted)
@@ -1080,8 +1094,6 @@ def _render_results(ref, where):
         _view_decomposition(ref, tag, mode, plotted)
     elif view == "Collinearity":
         _view_collinearity(ref, tag, mode, plotted)
-    elif view == "Convergence":
-        _view_convergence(ref, tag)
     else:
         table, problem = read_run_frame(ref, RESULT_FILES["warnings"])
         if table is None:
@@ -1091,6 +1103,125 @@ def _render_results(ref, where):
         render_warnings_table(table.fillna(""),
                               lambda slug: read_run_file(ref, f"00_warnings/{slug}.md")[0],
                               key=tag, texts=texts)
+
+
+def _health_tile(label, value, status, word, explain, detail="") -> str:
+    """One check as a tile: the number in ink (a detail under it, small), and
+    its state as an icon + a word beside a dot in the status colour (never the
+    colour alone)."""
+    css = {"good": "good", "warning": "warning", "critical": "critical"}.get(status, "unknown")
+    return (f'<div class="bridge-health-item" title="{html.escape(explain)}">'
+            f'<div class="bridge-health-label">{html.escape(label)}</div>'
+            f'<div class="bridge-health-value">{html.escape(value)}</div>'
+            f'<div class="bridge-health-status bridge-health-status--{css}">'
+            f'<span class="bridge-health-dot" aria-hidden="true"></span>'
+            f"{html.escape(word)}</div>"
+            + (f'<div class="bridge-health-detail">{html.escape(detail)}</div>' if detail
+               else "") + "</div>")
+
+
+def _render_health(ref, tag):
+    """The sampler's health in two numbers, above every view: the largest
+    R-hat (do the chains agree?) and the divergences (did the sampler fail
+    anywhere?) - read from the two lines codebase 1 writes at the top of
+    02_convergence/convergence_report.txt. The full report is a download."""
+    data, _problem = read_run_file(ref, RESULT_FILES["convergence"])
+    if data is None:
+        return
+    log = {}
+    raw, _p = read_run_file(ref, RESULT_FILES["sampling_log"])
+    if raw is not None:
+        try:
+            log = json.loads(raw.decode("utf-8"))
+        except (UnicodeDecodeError, ValueError):
+            log = {}
+    h = charts.run_health(data.decode("utf-8", errors="replace"), log)
+    rhat = "n/a" if h["rhat"] is None else f"{h['rhat']:.3f}"
+    div = "n/a" if h["divergences"] is None else f"{h['divergences']:,}"
+    div_detail = (f"{h['divergence_frac'] * 100:.2f}% of {h['draws']:,} draws"
+                  if h["divergence_frac"] is not None and h["divergences"] else "")
+    tiles = (
+        _health_tile("Max R-hat", rhat, h["rhat_status"],
+                     charts.HEALTH_WORDS.get(h["rhat_status"], "not measured"),
+                     "R-hat compares the sampler's chains: under 1.01 they agree (the "
+                     "model converged); 1.01-1.05 check it; over 1.05 the results are "
+                     "not reliable - refit with more tuning, or simplify the model.")
+        + _health_tile("Divergences", div, h["divergence_status"],
+                       charts.DIVERGENCE_WORDS.get(h["divergence_status"], "not measured"),
+                       "Steps where the sampler could not follow the posterior: 0 is "
+                       "ideal, under 1% of draws is tolerable, more means the estimates "
+                       "may be biased - raise target_accept or simplify.",
+                       detail=div_detail))
+    left, right = st.columns([5, 1.2], vertical_alignment="center")
+    with left:
+        st.markdown(f'<div class="bridge-health">{tiles}</div>', unsafe_allow_html=True)
+    with right:
+        st.download_button("Full report", data=data, help="02_convergence/"
+                           "convergence_report.txt - R-hat, ESS, divergences, tree depth "
+                           "and the worst parameters",
+                           file_name="convergence_report.txt", key=f"dl_{tag}_convergence",
+                           on_click="ignore", type="tertiary",
+                           icon=":material/description:")
+
+
+def _view_summary(ref, tag, mode, plotted):
+    """One page to show a client: how sales split into base and incremental,
+    what each pillar drives (the waterfall), the largest drivers, and how
+    well the model fits."""
+    summary, problem = read_run_frame(ref, RESULT_FILES["summary"])
+    if summary is None:
+        st.info(problem)
+        return
+    fit, _p1 = read_run_frame(ref, RESULT_FILES["fit"])
+    regions, periods = charts.summary_choices(summary)
+    c1, c2 = st.columns(2, vertical_alignment="bottom")
+    region = c1.selectbox("Region", regions, key=f"summary_region_{tag}",
+                          format_func=_region_label)
+    period = c2.selectbox("Period", periods, key=f"summary_period_{tag}")
+    split = charts.sales_split(summary, region, period)
+    fit_region = charts.ALL if region == charts.PORTFOLIO else region
+    fits = {label: (value, help_text) for label, value, help_text in
+            (charts.fit_tiles(fit, fit_region) if fit is not None else [])}
+    cols = st.columns(4)
+    cols[0].metric("Base", f"{split['base']:.1f}%",
+                   help="Sales the drivers do not explain - the region intercept, trend "
+                        "and seasonality - plus the baseline drivers (distribution, "
+                        "price): what would sell anyway. Share of actual sales.")
+    cols[1].metric("Incremental", f"{split['incremental']:.1f}%",
+                   help="Sales driven by every other pillar - media, expert, trade, "
+                        "promotions. Share of actual sales.")
+    for col, label in zip(cols[2:], ("R² · training", "MAPE · holdout")):
+        if label in fits:
+            col.metric(label, fits[label][0], help=fits[label][1])
+    if split["other"] and abs(split["other"]) >= 0.05:
+        st.caption(f"The model leaves {split['other']:.1f}% of sales unexplained (actual - "
+                   "fitted, plus the sum-of-medians gap) - base + incremental + this = 100%.")
+    colours = charts.colour_map(charts.pillar_order(summary), mode)
+    steps = charts.waterfall_steps(summary, region, period)
+    drivers = charts.top_drivers(summary, region, period)
+    st.markdown("**What drives sales** - each pillar's incremental contribution")
+    if plotted and len(steps) > 1:
+        _plot(charts.waterfall_figure(steps, colours, mode), key=f"summary_waterfall_{tag}")
+    else:
+        st.dataframe(steps[["label", "value"]].rename(columns={"value": "% of sales"}),
+                     use_container_width=True, hide_index=True)
+    st.markdown("**The largest drivers**")
+    if plotted and len(drivers):
+        _plot(charts.drivers_figure(drivers, colours, mode), key=f"summary_drivers_{tag}")
+    else:
+        st.dataframe(drivers.iloc[::-1][["name", "pillar", "pct"]]
+                     .rename(columns={"pct": "% of sales"}),
+                     use_container_width=True, hide_index=True)
+    st.caption(f"{_region_label(region)}, {period}. Shares of actual sales; each pillar keeps "
+               "its colour in every chart. The camera button on a chart saves it as an image.")
+    avp, _p2 = read_run_frame(ref, RESULT_FILES["avp"])
+    if avp is not None and plotted:
+        st.markdown("**How well the model fits**")
+        frame, holdout = charts.fit_series(avp, fit_region)
+        _plot(charts.fit_figure(frame, holdout, mode), key=f"summary_fit_{tag}")
+        st.caption("Actual sales against the model's fit"
+                   + (" - the grey block is the holdout, weeks the model never saw."
+                      if holdout is not None else "."))
 
 
 def _view_fit(ref, tag, mode, plotted):
@@ -1136,33 +1267,45 @@ def _view_contributions(ref, tag, mode, plotted):
     region = c1.selectbox("Region", regions, key=f"contrib_region_{tag}",
                           format_func=_region_label)
     period = c2.selectbox("Period", periods, key=f"contrib_period_{tag}")
-    bars, totals = charts.contribution_bars(summary, region, period)
+    bars, _totals = charts.contribution_bars(summary, region, period)
+    split = charts.sales_split(summary, region, period)
     t1, t2, t3 = st.columns(3)
-    t1.metric("Baseline core", f"{totals['core']:.1f}%",
-              help="The region intercept + seasonality + trend - the sales the drivers "
-                   "do not explain. A tile, not a bar, so the drivers stay readable.")
-    t2.metric("Drivers (the bars)", f"{totals['drivers']:.1f}%",
-              help="Every baseline feature and incremental driver in the chart.")
-    t3.metric("Residual + median gap", f"{totals['other']:.1f}%",
-              help="Actual - fitted (what the model cannot explain) and the "
-                   "sum-of-medians gap. The three tiles add up to 100%.")
+    t1.metric("Base", f"{split['base']:.1f}%",
+              help="The region intercept + seasonality + trend, plus the baseline drivers "
+                   "(distribution, price) - what would sell anyway.")
+    t2.metric("Incremental", f"{split['incremental']:.1f}%",
+              help="What every other pillar drives - the waterfall below.")
+    t3.metric("Not explained", f"{split['other']:.1f}%",
+              help="Actual - fitted (what the model cannot explain) and the sum-of-medians "
+                   "gap. The three tiles add up to 100%.")
     if bars.empty:
         st.info("No drivers in this region and period.")
         return
-    open_key = f"contrib_open_{tag}"
+    colours = charts.colour_map(charts.pillar_order(summary), mode)
+    with_base = st.toggle("Include the base", key=f"contrib_base_{tag}",
+                          help="Show the whole of sales: the base and the baseline drivers "
+                               "first, then the pillars, adding up to 100%. Off, the "
+                               "pillars fill the chart.")
+    steps = charts.waterfall_steps(summary, region, period, include_base=with_base)
+    if plotted and len(steps) > 1:
+        _plot(charts.waterfall_figure(steps, colours, mode), key=f"contrib_waterfall_{tag}")
+        st.caption(f"Each pillar's contribution as a share of actual sales - "
+                   f"{_region_label(region)}, {period} - building to "
+                   + ("all of sales." if with_base else "the incremental total."))
+    st.markdown("**By pillar, sub-pillar and variable**")
+    open_key, subs_key = f"contrib_open_{tag}", f"contrib_subs_{tag}"
     pillars = list(charts.pillar_rows(bars)["pillar"])
     opened = [p for p in st.session_state.get(open_key) or [] if p in pillars]
-    tree = charts.contribution_tree(bars, opened)
+    opened_subs = list(st.session_state.get(subs_key) or [])
+    tree = charts.contribution_tree(bars, opened, opened_subs)
     if plotted:
-        colours = charts.colour_map(charts.pillar_order(summary), mode)
         _plot(charts.contribution_tree_figure(tree, colours, mode), key=f"contrib_chart_{tag}")
-        st.caption(f"Each pillar's contribution as a share of actual sales - "
-                   f"{_region_label(region)}, {period}. Open a pillar with its **+** "
-                   "below to see its variables (the lighter bars). Each pillar keeps its "
-                   "colour in every region, period and chart"
+        st.caption("Open a pillar with its **+** below to see its sub-pillars (or its "
+                   "variables), and a sub-pillar to see its variables - the lighter bars. "
+                   "Each pillar keeps its colour in every region, period and chart"
                    + (f"; {charts.UNASSIGNED} = the variables the prior file gives no "
                       "pillar." if charts.UNASSIGNED in pillars else "."))
-    _pillar_tree(bars, opened, pillars, open_key, tag)
+    _pillar_tree(bars, opened, opened_subs, pillars, open_key, subs_key, tag)
     _table(bars.iloc[::-1].rename(columns={"pct": "contribution_pct"}), ref,
            RESULT_FILES["summary"], tag, expanded=False)
 
@@ -1173,8 +1316,22 @@ def _toggle_pillar(open_key, pillar):
                                   else opened + [pillar])
 
 
-def _pillar_tree(bars, opened, pillars, open_key, tag):
-    """The pillars as rows - press one (its +) to list its variables under it."""
+def _members_table(members):
+    out = pd.DataFrame({"variable": members["feature"].values})
+    if "label" in members and members["label"].astype(str).str.strip().ne("").any():
+        out["name"] = members["label"].values
+    out["% of sales"] = members["pct"].values
+    out["volume"] = members["volume"].values
+    st.dataframe(out, use_container_width=True, hide_index=True,
+                 height=min(36 * (len(out) + 1) + 2, 320),
+                 column_config={
+                     "% of sales": st.column_config.NumberColumn(format="%.2f%%"),
+                     "volume": st.column_config.NumberColumn(format="localized")})
+
+
+def _pillar_tree(bars, opened, opened_subs, pillars, open_key, subs_key, tag):
+    """The pillars as rows - press one (its +) to list its sub-pillars (or its
+    variables), and a sub-pillar to list its variables."""
     first, second, _rest = st.columns([1, 1, 4])
     with first:
         st.button("Open all", key=f"contrib_open_all_{tag}", use_container_width=True,
@@ -1191,14 +1348,28 @@ def _pillar_tree(bars, opened, pillars, open_key, tag):
                   key=f"ctree_{tag}_{digest}", use_container_width=True,
                   icon=":material/remove:" if is_open else ":material/add:",
                   on_click=_toggle_pillar, args=(open_key, p.pillar),
-                  help=("Hide" if is_open else "Show") + f" the variables of {p.pillar}.")
-        if is_open:
-            members = bars[bars["pillar"] == p.pillar].sort_values("pct", ascending=False)
-            st.dataframe(pd.DataFrame({"variable": members["feature"],
-                                       "% of sales": members["pct"].round(3),
-                                       "volume": members["volume"].round(0)}),
-                         use_container_width=True, hide_index=True,
-                         height=min(36 * (len(members) + 1) + 2, 320))
+                  help=("Hide" if is_open else "Show") + f" what makes up {p.pillar}.")
+        if not is_open:
+            continue
+        if not charts.has_sub_pillars(bars, p.pillar):
+            _members_table(charts._members(bars, p.pillar))
+            continue
+        for sp in charts.sub_pillar_rows(bars, p.pillar).itertuples(index=False):
+            key = charts.sub_key(p.pillar, sp.sub_pillar)
+            sub_open = key in opened_subs
+            pad, body = st.columns([0.05, 0.95])
+            with body:
+                sdig = hashlib.sha1(key.encode()).hexdigest()[:8]
+                st.button(f"{sp.sub_pillar}  ·  {charts.pct_label(sp.pct)} of sales  ·  "
+                          f"{sp.n} variable{'s' if sp.n != 1 else ''}",
+                          key=f"csub_{tag}_{sdig}", use_container_width=True,
+                          type="tertiary",
+                          icon=":material/remove:" if sub_open else ":material/add:",
+                          on_click=_toggle_pillar, args=(subs_key, key),
+                          help=("Hide" if sub_open else "Show")
+                               + f" the variables of {sp.sub_pillar}.")
+                if sub_open:
+                    _members_table(charts._members(bars, p.pillar, sp.sub_pillar))
 
 
 def _view_decomposition(ref, tag, mode, plotted):
@@ -1210,22 +1381,34 @@ def _view_decomposition(ref, tag, mode, plotted):
     summary, _problem = read_run_frame(ref, RESULT_FILES["summary"])
     pillars = charts.pillar_order(summary if summary is not None else ts)
     regions = [charts.ALL] + sorted(ts["region"].astype(str).unique())
-    c1, c2 = st.columns([2, 3], vertical_alignment="bottom")
+    c1, c2, c3 = st.columns([2, 2, 2], vertical_alignment="bottom")
     region = c1.selectbox("Region", regions, key=f"decomp_region_{tag}")
-    drivers_only = c2.toggle("Drivers only", key=f"decomp_drivers_{tag}",
-                             help="Leave out the baseline core and the actual-sales "
-                                  "line, so the drivers fill the chart.")
-    wide, actual = charts.decomposition_frame(ts, pillars, region)
+    show = c2.selectbox("Show", ["All pillars"] + [p for p in pillars if p != charts.OTHER],
+                        key=f"decomp_pillar_{tag}",
+                        help="All pillars, or one pillar split into its sub-pillars (its "
+                             "variables when it has none) week by week.")
+    drill = show if show != "All pillars" else None
+    drivers_only = (c3.toggle("Drivers only", key=f"decomp_drivers_{tag}",
+                              help="Leave out the baseline core and the actual-sales "
+                                   "line, so the drivers fill the chart.")
+                    if drill is None else False)
+    wide, actual = charts.decomposition_frame(ts, pillars, region, pillar=drill)
     if drivers_only:
         wide = wide.drop(columns=[charts.BASELINE_CORE], errors="ignore")
         actual = actual.iloc[0:0]
-    if plotted:
-        colours = charts.colour_map(pillars, mode)
+    if plotted and not wide.empty:
+        colours = (charts.colour_map(pillars, mode) if drill is None
+                   else charts.colour_map(charts.drill_series(ts, drill), mode))
         _plot(charts.decomposition_figure(wide, actual, colours, mode),
               key=f"decomp_chart_{tag}")
         st.caption("Sales each week, split into the baseline core (grey) and each "
                    "pillar's contribution; negative contributions sit below zero. Click "
-                   "a legend entry to hide or show it.")
+                   "a legend entry to hide or show it." if drill is None else
+                   f"{drill} each week, split into its "
+                   + ("sub-pillars" if charts.has_sub_pillars(
+                       charts.contribution_bars(summary, charts.PORTFOLIO, "Total")[0]
+                       if summary is not None else pd.DataFrame(), drill) else "variables")
+                   + ". Click a legend entry to hide or show it.")
     table = wide.copy()
     if len(actual):
         table["Actual sales"] = actual
@@ -1238,9 +1421,10 @@ def _safe_name(name) -> str:
 
 
 def _view_collinearity(ref, tag, mode, plotted):
-    """How tangled the model's inputs are, per region - the correlation between
-    every pair of the design's columns (features, seasonality, trend) as a
-    heatmap, and each variable's VIF - from 01_data/collinearity_*.csv."""
+    """How tangled the model's inputs are, per region - in plain words first,
+    then the pairs of variables that move together, each variable's VIF in
+    bands, and the whole correlation matrix (every pair once) - from
+    01_data/collinearity_*.csv."""
     matrix, _p1 = read_run_frame(ref, RESULT_FILES["collin_matrix"])
     vif, _p2 = read_run_frame(ref, RESULT_FILES["collin_vif"])
     summary, _p3 = read_run_frame(ref, RESULT_FILES["collin_summary"])
@@ -1252,10 +1436,15 @@ def _view_collinearity(ref, tag, mode, plotted):
     if not regions:
         st.info("The collinearity files have no rows.")
         return
-    region = st.selectbox("Region", regions, key=f"collin_region_{tag}",
+    contrib, _p4 = read_run_frame(ref, RESULT_FILES["summary"])
+    labels = charts.label_map(contrib)
+    c1, c2 = st.columns([3, 2], vertical_alignment="bottom")
+    region = c1.selectbox("Region", regions, key=f"collin_region_{tag}",
                           help="Collinearity is measured per region, on the model's own "
                                "design (the training weeks).")
-    tiles = charts.collinearity_tiles(summary, region)
+    features_only = c2.toggle("Variables only (no seasonality, no trend)", value=True,
+                              key=f"collin_feats_{tag}")
+    tiles = charts.collinearity_tiles(summary, region, matrix, labels)
     for col, (label, value, help_text) in zip(st.columns(len(tiles) or 1), tiles):
         col.metric(label, value, help=help_text)
     if summary is not None and "note" in summary:
@@ -1263,65 +1452,67 @@ def _view_collinearity(ref, tag, mode, plotted):
         if len(notes) and str(notes.iloc[0]).strip() not in ("", "nan"):
             st.caption(str(notes.iloc[0]))
 
-    st.markdown("**Correlation between the model's columns**")
+    st.markdown("**What it means**")
+    for line in charts.collinearity_findings(vif, matrix, region, labels):
+        st.markdown(f"- {_md(line)}")
+
     if matrix is not None:
-        c1, c2 = st.columns(2, vertical_alignment="bottom")
-        count = c1.selectbox("Columns", ["The 25 most correlated", "All"],
-                             key=f"collin_count_{tag}")
-        features_only = c2.toggle("Features only (no seasonality, no trend)",
-                                  key=f"collin_feats_{tag}")
-        labels, grid = charts.correlation_grid(
-            matrix, region, top=25 if count != "All" else None, with_extras=not features_only)
-        if plotted and labels:
-            _plot(charts.correlation_heatmap_figure(labels, grid, mode),
-                  key=f"collin_heat_{tag}")
-            st.caption("Red = move together, blue = move opposite, grey = unrelated. A "
-                       "cell at |r| ≥ 0.8 carries its number: two such columns are "
-                       "identified only as a sum - drop one, combine them into one "
-                       "variable, or hold one with a tight prior. A block of red cells is "
-                       "a group moving together; a feature red with the seasonality or "
-                       "trend is timed with them.")
-        pairs = charts.strongest_pairs(matrix, region, limit=15,
-                                       with_extras=not features_only)
-        pairs = pairs.assign(column_a=pairs["column_a"].map(charts.design_label),
+        st.markdown("**Pairs that move together**")
+        pairs = charts.pair_bars(matrix, region, 12, not features_only, labels)
+        if plotted and len(pairs):
+            _plot(charts.pair_figure(pairs, mode), key=f"collin_pairs_{tag}")
+            st.caption("The most correlated pairs, each once: red = they rise and fall "
+                       "together, blue = one rises as the other falls. From about "
+                       f"{charts.PAIR_MARK:g} either way the model can hardly tell the two "
+                       "apart - combine them, drop one, or hold one with a tight prior.")
+        shown = pairs.assign(column_a=pairs["column_a"].map(charts.design_label),
                              column_b=pairs["column_b"].map(charts.design_label))
-        _table(pairs[["column_a", "column_b", "correlation"]], ref,
+        _table(shown[["column_a", "column_b", "correlation"]], ref,
                RESULT_FILES["collin_matrix"], f"{tag}_pairs", expanded=not plotted)
-    else:
+
+    st.markdown("**Variance inflation (VIF)**")
+    points = charts.vif_points(vif, region)
+    if features_only and len(points):
+        points = points[~points["column"].map(charts.is_design_extra)]
+    vbars = charts.vif_bars(points, labels)
+    if plotted and len(vbars):
+        _plot(charts.vif_figure(vbars, mode), key=f"collin_vif_{tag}")
+        st.caption("How much each variable's uncertainty is inflated because the others "
+                   "explain it: 1 = not at all, over 5 worth a look, over 10 the data "
+                   f"barely separate it. The axis stops at {charts.VIF_CAP:g}: a VIF has no "
+                   "ceiling - a variable that copies another reaches thousands or "
+                   "millions (» on the bar) - and past ~100 its size only says "
+                   "\"near-duplicate\". The hover says what explains it.")
+    if not points.empty:
+        _table(points.assign(column=points["column"].map(charts.design_label)), ref,
+               RESULT_FILES["collin_vif"], f"{tag}_vif", expanded=not plotted)
+
+    if matrix is not None:
+        with st.expander("The correlation matrix - every pair once"):
+            count = st.selectbox("Columns",
+                                 [f"The {charts.MATRIX_NUMBERED} most correlated", "All"],
+                                 key=f"collin_count_{tag}",
+                                 help=f"Up to {charts.MATRIX_NUMBERED} columns every cell "
+                                      "shows its number.")
+            columns, grid = charts.correlation_grid(
+                matrix, region, top=charts.MATRIX_NUMBERED if count != "All" else None,
+                with_extras=not features_only)
+            if plotted and len(columns) > 1:
+                _plot(charts.correlation_triangle_figure(
+                    columns, grid, charts.short_names(columns, labels, charts.NAME_CHARS),
+                    mode),
+                    key=f"collin_heat_{tag}")
+                st.caption("Each cell is the correlation of its row and its column (the "
+                           "matrix is symmetric, so each pair is shown once). Red = move "
+                           "together, blue = opposite, grey = unrelated."
+                           + (f" With more than {charts.MATRIX_NUMBERED} columns only the "
+                              "cells at |r| ≥ 0.5 carry their number - hover a cell for "
+                              "any other." if len(columns) > charts.MATRIX_NUMBERED else ""))
+    elif summary is not None:
         png, _problem = read_run_file(ref, f"01_data/collinearity_heatmap_{_safe_name(region)}.png")
         if png is not None:
             st.image(png, caption="The heatmap codebase 1 drew (this run has no "
                                   "collinearity_matrix.csv - it predates 2026.10.09.1).")
-        else:
-            st.caption("No correlation matrix for this run (codebase 1 2026.10.09.1 or "
-                       "later writes one).")
-
-    st.markdown("**Variance inflation (VIF)**")
-    points = charts.vif_points(vif, region)
-    if plotted and points["vif"].notna().any():
-        _plot(charts.vif_figure(points, mode), key=f"collin_vif_{tag}")
-        st.caption("How much each variable's coefficient uncertainty is inflated by the "
-                   "others: 1 = none, above 5 worth a look, above 10 the coefficient is "
-                   "barely identified by the data. The hover says what explains it. A "
-                   "blank VIF (in the table) could not be computed - its note says why.")
-    if not points.empty:
-        shown = points.assign(column=points["column"].map(charts.design_label))
-        _table(shown, ref, RESULT_FILES["collin_vif"], f"{tag}_vif", expanded=not plotted)
-
-
-def _view_convergence(ref, tag):
-    data, problem = read_run_file(ref, RESULT_FILES["convergence"])
-    if data is None:
-        st.info(problem)
-        return
-    st.caption("R-hat < 1.01 and ESS > 400 pass; divergences should be 0 (under 1% of "
-               "draws is tolerable); a saturated tree depth means the sampler ran out of "
-               "room. The warnings at the end name the parameters to look at.")
-    with st.container(height=420):
-        st.code(data.decode("utf-8", errors="replace"), language="text")
-    st.download_button("Download convergence_report.txt", data=data,
-                       file_name="convergence_report.txt", key=f"dl_{tag}_convergence",
-                       on_click="ignore")
 
 
 def render_warnings_table(table, read_doc, key, texts=None):
@@ -1381,7 +1572,7 @@ def _reported_in_group(bmc, group, run):
 
 def _recent_row(r):
     """One row of All recent runs: the run time is the notebook's alone; the
-    time spent queued and starting the cluster is its own column."""
+    time spent queued and starting the compute is its own column."""
     t = run_timing(r)
     if t["phase"] == "done":
         run_time = fmt_seconds(t["execution_ms"] / 1000) if t["execution_ms"] else ""
@@ -1424,7 +1615,7 @@ def render_runs_section(on_reuse=None):
         with head:
             st.caption("From the Jobs API: running or finished, from this session or "
                        "any other. Select one to see its status, log, results and zip. "
-                       "Run time is the notebook's own; waited = queued + cluster start.")
+                       "Run time is the notebook's own; waited = queued + compute start.")
         with refresh:
             if st.button("↻ Refresh list", key="runs_refresh",
                          help="Ask the Jobs API for the job's runs again (otherwise at "

@@ -14,7 +14,7 @@ New run
   BMC, from/to         (datacube)       (config.yaml: the     (optional)            1 generate       saves the inputs in
   quarter, modelling                     team's + the type's;                       2 fill in        <BMC>/<period type>/<run>/,
   type (its settings),                   Advanced options)                          3 choose, edit,  starts the job; queue /
-  run name, note                                                                      paste          cluster / run time,
+  run name, note                                                                      paste          compute / run time,
                                                                                                      results, log, zip
 Results
 Runs and results:  every run, filtered by BMC, from / to quarter and year and modelling type
@@ -80,9 +80,10 @@ It says so plainly if the workspace copy is older.
    writing into `config.yaml`.
 2. **Edit the job `MDR_JOB_ID`.**
    - Task: the notebook `<workspace path>/codebase1_hierarchical_mmm/demo`.
-   - Compute: as the old job, the all-purpose cluster `meridian_model_mmm_test`
-     (DBR 17.3 LTS ML), with codebase 1's `requirements.txt` as a dependent
-     library.
+   - Compute: serverless GPU, with codebase 1's `requirements.txt` in the
+     task's Environment (it reads and writes ADLS itself there - `changes.md`
+     Update 14); or, as the old job, the all-purpose cluster
+     `meridian_model_mmm_test` (DBR 17.3 LTS ML) with the mount.
    - **Job parameters** (the job's side panel -> Job parameters). They must be
      JOB parameters: the old job had its keys as TASK parameters, and the app
      sends `job_parameters`. Delete the old task-level keys:
@@ -236,9 +237,9 @@ The steps are pages in the left-hand panel; a step's title gets ✅ once it
 is done (④ only when a mapping or share file was added). Under the list: the
 backend's version; at the foot, the two companies' logos - press one to see
 the app in that company's look, just for you. Top right on every page, where
-Streamlit's ⋮ menu was (it is hidden): who is signed in, the ☾ / ☀ button
-(light / dark), and the cluster - a dot and a word - with **Start cluster**
-when it is stopped. What is chosen on a page stays chosen when you move to
+Streamlit's ⋮ menu was (it is hidden): who is signed in and the ☾ / ☀ button
+(light / dark) - no cluster: the job runs on serverless compute, which starts
+with each run. What is chosen on a page stays chosen when you move to
 another (see "Pages, and how they refresh"). See "The look: two company
 themes, light and dark".
 
@@ -406,7 +407,7 @@ themes, light and dark".
    again anyway?* first. The run's panel stays on the page until
    **Dismiss**:
    - while it waits or runs, every 5 s: **Queued for 03:12** (another run holds
-     the job - with the Jobs API's reason), **Cluster pending for 01:05**, then
+     the job - with the Jobs API's reason), **Compute starting for 01:05**, then
      **Running for 12:30 (the notebook)** (`runs.run_timing`: from the task's
      start + its setup time); **Cancel run**; and the **job log as it grows**
      - the job copies `job_log.txt` into `Outputs/` every 30 s
@@ -415,7 +416,7 @@ themes, light and dark".
    - on failure: the notebook's actual error, its **full** traceback, and the
      job log opened;
    - on success: which codebase version ran, and the **run time - the
-     notebook's own** (the Jobs API's execution time; the queue and the cluster
+     notebook's own** (the Jobs API's execution time; the queue and the compute
      start are listed apart);
    - the modeller's **note**, and **⭐ Mark as reported** (a confirm step;
      waits while a run of the same period and type runs) - or, on another run
@@ -434,22 +435,38 @@ themes, light and dark".
    - **Open in Databricks** only for `full_access` (`app_access.yaml`);
      everyone else reads the log in the app.
 
-   **Results** (`src/charts.py`, Plotly; the viewer's light or dark theme):
+   **Results** (`src/charts.py`, Plotly; the viewer's light or dark theme).
+   Above the views, the sampler's health in two numbers: **Max R-hat** and
+   **Divergences**, each with its state as an icon and a word (✓ converged /
+   ! check / ✕ not converged - under 1.01, to 1.05, above; ✓ none / ! a few /
+   ✕ too many - 0, under 1% of draws, more), and **Full report**, the
+   download of `02_convergence/convergence_report.txt`
+   (`02_convergence/sampling_log.json` gives the draws for the share).
 
    | View | What it shows | Reads |
    |---|---|---|
+   | Summary | one page for a client, any region and period: **Base** and **Incremental** shares of sales, R² training, MAPE holdout; *What drives sales* - each pillar's incremental contribution as a waterfall building to the total; *The largest drivers* - the top ten; the fit chart | `05_contributions/contribution_summary.csv`, `04_fit/fit_metrics.csv`, `actual_vs_predicted.csv` |
    | Fit | actual vs fitted, the 90% prediction band (one region) and the holdout shaded. The tiles follow the chart: with *All regions* the **aggregate** (every region summed per date, one national series - codebase 1's `__aggregate__` rows), with a region its own - R² training and holdout, holdout MAPE, holdout inside the band | `04_fit/fit_metrics.csv`, `actual_vs_predicted.csv` |
-   | Contributions | each PILLAR's % of sales, any region and period; each pillar is a row with a **+** that lists its variables under it (lighter bars in the chart); **Open all** / **Close all**; variables without a pillar are one group, *Unassigned*, last; the baseline core and residual as tiles (the three add to 100%) | `05_contributions/contribution_summary.csv` |
-   | Decomposition | weekly sales stacked by baseline core and pillar, with the actual line; *Drivers only* zooms in | `05_contributions/contribution_timeseries.csv` |
-   | Collinearity | per region: condition number, largest VIF, worst variable and verdict as tiles; a **heatmap** of the correlation between the model's columns (blue - grey - red; cells at \|r\| ≥ 0.8 numbered; the 25 most correlated or all; with or without seasonality and trend), its 15 strongest pairs as the table; each variable's **VIF** as a dot on a log axis with the 5 and 10 lines, and the VIF table | `01_data/collinearity_matrix.csv`, `collinearity_vif.csv`, `collinearity_summary.csv` (a run without the matrix shows codebase 1's heatmap PNG) |
-   | Convergence | the report as text | `02_convergence/convergence_report.txt` |
+   | Contributions | any region and period: **Base**, **Incremental** and **Not explained** as tiles (they add to 100%); the waterfall of the pillars (*Include the base* starts from the base and the baseline drivers and builds to 100%); then each PILLAR as a row with a **+** that lists its **sub-pillars** - or its variables when it has none - and a sub-pillar's **+** its variables (indented, lighter bars in the chart; the table shows each variable's name, % of sales and volume); **Open all** / **Close all**; variables without a pillar are one group, *Unassigned*, last | `05_contributions/contribution_summary.csv` |
+   | Decomposition | weekly sales stacked by baseline core and pillar, with the actual line; *Drivers only* zooms in; **Show** one pillar to split it week by week into its sub-pillars (its variables when it has none) | `05_contributions/contribution_timeseries.csv` |
+   | Collinearity | per region (*Variables only* - no seasonality, no trend - by default): the verdict, the largest VIF, how many variable pairs are above 0.8 and the condition number as tiles, in readable numbers; **What it means** - the findings in plain sentences; **Pairs that move together** - the 12 most correlated pairs, each once, as bars from −1 to +1 with the ±0.8 lines, and the table; each variable's **VIF** as a bar on an axis that stops at 30 (bands: up to 5, 5-10, over 10; a capped bar shows its value, *» 1.0M*), and the VIF table; in an expander, the **correlation matrix** as its lower triangle, each pair once, every cell numbered for up to 20 columns | `01_data/collinearity_matrix.csv`, `collinearity_vif.csv`, `collinearity_summary.csv` (a run without the matrix shows codebase 1's heatmap PNG) |
    | Warnings | one row per category: how many different **variables** (one warned in five regions counts once), in how many regions, how many warnings. A chosen category: what it says, each variable once with its regions - *(not about one variable)* for the rest - and the category explained | `00_warnings/all_warnings.csv`, `warning_texts.csv` |
 
    The views are a row of buttons (the one shown highlighted). Every chart
-   has its table underneath, with a download of the file. A pillar's colour
+   has its table underneath, with a download of the file, and its camera
+   button saves it as a PNG at twice the screen size. A pillar's colour
    comes from its size over the whole run, so it is the same in every region,
    period and view; past seven pillars the rest are *Other*; *Unassigned* is
    grey. Without Plotly the views show the tables.
+
+   **Names in the charts:** the prior file's `label` when it has one (codebase
+   1 2026.10.16.2), otherwise the variable without the datacube's
+   boilerplate - the `all-…` parts dropped and `__` read as a space
+   (`charts.readable_name`). A name is shown whole up to 40 characters
+   (`charts.NAME_CHARS`), then cut in the middle, and is always unique: charts
+   place their rows by POSITION, because Plotly merges two rows with the same
+   name (that put the old heatmap's numbers in the wrong cells). Tables, hovers
+   and downloads keep the real names.
 
    If the job does not start, the inputs stay saved in that run folder
    (listed as *not started*), the error is shown and a new run name is
@@ -465,7 +482,7 @@ themes, light and dark".
      copies them all. **Clear filters** empties them.
    - The list, newest first - every BMC when none is chosen (a BMC column
      appears), the newest 200 at once - with ⭐ Reported / Archived, status
-     (queued / cluster starting / running *since*), the notebook's **run
+     (queued / compute starting / running *since*), the notebook's **run
      time**, when, by whom, the **note**, **reused from** and **changed**. The
      counter says how many match and which filters are on; the list fades in
      on every new choice (it is drawn under one of two keys, `rf_list_a` /
@@ -482,7 +499,7 @@ themes, light and dark".
    - **All recent runs** (an expander below): the job's runs from the Jobs
      API - every BMC, other people's runs, and runs from before the run
      folders - with their period and type, ⭐ Reported, the notebook's **run
-     time** and what they **waited** (queue + cluster start); a renamed run as
+     time** and what they **waited** (queue + compute start); a renamed run as
      *new name (was old name)*. Select one (or type its job run ID) to open
      the same panel. For an old run, the zip gathers its outputs and the input
      files its job parameters name, and **Reuse inputs** works too.
@@ -635,7 +652,7 @@ thread in it. Three things keep users from waiting on each other
 - **Shared caches** (`src/perf.py :: SharedCache`): a thread-safe TTL + LRU
   cache with a byte budget, a per-key "single flight" (simultaneous askers
   share one computation) and deep copies on the way out (no session can
-  change another's value). Used for the cluster state and run status (5 s),
+  change another's value). Used for run status (5 s),
   job parameters (1 min), run lists (30 s), BMC folders (1 min), recent runs
   (20 s), run files and parsed tables (until "Re-read files"), and every
   codebase 1 result, keyed by `perf.content_key(name, backend fingerprint,
@@ -670,15 +687,17 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #                              Streamlit-style __main__); v22 runs the whole app with the workers ON
 #   test_v21_web_ui_smoke.py   the whole app.py flow against a scripted streamlit stand-in:
 #                              BMC / period / type / run name / note, paste from Excel, run, queue /
-#                              cluster / run time, live log, results (view buttons, the pillar tree,
-#                              the aggregate fit, collinearity, warnings by variable), zip, reuse,
+#                              compute / run time, live log, results (view buttons, the health strip,
+#                              Summary, the waterfall, the pillar / sub-pillar tree, readable names,
+#                              a run from an older codebase, the aggregate fit, collinearity -
+#                              findings, pairs, VIF bands -, warnings by variable), zip, reuse,
 #                              "nothing changed", the four access levels, every ✕, the chart data,
 #                              (step 19) the shared caches and the zip disk cache, (step 20) marking
 #                              the reported run, (step 21) the pages and what they keep, (step 22)
 #                              the modelling types' settings and the difference table, (step 23)
 #                              rename and note, (24) the filters on Runs and results, (24b) the
 #                              values Streamlit deletes at a page change coming back, (25) deleting a
-#                              run, (26) the top bar, the light / dark button and Start cluster, (27)
+#                              run, (26) the top bar - name and light / dark, no cluster, (27)
 #                              the co-branding - both themes, a logo press switching this viewer's
 #                              look (and remembered by e-mail), the deployment's company, the
 #                              markup-free toggle script, every colour pairing's contrast, (28)
@@ -688,7 +707,8 @@ python tests/run_all.py        # from "updating production code/" - includes:
 #                              browser deletes them, then put back), a delete, the top bar and the
 #                              logos, a logo press switching the look, the session-theme hook against
 #                              Streamlit's own theme code, the light / dark button - the charts too,
-#                              with plotly; SKIPs without streamlit
+#                              with plotly (every result view, the positional matrix, the two-line
+#                              pairs); SKIPs without streamlit
 #   fixture_run_outputs.py     (not a suite) a synthetic Outputs/ tree in codebase 1's formats
 ```
 
@@ -746,7 +766,7 @@ web/
 │   ├── validation.py      shows the datacube checks
 │   ├── files.py           ADLS (or LOCAL_STORAGE_DIR): read, write, list; one cached client
 │   ├── jobs.py            Jobs API: run-now, status, output, cancel, the job's parameters
-│   └── ...                clusters, header; feasibility pages (disabled)
+│   └── ...                header; feasibility pages (disabled)
 └── _reference/            git-ignored: screenshots, OCR originals, OCR_FIXES.md
 ```
 
@@ -756,7 +776,7 @@ web/
   page.
 - **Look**: co-branded - Haleon's theme by default, Capgemini's a logo press
   away (per person, no redeploy), light or dark by a button; AOMMM and both
-  company logos in the side panel, the cluster top right.
+  company logos in the side panel; no cluster (serverless compute).
 - **Run folders**: every run lives in `Secondary Modelling/<BMC>/<period>
   <modelling type>/<run name>/` with its inputs, outputs and note, and can be
   reused; the run a period's results were reported from is marked. The

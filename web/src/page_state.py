@@ -42,7 +42,8 @@ KEEP = ("bmc_name", "period_start_q", "period_start_y", "period_end_q", "period_
         "rf_bmc", "rf_start_q", "rf_start_y", "rf_end_q", "rf_end_y", "rf_type",
         "gen_restrict", "runs_typed_id")
 KEEP_PREFIXES = ("fit_region_", "contrib_region_", "contrib_period_", "decomp_drivers_",
-                 "warn_cat_", "collin_region_", "collin_count_")
+                 "warn_cat_", "collin_region_", "collin_count_", "collin_feats_",
+                 "summary_region_", "summary_period_", "contrib_base_", "decomp_pillar_")
 RUN_NO = "_run_no"
 COPY = "_keep::"            # + a kept widget's key: a copy of its value no widget owns
 

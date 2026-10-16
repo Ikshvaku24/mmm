@@ -4,7 +4,8 @@ Two input files, both optional, both named in `config.yaml`:
 
   data.mapping_file   vendor_variable, our_variable[, region][, contribution]
                       which vendor variable is which of ours (samples/mapping_sample.csv)
-  data.share_file     section, pillar, pillar_share_pct, variable, spend,
+  data.share_file     section, pillar, pillar_share_pct[, sub_pillar,
+                      sub_pillar_share_pct], variable, spend,
                       variable_share_pct[, sign_constraint]
                       what share of sales each piece is expected to carry
                       (samples/share_sample.csv)
@@ -74,6 +75,16 @@ The share file has five SECTIONS, each optional, each with its own formula
               C = pillar_share x sales x spend / pillar_spend
               (pillar_spend is the sum over that pillar's variables - computed,
               never typed)
+              A pillar may be split into SUB-PILLARS ("Online Media" into
+              "Search", "Social"): `sub_pillar` names the group, and an
+              optional `sub_pillar_share_pct` gives it its own share of sales.
+              Its variables then split THAT share by spend:
+                C = sub_pillar_share x sales x spend / sub_pillar_spend
+              and the pillar's other variables split what is left:
+                C = (pillar_share - the sub-pillar shares) x sales x spend
+                    / their spend
+              Without sub_pillar_share_pct the sub-pillar is a reporting group
+              only and the pillar's share is split as before.
   expert      exactly like media: pillars, a share each, spend per variable
   comp_media  a share per variable, no spend split.   C = variable_share x sales
   trade       trade IS a pillar, nothing inside it.   C = variable_share x sales
@@ -105,7 +116,7 @@ falls out of the model.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import os
 import warnings
@@ -130,6 +141,10 @@ DEFAULT_SIGN = {"comp_media": "negative"}
 
 _SECTION_HINTS = ("section", "type", "data_piece", "piece", "block")
 _PILLAR_HINTS = ("pillar", "group")
+# sub-pillar columns: sniffed FIRST - their names contain "pillar"
+_SUBPILLAR_HINTS = ("sub_pillar", "subpillar", "sub-pillar")
+_SUBSHARE_HINTS = ("sub_pillar_share_pct", "sub_pillar_share", "subpillar_share_pct",
+                   "sub-pillar_share_pct")
 _PSHARE_HINTS = ("pillar_share_pct", "pillar_share", "pillar_pct")
 _VAR_HINTS = ("variable", "feature", "our_variable", "name")
 _SPEND_HINTS = ("spend", "feature_spend", "investment", "cost")
@@ -143,8 +158,9 @@ _SIGN_HINTS = ("sign_constraint", "sign")
 # --------------------------------------------------------------------------- #
 def load_share_file(path: str, known_columns=None,
                     against: str = DATACUBE) -> pd.DataFrame:
-    """section / pillar / pillar_share_pct / variable / spend /
-    variable_share_pct / sign_constraint - validated per section."""
+    """section / pillar / pillar_share_pct / sub_pillar /
+    sub_pillar_share_pct / variable / spend / variable_share_pct /
+    sign_constraint - validated per section."""
     if not path:
         return pd.DataFrame()
     if not os.path.exists(path):
@@ -157,11 +173,16 @@ def load_share_file(path: str, known_columns=None,
         raise SystemExit(
             f"{path}: need a `section` column and a `variable` column; found "
             f"{list(df.columns)}. See samples/share_sample.csv.")
-    pil = _sniff(df.columns, _PILLAR_HINTS, exclude={sec, var})
-    psh = _sniff(df.columns, _PSHARE_HINTS, exclude={sec, var, pil})
-    spd = _sniff(df.columns, _SPEND_HINTS, exclude={sec, var, pil, psh})
-    vsh = _sniff(df.columns, _VSHARE_HINTS, exclude={sec, var, pil, psh, spd})
-    sgn = _sniff(df.columns, _SIGN_HINTS, exclude={sec, var, pil, psh, spd, vsh})
+    # the sub-pillar columns first: their names contain "pillar" and
+    # "share_pct", so the pillar and share hints must never be offered them
+    ssh = _sniff(df.columns, _SUBSHARE_HINTS, exclude={sec, var})
+    spl = _sniff(df.columns, _SUBPILLAR_HINTS, exclude={sec, var, ssh})
+    taken = {sec, var, ssh, spl}
+    pil = _sniff(df.columns, _PILLAR_HINTS, exclude=taken)
+    psh = _sniff(df.columns, _PSHARE_HINTS, exclude=taken | {pil})
+    spd = _sniff(df.columns, _SPEND_HINTS, exclude=taken | {pil, psh})
+    vsh = _sniff(df.columns, _VSHARE_HINTS, exclude=taken | {pil, psh, spd})
+    sgn = _sniff(df.columns, _SIGN_HINTS, exclude=taken | {pil, psh, spd, vsh})
 
     def col(name, numeric=False):
         # an optional column that is absent still has to be a Series, so the
@@ -178,6 +199,8 @@ def load_share_file(path: str, known_columns=None,
         .str.replace("-", "_"),
         "pillar": col(pil),
         "pillar_share_pct": col(psh, True),
+        "sub_pillar": col(spl),
+        "sub_pillar_share_pct": col(ssh, True),
         "variable": col(var),
         "spend": col(spd, True),
         "variable_share_pct": col(vsh, True),
@@ -221,6 +244,8 @@ def load_share_file(path: str, known_columns=None,
             raise SystemExit(f"{path}: section {s_!r} pillar(s) {list(missing)} "
                              "have no pillar_share_pct.")
 
+    _check_sub_pillar_shares(out, path)
+
     for s_ in DIRECT_SECTIONS + ("baseline",):
         sub = out[out["section"] == s_]
         if len(sub) and sub["variable_share_pct"].isna().any():
@@ -246,6 +271,54 @@ def load_share_file(path: str, known_columns=None,
             "The generated priors will over-claim before the model has seen "
             "anything.")
     return out.reset_index(drop=True)
+
+
+def _check_sub_pillar_shares(out: pd.DataFrame, path: str) -> None:
+    """sub_pillar_share_pct: one number per sub-pillar, only inside a media /
+    expert pillar (where shares are split by spend), never more than the
+    pillar's own share. Fills the number down the sub-pillar's rows."""
+    given = out["sub_pillar_share_pct"].notna()
+    if not given.any():
+        return
+    nameless = out.loc[given & (out["sub_pillar"] == ""), "variable"]
+    if len(nameless):
+        raise SystemExit(f"{path}: sub_pillar_share_pct without a sub_pillar on "
+                         f"{list(nameless)[:5]} - name the sub-pillar the share "
+                         "belongs to.")
+    elsewhere = given & ~out["section"].isin(SPEND_SECTIONS)
+    if elsewhere.any():
+        warnings.warn("sub_pillar_share_pct is used only in the media and expert "
+                      "sections, whose shares are split by spend - ignored on "
+                      f"{list(out.loc[elsewhere, 'variable'])[:5]}")
+        out.loc[elsewhere, "sub_pillar_share_pct"] = np.nan
+    for s_ in SPEND_SECTIONS:
+        rows = out[(out["section"] == s_) & (out["sub_pillar"] != "")]
+        if rows.empty:
+            continue
+        n = rows.groupby(["pillar", "sub_pillar"])["sub_pillar_share_pct"] \
+            .nunique(dropna=True)
+        clash = n[n > 1]
+        if len(clash):
+            raise SystemExit(
+                f"{path}: section {s_!r}, sub-pillar(s) {list(clash.index)} carry "
+                "more than one sub_pillar_share_pct. The share belongs to the "
+                "sub-pillar - write it once, or repeat the same number.")
+        out.loc[rows.index, "sub_pillar_share_pct"] = (
+            rows.groupby(["pillar", "sub_pillar"])["sub_pillar_share_pct"]
+            .transform(lambda x: x.ffill().bfill()))
+    spend = out[out["section"].isin(SPEND_SECTIONS)]
+    for (s_, p_), grp in spend.groupby(["section", "pillar"]):
+        subs = (grp.dropna(subset=["sub_pillar_share_pct"])
+                .drop_duplicates("sub_pillar"))
+        if subs.empty:
+            continue
+        given_total = float(subs["sub_pillar_share_pct"].abs().sum())
+        pillar_share = float(abs(grp["pillar_share_pct"].iloc[0]))
+        if given_total > pillar_share + 1e-6:
+            raise SystemExit(
+                f"{path}: the sub-pillar shares of {p_!r} add up to "
+                f"{given_total:g}% - more than the pillar's {pillar_share:g}%. A "
+                "sub-pillar's share is part of its pillar's share, not extra.")
 
 
 def _implied_total(s: pd.DataFrame) -> float:
@@ -529,16 +602,48 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
     """(one row per variable in the share file, the full working)."""
     rows = []
     for sec_, sub in shares.groupby("section", sort=False):
+        sub = sub.copy()
+        if "sub_pillar" not in sub:
+            sub["sub_pillar"] = ""
+        if "sub_pillar_share_pct" not in sub:
+            sub["sub_pillar_share_pct"] = np.nan
         pillar_spend = (sub.groupby("pillar")["spend"]
                         .transform(lambda x: x.fillna(0).sum()))
+        # a sub-pillar with its own share splits THAT by its own spend; the
+        # pillar's other variables split what the sub-pillars leave
+        own = sub["sub_pillar_share_pct"].notna()
+        sub_spend = (sub.groupby(["pillar", "sub_pillar"])["spend"]
+                     .transform(lambda x: x.fillna(0).sum()))
+        rest_spend = (sub[~own].groupby("pillar")["spend"]
+                      .transform(lambda x: x.fillna(0).sum()))
+        given = (sub[own].drop_duplicates(["pillar", "sub_pillar"])
+                 .groupby("pillar")["sub_pillar_share_pct"]
+                 .agg(lambda x: x.abs().sum()))
         for idx, r in sub.iterrows():
             f = r["variable"]
             split, note = 1.0, ""
             if sec_ in SPEND_SECTIONS:
-                share = r["pillar_share_pct"] / 100.0
-                ps = float(pillar_spend.loc[idx])
                 sp = float(r["spend"]) if pd.notna(r["spend"]) else 0.0
-                if ps <= 0:
+                if own.loc[idx]:
+                    pct = float(r["sub_pillar_share_pct"])
+                    ps = float(sub_spend.loc[idx])
+                    head = f"{pct:g}% (sub-pillar {r['sub_pillar']})"
+                elif r["pillar"] in given.index:
+                    left = abs(float(r["pillar_share_pct"])) - float(given[r["pillar"]])
+                    pct = float(np.copysign(max(left, 0.0), r["pillar_share_pct"]))
+                    ps = float(rest_spend.loc[idx])
+                    head = (f"({r['pillar_share_pct']:g}% - "
+                            f"{float(given[r['pillar']]):g}% given to sub-pillars)")
+                else:
+                    pct = float(r["pillar_share_pct"])
+                    ps = float(pillar_spend.loc[idx])
+                    head = f"{r['pillar_share_pct']:g}%"
+                share = pct / 100.0
+                if not own.loc[idx] and r["pillar"] in given.index and pct == 0:
+                    note = ("the pillar's share is all given to its sub-pillars - "
+                            "nothing is left for this variable")
+                    split = np.nan
+                elif ps <= 0:
                     note = ("pillar has no spend at all - cannot split its "
                             "share. Add spend, or move the variables to a "
                             "direct section")
@@ -548,8 +653,7 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
                     split = np.nan
                 else:
                     split = sp / ps
-                formula = (f"{r['pillar_share_pct']:g}% x sales x "
-                           f"{sp:,.0f}/{ps:,.0f}")
+                formula = f"{head} x sales x {sp:,.0f}/{ps:,.0f}"
             elif sec_ in DIRECT_SECTIONS:
                 share = r["variable_share_pct"] / 100.0
                 formula = f"{r['variable_share_pct']:g}% x sales"
@@ -569,7 +673,8 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
                               & (support["region"] == str(region))]
                 rows.append({
                     "variable": f, "group": f, "section": sec_,
-                    "pillar": r["pillar"], "region": str(region),
+                    "pillar": r["pillar"], "sub_pillar": r["sub_pillar"],
+                    "region": str(region),
                     "share_of_sales": abs(share) if np.isfinite(split) else np.nan,
                     "spend_split": split,
                     "sales_region": float(s_r),
@@ -583,7 +688,8 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
     work = _divide(pd.DataFrame(rows))
     agg = _average_over_supported(work, "variable", national_basis)
     meta = (work.drop_duplicates("variable")
-            [["variable", "section", "pillar", "sign_constraint", "row_note"]])
+            [["variable", "section", "pillar", "sub_pillar", "sign_constraint",
+              "row_note"]])
     out = agg.merge(meta, on="variable", how="left")
     out["global_prior_mean"] = [
         _prior_mean(c, s) for c, s in zip(out["national_coef"],
@@ -598,7 +704,7 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
     out["basis"] = "share of sales"
     out["from_combined_group"] = False
     out["mixed_signs"] = False
-    cols = ["feature", "group", "section", "pillar", "global_prior_mean",
+    cols = ["feature", "group", "section", "pillar", "sub_pillar", "global_prior_mean",
             "sign_constraint", "national_coef", "national_coef_average",
             "national_coef_weighted", "weighted_over_average",
             "national_basis", "sum_of_region_coefs", "n_regions_used",
@@ -612,7 +718,7 @@ def priors_from_shares(shares: pd.DataFrame, support: pd.DataFrame,
 # --------------------------------------------------------------------------- #
 PRIOR_COLUMNS = ["variable", "region", "pooling", "sign_constraint",
                  "global_prior_mean", "global_prior_sd", "regional_sd_prior",
-                 "baseline", "pillar", "contribution_reference",
+                 "baseline", "pillar", "sub_pillar", "label", "contribution_reference",
                  "center_mode", "scale_mode", "prior_sd_basis",
                  "prior_mean_basis"]
 
@@ -637,8 +743,9 @@ def to_prior_file(priors: pd.DataFrame | None = None,
       prior_sd_basis /    `relative` and `median`, so a sd you type later reads
       prior_mean_basis    as a percentage and a mean reads as the median
 
-    `pillar` and `baseline` are carried over when the SHARE file states them,
-    because that file says so in as many words. Everything else - `pooling`,
+    `pillar`, `sub_pillar` and `baseline` are carried over when the SHARE
+    file states them, because that file says so in as many words; `label`
+    (the name charts show) is left for the modeller. Everything else - `pooling`,
     `global_prior_sd`, `regional_sd_prior`, `contribution_reference`,
     `center_mode`, `scale_mode` - is left blank for the modeller, and blank
     means the documented default (`hierarchical`, no centring, no scaling,
@@ -657,9 +764,10 @@ def to_prior_file(priors: pd.DataFrame | None = None,
         has = f in p.index
         mean = p.loc[f, "global_prior_mean"] if has else np.nan
         sign = p.loc[f, "sign_constraint"] if has else ""
-        pillar, baseline = "", ""
+        pillar, sub_pillar, baseline = "", "", ""
         if meta is not None and f in meta.index:
             pillar = meta.loc[f, "pillar"]
+            sub_pillar = meta.loc[f, "sub_pillar"] if "sub_pillar" in meta.columns else ""
             baseline = 1 if meta.loc[f, "section"] == "baseline" else ""
             if not sign:
                 sign = _sign_for(meta.loc[f].to_dict()
@@ -672,6 +780,7 @@ def to_prior_file(priors: pd.DataFrame | None = None,
                                   if pd.notna(mean) else np.nan),
             "global_prior_sd": np.nan, "regional_sd_prior": np.nan,
             "baseline": baseline, "pillar": pillar or "",
+            "sub_pillar": sub_pillar or "", "label": "",
             "contribution_reference": "", "center_mode": "",
             "scale_mode": "", "prior_sd_basis": sd_basis,
             "prior_mean_basis": mean_basis})

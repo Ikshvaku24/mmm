@@ -1,6 +1,15 @@
-"""The charts a finished run shows: fit, contributions, decomposition and
-collinearity (the design's correlation heatmap and its VIFs) - built from the
-run's own output files.
+"""The charts a finished run shows: a one-page summary (the due-to waterfall
+by pillar, the top drivers), fit, contributions (pillar -> sub-pillar ->
+variable), decomposition, collinearity (the pairs that move together, the
+correlation matrix as its lower triangle, the VIFs in bands) and the run's
+health (max R-hat, divergences) - built from the run's own output files.
+
+Names people read: a variable's `label` from the prior file when it has one,
+else its name shortened in the MIDDLE (names share long prefixes - the end
+tells them apart) - and always UNIQUE: every chart places its rows and
+columns by POSITION, labelled with those names, because two equal category
+names make Plotly merge two rows into one (that put the correlation numbers
+in the wrong cells).
 
 Two layers, so the arithmetic can be tested without Plotly:
   * data functions (pure pandas) - one per chart, reading the CSVs codebase 1
@@ -22,6 +31,7 @@ into the surface and strong correlations are the bright cells).
 from __future__ import annotations
 
 import math
+import re
 import threading
 
 import numpy as np
@@ -49,6 +59,10 @@ INK = {"light": {"primary": "#0b0b0b", "secondary": "#52514e", "muted": "#898781
                 "neutral": "#4a4a46"}}
 MAX_COLOURED = len(SERIES["light"])     # pillars past this many fold into "Other"
 FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif'
+# status colours (fixed, never themed) - only where a colour MEANS a state
+# (a VIF band, a health check), and always beside a label saying it
+STATUS = {"good": "#0ca30c", "warning": "#fab219", "serious": "#ec835a",
+          "critical": "#d03b3b"}
 
 
 _THEME = threading.local()
@@ -101,6 +115,92 @@ def _text(v) -> str:
 def _pillar(v) -> str:
     """A variable's pillar - "Unassigned" when the prior file gave it none."""
     return _text(v) or UNASSIGNED
+
+
+# --------------------------------------------------------------------------- #
+# names people read
+# --------------------------------------------------------------------------- #
+def label_map(*frames) -> dict:
+    """{variable: label} - the readable names the prior file gives (the
+    `label` column codebase 1 carries into contribution_summary.csv and
+    contribution_timeseries.csv). Blank labels are left out."""
+    out = {}
+    for f in frames:
+        if f is None or not len(f) or not {"feature", "label"} <= set(f.columns):
+            continue
+        for feat, lab in zip(f["feature"].astype(str), f["label"].map(_text)):
+            if lab and feat not in out:
+                out[feat] = lab
+    return out
+
+
+def readable_name(name) -> str:
+    """A datacube column without its boilerplate, for charts: the `all-...`
+    parts ("every placement / platform / campaign") tell two columns apart
+    nowhere, and `__` reads as a space - so
+    media__digital-display__all-plac__all-plat__impressions is "media
+    digital-display impressions" and media__tv__all-plac_otv__all-camp__grps
+    is "media tv otv grps". A name with no `all-` part and no `__` is left as
+    it is; design columns get design_label. Tables keep the real names."""
+    n = design_label(name)
+    if n != str(name):
+        return n
+    parts = n.split("_")
+    if "__" not in n and not any(p.startswith("all-") for p in parts):
+        return n
+    tokens = []
+    for tok in n.split("__"):
+        keep = [p for p in tok.split("_") if p and p != "all" and not p.startswith("all-")]
+        if keep:
+            tokens.append("_".join(keep))
+    return " ".join(tokens) or n
+
+
+NAME_CHARS = 40   # a chart shows a variable's name up to this long, then cuts it in the middle
+
+
+def short_names(names, labels=None, n: int = 30) -> list:
+    """A readable, UNIQUE name for each column, in order: its label when it
+    has one, else readable_name - shortened in the middle when still longer
+    than `n` (the start says the section, the end the measure). Names that
+    still collide get " (2)", " (3)"."""
+    labels = labels or {}
+    out, seen = [], {}
+    for name in names:
+        base = labels.get(str(name)) or readable_name(name)
+        if len(base) > n:
+            head = (n - 1) // 2
+            base = base[:head] + "…" + base[-(n - 1 - head):]
+        seen[base] = seen.get(base, 0) + 1
+        out.append(base if seen[base] == 1 else f"{base} ({seen[base]})")
+    return out
+
+
+def compact_number(v) -> str:
+    """1,234 / 12.3K / 1.0M / 589.2M / 2.1B; "∞" for infinity, "n/a" for none."""
+    v = _num(v) if not (isinstance(v, float) and math.isinf(v)) else v
+    if v is None:
+        return "n/a"
+    if math.isinf(v):
+        return "∞"
+    a = abs(v)
+    if a < 100:
+        return f"{v:,.1f}"
+    if a < 10_000:
+        return f"{v:,.0f}"
+    for div, suffix in ((1e9, "B"), (1e6, "M"), (1e3, "K")):
+        if a >= div:
+            return f"{v / div:,.1f}{suffix}"
+    return f"{v:,.0f}"
+
+
+def vif_text(v) -> str:
+    """A VIF as people read it: 3.4 / 148.8 / 1,000 / 1.0M (past ~100 the size
+    no longer matters - the variable is a near-duplicate)."""
+    v = _num(v)
+    if v is None:
+        return "n/a"
+    return f"{v:.1f}" if v < 1000 else compact_number(v)
 
 
 # --------------------------------------------------------------------------- #
@@ -269,6 +369,8 @@ def contribution_bars(summary: pd.DataFrame, region: str = PORTFOLIO, period: st
     bars = pd.DataFrame({
         "feature": body["feature"].astype(str).values,
         "pillar": body["pillar"].map(_pillar).values if "pillar" in body else UNASSIGNED,
+        "sub_pillar": body["sub_pillar"].map(_text).values if "sub_pillar" in body else "",
+        "label": body["label"].map(_text).values if "label" in body else "",
         "pct": pd.to_numeric(body["contribution_pct"], errors="coerce").values,
         "volume": pd.to_numeric(body["volume"], errors="coerce").values,
     })
@@ -301,39 +403,190 @@ def pillar_rows(bars: pd.DataFrame) -> pd.DataFrame:
             .drop(columns="_last").reset_index(drop=True))
 
 
-def contribution_tree(bars: pd.DataFrame, open_pillars=()) -> pd.DataFrame:
+def sub_key(pillar, sub) -> str:
+    """The key an open sub-pillar is remembered by (pillar + sub-pillar)."""
+    return f"{pillar}\x1f{sub}"
+
+
+def has_sub_pillars(bars: pd.DataFrame, pillar) -> bool:
+    """Does any of the pillar's variables name a sub-pillar?"""
+    if bars.empty or "sub_pillar" not in bars:
+        return False
+    return bool((bars.loc[bars["pillar"] == pillar, "sub_pillar"].map(_text) != "").any())
+
+
+def sub_pillar_rows(bars: pd.DataFrame, pillar) -> pd.DataFrame:
+    """One pillar's sub-pillars, largest first: sub_pillar, pct, volume, n. A
+    variable with no sub-pillar sits in one named like its pillar (as in
+    codebase 1's contribution_by_sub_pillar.csv)."""
+    members = bars[bars["pillar"] == pillar].copy()
+    if members.empty:
+        return pd.DataFrame(columns=["sub_pillar", "pct", "volume", "n"])
+    sub = members["sub_pillar"].map(_text) if "sub_pillar" in members else ""
+    members["_sub"] = [x or pillar for x in (sub if len(sub) else [""] * len(members))]
+    out = (members.groupby("_sub", as_index=False)
+           .agg(pct=("pct", "sum"), volume=("volume", "sum"), n=("feature", "size"))
+           .rename(columns={"_sub": "sub_pillar"}))
+    return out.sort_values("pct", ascending=False, kind="stable").reset_index(drop=True)
+
+
+def _members(bars, pillar, sub=None):
+    m = bars[bars["pillar"] == pillar]
+    if sub is not None:
+        names = m["sub_pillar"].map(_text) if "sub_pillar" in m else pd.Series("", index=m.index)
+        m = m[[(x or pillar) == sub for x in names]]
+    return m.sort_values("pct", ascending=False, kind="stable")
+
+
+def display_name(row) -> str:
+    """A bar's variable as people read it: its label, else readable_name."""
+    return _text(getattr(row, "label", "")) or readable_name(row.feature)
+
+
+def contribution_tree(bars: pd.DataFrame, open_pillars=(), open_subs=()) -> pd.DataFrame:
     """The contribution chart as a tree, top to bottom: each pillar (largest
-    first, "Unassigned" last) followed - when it is open - by its variables,
-    largest first. Columns: label (unique), pillar, feature, level (0 =
-    pillar, 1 = variable), pct, volume, n."""
+    first, "Unassigned" last); an OPEN pillar lists its sub-pillars when its
+    variables name any (else its variables), and an open sub-pillar
+    (`open_subs`: sub_key values) lists its variables - largest first at every
+    level. Columns: label, pillar, sub_pillar, feature, level (0 pillar, 1
+    sub-pillar or variable, 2 variable), pct, volume, n."""
     rows = []
-    opened = set(open_pillars or ())
+    opened, opened_subs = set(open_pillars or ()), set(open_subs or ())
+    pad = "\u00a0\u00a0\u00a0"
+
+    def variable(m, pillar, sub, level):
+        return {"label": pad * (level - 1) + f"↳ {display_name(m)}", "pillar": pillar,
+                "sub_pillar": sub, "feature": m.feature, "level": level,
+                "pct": float(m.pct),
+                "volume": float(m.volume) if m.volume == m.volume else 0.0, "n": 1}
+
     for p in pillar_rows(bars).itertuples(index=False):
-        rows.append({"label": p.pillar, "pillar": p.pillar, "feature": "", "level": 0,
-                     "pct": float(p.pct), "volume": float(p.volume), "n": int(p.n)})
-        if p.pillar in opened:
-            members = bars[bars["pillar"] == p.pillar].sort_values(
-                "pct", ascending=False, kind="stable")
-            for m in members.itertuples(index=False):
-                rows.append({"label": f"↳ {m.feature}", "pillar": p.pillar,
-                             "feature": m.feature, "level": 1, "pct": float(m.pct),
-                             "volume": float(m.volume) if m.volume == m.volume else 0.0,
-                             "n": 1})
-    return pd.DataFrame(rows, columns=["label", "pillar", "feature", "level", "pct",
-                                       "volume", "n"])
+        rows.append({"label": p.pillar, "pillar": p.pillar, "sub_pillar": "", "feature": "",
+                     "level": 0, "pct": float(p.pct), "volume": float(p.volume),
+                     "n": int(p.n)})
+        if p.pillar not in opened:
+            continue
+        if has_sub_pillars(bars, p.pillar):
+            for sp in sub_pillar_rows(bars, p.pillar).itertuples(index=False):
+                rows.append({"label": f"↳ {sp.sub_pillar}", "pillar": p.pillar,
+                             "sub_pillar": sp.sub_pillar, "feature": "", "level": 1,
+                             "pct": float(sp.pct), "volume": float(sp.volume),
+                             "n": int(sp.n)})
+                if sub_key(p.pillar, sp.sub_pillar) in opened_subs:
+                    for m in _members(bars, p.pillar, sp.sub_pillar).itertuples(index=False):
+                        rows.append(variable(m, p.pillar, sp.sub_pillar, 2))
+        else:
+            for m in _members(bars, p.pillar).itertuples(index=False):
+                rows.append(variable(m, p.pillar, "", 1))
+    return pd.DataFrame(rows, columns=["label", "pillar", "sub_pillar", "feature", "level",
+                                       "pct", "volume", "n"])
+
+
+def sales_split(summary: pd.DataFrame, region: str = PORTFOLIO,
+                period: str = "Total") -> dict:
+    """{"base", "incremental", "other"}: shares of actual sales - the base
+    (intercept + trend + seasonality AND the baseline drivers such as
+    distribution and price), what every other pillar drives, and what the
+    model does not explain (residual + median gap). They add up to 100."""
+    bars, totals = contribution_bars(summary, region, period)
+    base_drivers = float(bars.loc[bars["pillar"] == "Baseline", "pct"].sum())
+    return {"base": totals["core"] + base_drivers,
+            "incremental": totals["drivers"] - base_drivers,
+            "other": totals["other"]}
+
+
+def waterfall_steps(summary: pd.DataFrame, region: str = PORTFOLIO,
+                    period: str = "Total", include_base: bool = False) -> pd.DataFrame:
+    """The due-to waterfall, top to bottom: every pillar but the baseline,
+    largest first ("Unassigned" last), each a share of actual sales, building
+    to the incremental total. The base is ~90% of sales and would flatten
+    every pillar into a sliver, so it is left out unless `include_base`:
+    then the base (intercept + trend + seasonality) and the baseline drivers
+    lead, "Not explained" follows, and the total is all of sales (100%).
+    Columns: label, value, kind (core | pillar | other | total), pillar,
+    start, end."""
+    bars, totals = contribution_bars(summary, region, period)
+    rows = pillar_rows(bars)
+    steps = []
+    if include_base:
+        steps.append(("Base", totals["core"], "core", BASELINE_CORE))
+        steps += [("Baseline drivers", float(r.pct), "pillar", r.pillar)
+                  for r in rows.itertuples(index=False) if r.pillar == "Baseline"]
+    steps += [(r.pillar, float(r.pct), "pillar", r.pillar)
+              for r in rows.itertuples(index=False) if r.pillar != "Baseline"]
+    if include_base and abs(totals["other"]) > 1e-9:
+        steps.append(("Not explained", totals["other"], "other", OTHER))
+    out, run = [], 0.0
+    for label, value, kind, pillar in steps:
+        out.append({"label": label, "value": float(value), "kind": kind, "pillar": pillar,
+                    "start": run, "end": run + float(value)})
+        run += float(value)
+    out.append({"label": "Total sales" if include_base else "Incremental sales",
+                "value": run, "kind": "total", "pillar": "", "start": 0.0, "end": run})
+    return pd.DataFrame(out, columns=["label", "value", "kind", "pillar", "start", "end"])
+
+
+def top_drivers(summary: pd.DataFrame, region: str = PORTFOLIO, period: str = "Total",
+                n: int = 10) -> pd.DataFrame:
+    """The `n` largest incremental drivers (not the baseline drivers) by their
+    share of sales, smallest first (Plotly draws the first at the bottom),
+    with a readable unique `name`."""
+    bars, _totals = contribution_bars(summary, region, period)
+    d = bars[bars["pillar"] != "Baseline"]
+    d = d.reindex(d["pct"].abs().sort_values(ascending=False, kind="stable").index).head(n)
+    d = d.assign(name=short_names(list(d["feature"]),
+                                  dict(zip(d["feature"], d["label"].map(_text))), NAME_CHARS))
+    return d.iloc[::-1].reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
 # data - decomposition (05_contributions/contribution_timeseries.csv)
 # --------------------------------------------------------------------------- #
-def decomposition_frame(ts: pd.DataFrame, pillars: list, region: str = ALL):
+def drill_series(ts: pd.DataFrame, pillar: str) -> list:
+    """The series a pillar splits into over time - its sub-pillars when its
+    variables name any, else its variables (by label) - largest first over
+    the WHOLE run, so each keeps its colour in every region."""
+    d = ts[(ts["pillar"].map(_pillar) == pillar)
+           & ~ts["feature"].astype(str).str.startswith("__")].copy()
+    if d.empty:
+        return []
+    d["series"] = _drill_names(d, pillar)
+    size = pd.to_numeric(d["volume"], errors="coerce").abs().groupby(d["series"]).sum()
+    return list(size.sort_values(ascending=False, kind="stable").index)
+
+
+def _drill_names(d, pillar):
+    subs = d["sub_pillar"].map(_text) if "sub_pillar" in d else pd.Series("", index=d.index)
+    if (subs != "").any():
+        return [x or pillar for x in subs]
+    labels = d["label"].map(_text) if "label" in d else pd.Series("", index=d.index)
+    return [lab or readable_name(f) for lab, f in zip(labels, d["feature"].astype(str))]
+
+
+def decomposition_frame(ts: pd.DataFrame, pillars: list, region: str = ALL,
+                        pillar: str | None = None):
     """(wide, actual): weekly volume of the baseline core and of each shown
     pillar group (columns: Baseline core first, then `shown_groups` order),
-    and the actual sales line - for one region or summed over all."""
+    and the actual sales line - for one region or summed over all.
+
+    With `pillar`, that pillar alone, split into its sub-pillars (or its
+    variables): columns in `drill_series` order, the first MAX_COLOURED
+    coloured and the rest folded into "Other"; no actual line."""
     d = ts.copy()
     d["date"] = pd.to_datetime(d["date"])
     if region != ALL:
         d = d[d["region"].astype(str) == region]
+    if pillar is not None:
+        order = drill_series(ts, pillar)
+        keep = order[:MAX_COLOURED]
+        part = d[(d["pillar"].map(_pillar) == pillar)
+                 & ~d["feature"].astype(str).str.startswith("__")].copy()
+        part["volume"] = pd.to_numeric(part["volume"], errors="coerce")
+        part["series"] = [s if s in keep else OTHER for s in _drill_names(part, pillar)]
+        wide = part.pivot_table(index="date", columns="series", values="volume",
+                                aggfunc="sum").fillna(0.0)
+        cols = [c for c in keep + [OTHER] if c in wide.columns]
+        return wide[cols], pd.Series(dtype=float)
     feature = d["feature"].astype(str)
     d["volume"] = pd.to_numeric(d["volume"], errors="coerce")
     actual = d[feature == "__actual__"].groupby("date")["volume"].sum()
@@ -427,32 +680,184 @@ def vif_points(vif: pd.DataFrame, region: str) -> pd.DataFrame:
             .reset_index(drop=True))
 
 
-def collinearity_tiles(summary: pd.DataFrame, region: str) -> list:
-    """[(label, value text, help)] - one region's collinearity in four numbers."""
+VIF_CAP = 30.0                      # the VIF chart's axis ends here; larger bars say "»"
+PAIR_MARK = 0.8                     # |r| from which two columns are hard to separate
+
+
+def pair_count(matrix: pd.DataFrame, region: str, mark: float = PAIR_MARK) -> int:
+    """How many pairs of VARIABLES (not seasonality / trend) have |r| >= mark."""
+    if matrix is None or matrix.empty:
+        return 0
+    d = strongest_pairs(matrix, region, limit=10 ** 6, with_extras=False)
+    return int((pd.to_numeric(d["correlation"], errors="coerce").abs() >= mark).sum())
+
+
+def collinearity_tiles(summary: pd.DataFrame, region: str, matrix=None,
+                       labels=None) -> list:
+    """[(label, value text, help)] - one region's collinearity in four numbers:
+    the verdict, the largest VIF (as people read it - past ~100 it only says
+    "near-duplicate"), the pairs of variables at |r| >= 0.8, the condition
+    number (compact)."""
     if summary is None or summary.empty:
         return []
     rows = summary[summary["region"].astype(str) == str(region)]
     if rows.empty:
         return []
     r = rows.iloc[0]
-    out = []
+    out = [("Verdict", _text(r.get("verdict")) or "-",
+            "ok / moderate / severe - codebase 1's reading of the VIFs and the condition "
+            "number together.")]
+    mx = _num(r.get("max_vif"))
+    worst = _text(r.get("worst_column"))
+    worst_name = short_names([worst], labels, 60)[0] if worst else ""
+    explained = " + ".join(short_names([x.strip() for x in
+                                        _text(r.get("worst_explained_by")).split("+")
+                                        if x.strip()], labels, 40))
+    out.append(("Largest VIF", vif_text(mx),
+                "VIF = 1 / (1 - R²) of a variable regressed on all the others: how much "
+                "its coefficient's uncertainty is inflated by them. 1 = none, above 5 worth "
+                "a look, above 10 barely identified. It is unbounded: a variable that "
+                "(nearly) copies another reaches thousands or millions - any value past "
+                "~100 just means \"near-duplicate\"."
+                + (f" Here: {worst_name}" + (f", explained by {explained}." if explained
+                                             else ".") if worst_name else "")))
+    if matrix is not None:
+        out.append((f"Variable pairs above {PAIR_MARK:g}", str(pair_count(matrix, region)),
+                    "Pairs of variables (seasonality and trend left out) whose correlation "
+                    f"is {PAIR_MARK:g} or more either way: the model can hardly tell them "
+                    "apart."))
     cond = _num(r.get("condition_number"))
     if cond is not None or str(r.get("condition_number")) == "inf":
         out.append(("Condition number", "∞" if cond is None or math.isinf(cond)
-                    else f"{cond:,.0f}",
-                    "How close the whole design is to singular. Above 10 warns, above "
-                    "30 is severe; ∞ = some columns are exact combinations of others."))
-    mx = _num(r.get("max_vif"))
-    out.append(("Largest VIF", "n/a" if mx is None else f"{mx:,.1f}",
-                "The worst variable's variance inflation: 5 warns, 10 is severe. n/a = "
-                "not computable (more design columns than training periods)."))
-    if _text(r.get("worst_column")):
-        out.append(("Worst variable", _text(r.get("worst_column")),
-                    "Explained by: " + (_text(r.get("worst_explained_by")) or "-")))
-    out.append(("Verdict", _text(r.get("verdict")) or "-",
-                "ok / moderate / severe - codebase 1's reading of the condition number "
-                "and the VIFs together."))
+                    else compact_number(cond),
+                    "How close the whole design is to singular (Belsley, on the uncentred "
+                    "design): above 10 warns, above 30 is severe, in the thousands or more "
+                    "some columns are near-exact combinations of others."))
     return out
+
+
+def pair_bars(matrix: pd.DataFrame, region: str, limit: int = 12,
+              with_extras: bool = False, labels=None) -> pd.DataFrame:
+    """The most correlated pairs, |r| largest first, each with a readable
+    "A ↔ B" label (`pair`) - column_a, column_b, correlation, pair."""
+    p = strongest_pairs(matrix, region, limit, with_extras).copy()
+    if p.empty:
+        return pd.DataFrame(columns=["column_a", "column_b", "correlation", "pair"])
+    p["correlation"] = pd.to_numeric(p["correlation"], errors="coerce")
+    cols = list(dict.fromkeys(list(p["column_a"].astype(str)) + list(p["column_b"].astype(str))))
+    short = dict(zip(cols, short_names(cols, labels, NAME_CHARS)))
+    p["pair"] = [f"{short[str(a)]} ↔ {short[str(b)]}"
+                 for a, b in zip(p["column_a"], p["column_b"])]
+    return p.reset_index(drop=True)
+
+
+def collinearity_findings(vif: pd.DataFrame, matrix: pd.DataFrame, region: str,
+                          labels=None, limit: int = 4) -> list:
+    """What the collinearity means, in plain sentences (no markup): the pairs
+    of variables that move together (|r| >= 0.8), then any other variable
+    the rest explain (VIF > 10) - or that there is nothing to worry about."""
+    out, named = [], set()
+    pairs = (strongest_pairs(matrix, region, limit=50, with_extras=False)
+             if matrix is not None and len(matrix) else pd.DataFrame())
+    every = list(dict.fromkeys(
+        (list(pairs["column_a"].astype(str)) + list(pairs["column_b"].astype(str)))
+        if len(pairs) else []))
+    vp = vif_points(vif, region) if vif is not None else pd.DataFrame()
+    every += [str(c) for c in vp.get("column", []) if str(c) not in every]
+    short = dict(zip(every, short_names(every, labels, 48)))
+    for row in pairs.itertuples(index=False):
+        r = _num(row.correlation)
+        if r is None or abs(r) < PAIR_MARK or len(out) >= limit:
+            continue
+        a, b = short[str(row.column_a)], short[str(row.column_b)]
+        if round(abs(r), 2) >= 0.95:
+            out.append(f"{a} and {b} move together almost exactly (r = {r:.2f}): the model "
+                       "cannot tell their effects apart. Combine them into one variable, "
+                       "drop one, or hold one with a tight prior.")
+        else:
+            out.append(f"{a} and {b} move together strongly (r = {r:.2f}): how their joint "
+                       "effect is split between them is uncertain.")
+        named |= {str(row.column_a), str(row.column_b)}
+    for row in vp.itertuples(index=False) if len(vp) else []:
+        v = _num(getattr(row, "vif", None))
+        if len(out) >= limit or v is None or v <= VIF_BAD or str(row.column) in named \
+                or is_design_extra(row.column):
+            continue
+        parts = [x.strip() for x in _text(getattr(row, "explained_by", "")).split("+")
+                 if x.strip()]
+        by = " + ".join(short.get(x, short_names([x], labels, 48)[0]) for x in parts)
+        out.append(f"{short[str(row.column)]} is largely explained by "
+                   f"{by or 'the other variables'} (VIF {vif_text(v)}): its own effect is "
+                   "hard to pin down.")
+    if not out:
+        out.append(f"No worrying overlap: no pair of variables moves together at "
+                   f"{PAIR_MARK:g} or more and every VIF is under {VIF_BAD:g}.")
+    return out
+
+
+def vif_bars(points: pd.DataFrame, labels=None, cap: float = VIF_CAP) -> pd.DataFrame:
+    """The VIF chart's rows, worst first: column, name (readable, unique), vif,
+    band (ok <= 5 < watch <= 10 < high), shown (the bar, capped at `cap`),
+    capped, text (the value at the bar's end - "» 1.0M" past the cap)."""
+    cols = ["column", "name", "vif", "band", "shown", "capped", "text"]
+    if points is None or points.empty:
+        return pd.DataFrame(columns=cols)
+    d = points.dropna(subset=["vif"]).copy()
+    d = d[d["vif"] > 0]
+    if d.empty:
+        return pd.DataFrame(columns=cols)
+    d["name"] = short_names(list(d["column"]), labels, NAME_CHARS)
+    d["band"] = np.select([d["vif"] > VIF_BAD, d["vif"] > VIF_WARN], ["high", "watch"],
+                          default="ok")
+    d["shown"] = d["vif"].clip(upper=cap)
+    d["capped"] = d["vif"] > cap
+    d["text"] = [("» " if c else "") + vif_text(v) for v, c in zip(d["vif"], d["capped"])]
+    return d[cols + [c for c in ("explained_by", "duplicates") if c in d]].reset_index(drop=True)
+
+
+# --------------------------------------------------------------------------- #
+# data - the run's health (02_convergence/convergence_report.txt, sampling_log.json)
+# --------------------------------------------------------------------------- #
+RHAT_GOOD, RHAT_BAD = 1.01, 1.05      # codebase 1's RHAT_WARN / RHAT_FAIL
+DIVERGENCE_BAD = 0.01                 # its DIVERGENCE_FRAC_FAIL: 1% of draws
+
+
+def run_health(report_text: str, sampling_log: dict | None = None) -> dict:
+    """Max R-hat and divergences, from the two lines codebase 1 writes at the
+    top of convergence_report.txt (every run has them), and the share of
+    draws that diverged when sampling_log.json says how many there were.
+    Statuses: good / warning / critical, or "" when not known."""
+    text = report_text or ""
+    m = re.search(r"max R-hat\s*:\s*([0-9]*\.?[0-9]+)", text)
+    d = re.search(r"divergences\s*:\s*([0-9]+)", text)
+    rhat = float(m.group(1)) if m else None
+    div = int(d.group(1)) if d else None
+    log = sampling_log or {}
+    draws = None
+    try:
+        if log.get("draws") and log.get("chains"):
+            draws = int(log["draws"]) * int(log["chains"])
+        elif log.get("posterior_draws"):
+            draws = int(log["posterior_draws"])
+    except (TypeError, ValueError):
+        draws = None
+    frac = (div / draws) if (div is not None and draws) else None
+    out = {"rhat": rhat, "divergences": div, "draws": draws, "divergence_frac": frac,
+           "rhat_status": "", "divergence_status": ""}
+    if rhat is not None:
+        out["rhat_status"] = ("good" if rhat < RHAT_GOOD else
+                              "warning" if rhat <= RHAT_BAD else "critical")
+    elif "n/a" in text and "R-hat" in text:
+        out["rhat_status"] = "warning"            # ADVI / one chain: not measurable
+    if div is not None:
+        out["divergence_status"] = ("good" if div == 0 else
+                                    "critical" if frac is not None and frac >= DIVERGENCE_BAD
+                                    else "warning")
+    return out
+
+
+HEALTH_WORDS = {"good": "✓ converged", "warning": "! check", "critical": "✕ not converged"}
+DIVERGENCE_WORDS = {"good": "✓ none", "warning": "! a few", "critical": "✕ too many"}
 
 
 # --------------------------------------------------------------------------- #
@@ -625,18 +1030,22 @@ def contribution_figure(bars: pd.DataFrame, colours: dict, mode: str = "light"):
 
 def contribution_tree_figure(tree: pd.DataFrame, colours: dict, mode: str = "light"):
     """Horizontal bars for contribution_tree: a pillar's bar in its colour,
-    its variables (when open) under it in a lighter shade of the same colour.
-    The y labels name every bar, so there is no legend."""
+    its sub-pillars (when open) in a lighter shade of the same colour and
+    their variables lighter still. Rows are placed by POSITION (a sub-pillar
+    name can repeat across pillars); the y labels name every bar, so there
+    is no legend."""
     import plotly.graph_objects as go
     ink = _ink(mode)
     fig = go.Figure()
-    order = list(tree["label"])
+    tree = tree.reset_index(drop=True)
+    shade = {0: 1.0, 1: 0.6, 2: 0.35}
     for pillar in dict.fromkeys(tree["pillar"]):
         part = tree[tree["pillar"] == pillar]
         base = colours.get(pillar, SERIES[mode][0])
-        fills = [base if lv == 0 else _alpha(base, 0.5) for lv in part["level"]]
+        fills = [base if lv == 0 else _alpha(base, shade.get(int(lv), 0.35))
+                 for lv in part["level"]]
         fig.add_trace(go.Bar(
-            x=part["pct"], y=part["label"], orientation="h", name=pillar,
+            x=part["pct"], y=list(part.index), orientation="h", name=pillar, width=0.62,
             marker=dict(color=fills), showlegend=False,
             text=[pct_label(v) for v in part["pct"]], textposition="outside",
             cliponaxis=False, textfont=dict(color=ink["secondary"], size=11),
@@ -654,8 +1063,84 @@ def contribution_tree_figure(tree: pd.DataFrame, colours: dict, mode: str = "lig
     pad = (hi - lo) * 0.14 or 1.0
     fig.update_xaxes(range=[lo - (pad if lo < 0 else 0), hi + pad], zeroline=True,
                      zerolinecolor=ink["axis"], zerolinewidth=1)
-    fig.update_yaxes(showgrid=False, categoryorder="array", categoryarray=order[::-1],
+    fig.update_yaxes(showgrid=False, autorange="reversed", tickmode="array",
+                     tickvals=list(tree.index), ticktext=list(tree["label"]),
                      tickfont=dict(color=ink["secondary"]))
+    return fig
+
+
+def waterfall_figure(steps: pd.DataFrame, colours: dict, mode: str = "light"):
+    """The due-to waterfall as floating horizontal bars, top to bottom: each
+    step starts where the last ended (a negative one steps back), coloured
+    by its pillar - the base in the recessive neutral, "not explained" in the
+    muted grey - and the total from zero in ink. Its value at the bar's end."""
+    import plotly.graph_objects as go
+    ink = _ink(mode)
+    d = steps.reset_index(drop=True)
+    fill = []
+    for row in d.itertuples(index=False):
+        fill.append(ink["neutral"] if row.kind == "core" else
+                    ink["muted"] if row.kind == "other" else
+                    ink["secondary"] if row.kind == "total" else
+                    colours.get(row.pillar, SERIES[mode][0]))
+    lo = np.minimum(d["start"], d["end"])
+    text = [pct_label(v) if k in ("total", "core") else
+            ("+" if v > 0 else "") + pct_label(v) for v, k in zip(d["value"], d["kind"])]
+    fig = go.Figure(go.Bar(
+        x=(d["end"] - d["start"]).abs(), base=lo, y=list(d.index), orientation="h",
+        width=0.62,
+        marker=dict(color=fill), text=text, textposition="outside", cliponaxis=False,
+        textfont=dict(color=ink["secondary"], size=11), showlegend=False,
+        customdata=np.stack([d["label"].astype(str), d["value"].astype(float),
+                             d["end"].astype(float)], axis=-1),
+        hovertemplate="<b>%{customdata[0]}</b>  %{customdata[1]:+.2f}% of sales"
+                      "<br>running total %{customdata[2]:.1f}%<extra></extra>"))
+    # hairline connectors: where one step ends the next begins
+    for i in range(len(d) - 2):
+        fig.add_shape(type="line", x0=d.loc[i, "end"], x1=d.loc[i, "end"],
+                      y0=i + 0.35, y1=i + 0.65, line=dict(color=ink["axis"], width=1))
+    _style(fig, mode, max(260, 34 * len(d) + 70), x_title="Share of sales, %", legend=False)
+    fig.update_layout(bargap=0.35, barcornerradius=4, hovermode="closest")
+    lo_x = float(min(0.0, d[["start", "end"]].min().min()))
+    hi_x = float(max(0.0, d[["start", "end"]].max().max()))
+    pad = (hi_x - lo_x) * 0.12 or 1.0
+    fig.update_xaxes(range=[lo_x - (pad if lo_x < 0 else 0), hi_x + pad], zeroline=True,
+                     zerolinecolor=ink["axis"], zerolinewidth=1)
+    fig.update_yaxes(showgrid=False, autorange="reversed", tickmode="array",
+                     tickvals=list(d.index), ticktext=list(d["label"]),
+                     tickfont=dict(color=ink["secondary"]))
+    return fig
+
+
+def drivers_figure(d: pd.DataFrame, colours: dict, mode: str = "light"):
+    """The top drivers (top_drivers): one bar each, coloured by pillar, the
+    pillars in the legend in their fixed order, the share at the bar's end."""
+    import plotly.graph_objects as go
+    ink = _ink(mode)
+    d = d.reset_index(drop=True)
+    fig = go.Figure()
+    present = list(dict.fromkeys(d["pillar"]))
+    for pillar in [p for p in colours if p in present] + [p for p in present
+                                                           if p not in colours]:
+        part = d[d["pillar"] == pillar]
+        fig.add_trace(go.Bar(
+            x=part["pct"], y=list(part.index), orientation="h", name=pillar, width=0.62,
+            marker=dict(color=colours.get(pillar, SERIES[mode][0])),
+            text=[pct_label(v) for v in part["pct"]], textposition="outside",
+            cliponaxis=False, textfont=dict(color=ink["secondary"], size=11),
+            customdata=np.stack([part["name"].astype(str), part["feature"].astype(str)],
+                                axis=-1),
+            hovertemplate="<b>%{x:.2f}%</b> of sales<br>%{customdata[0]}"
+                          " (%{customdata[1]})<extra></extra>"))
+    _style(fig, mode, max(240, 28 * len(d) + 90), x_title="Share of sales, %",
+           legend=len(present) > 1)
+    fig.update_layout(barmode="overlay", bargap=0.3, barcornerradius=4, hovermode="closest")
+    lo, hi = float(min(0.0, d["pct"].min())), float(max(0.0, d["pct"].max()))
+    pad = (hi - lo) * 0.14 or 1.0
+    fig.update_xaxes(range=[lo - (pad if lo < 0 else 0), hi + pad], zeroline=True,
+                     zerolinecolor=ink["axis"], zerolinewidth=1)
+    fig.update_yaxes(showgrid=False, tickmode="array", tickvals=list(d.index),
+                     ticktext=list(d["name"]), tickfont=dict(color=ink["secondary"]))
     return fig
 
 
@@ -707,79 +1192,145 @@ def _short(label: str, n: int = 28) -> str:
     return label if len(label) <= n else label[:n - 1] + "…"
 
 
-def correlation_heatmap_figure(labels: list, grid, mode: str = "light", mark: float = 0.8):
-    """The design's correlation matrix as a heatmap: -1 blue, 0 neutral, +1
-    red. Only the cells at |r| >= `mark` carry their number (the rest have a
-    hover), and the diagonal - a column with itself - is left blank."""
+def pair_figure(pairs: pd.DataFrame, mode: str = "light", mark: float = PAIR_MARK):
+    """The most correlated pairs (pair_bars) as horizontal bars from -1 to 1,
+    largest |r| at the top: red = move together, blue = move opposite (the
+    diverging pair's mid steps), the value at the bar's end, hairline guides
+    at +-`mark`. One row per pair - nothing shown twice."""
     import plotly.graph_objects as go
     ink = _ink(mode)
-    z = np.array(grid, dtype=float)
-    n = len(labels)
-    if n:
-        np.fill_diagonal(z, np.nan)
-    short = [_short(x) for x in labels]
-    text = [["" if (i == j or not np.isfinite(z[i, j]) or abs(z[i, j]) < mark
-                    or n > 30) else f"{z[i, j]:.2f}" for j in range(n)] for i in range(n)]
+    d = pairs.reset_index(drop=True)
+    red, blue = DIVERGING[mode][5][1], DIVERGING[mode][1][1]
+    r = d["correlation"].astype(float)
+    fig = go.Figure(go.Bar(
+        x=r, y=list(d.index), orientation="h", width=0.62,
+        marker=dict(color=[red if v >= 0 else blue for v in r]),
+        text=[f"{v:.2f}" for v in r], textposition="outside", cliponaxis=False,
+        textfont=dict(color=ink["secondary"], size=11), showlegend=False,
+        customdata=np.stack([d["column_a"].map(design_label).astype(str),
+                             d["column_b"].map(design_label).astype(str)], axis=-1),
+        hovertemplate="<b>r = %{x:.2f}</b><br>%{customdata[0]}<br>%{customdata[1]}"
+                      "<extra></extra>"))
+    for x in (-mark, mark):
+        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
+                      line=dict(color=ink["axis"], width=1, dash="dot"))
+    fig.add_annotation(x=mark, y=1, yref="paper", yanchor="bottom", showarrow=False,
+                       text=f"±{mark:g}", font=dict(color=ink["muted"], size=11))
+    _style(fig, mode, max(240, 42 * len(d) + 80), x_title="Correlation (r)", legend=False)
+    fig.update_layout(bargap=0.35, barcornerradius=4, hovermode="closest", margin=dict(t=28))
+    fig.update_xaxes(range=[-1.18, 1.18], tickvals=[-1, -0.5, 0, 0.5, 1], zeroline=True,
+                     zerolinecolor=ink["axis"], zerolinewidth=1)
+    # each pair on two lines - the names stay whole and the bars keep the width
+    fig.update_yaxes(showgrid=False, autorange="reversed", tickmode="array",
+                     tickvals=list(d.index),
+                     ticktext=[str(x).replace(" ↔ ", "<br>↔ ") for x in d["pair"]],
+                     tickfont=dict(color=ink["secondary"]))
+    return fig
+
+
+MATRIX_NUMBERED = 20    # up to this many columns every cell of the matrix carries its number
+
+
+def correlation_triangle_figure(columns: list, grid, names: list | None = None,
+                                mode: str = "light",
+                                every_number_up_to: int = MATRIX_NUMBERED):
+    """The design's correlation matrix as its LOWER TRIANGLE - every pair once,
+    no diagonal: -1 blue, 0 neutral, +1 red. Every cell carries its number
+    (beyond `every_number_up_to` columns, the cells at |r| >= 0.5). Rows and
+    columns sit at POSITIONS labelled with unique names (`names`, else
+    short_names) - two equal labels on a category axis make Plotly merge them
+    and the numbers land in the wrong cells."""
+    import plotly.graph_objects as go
+    ink = _ink(mode)
+    n = len(columns)
+    if n < 2:
+        return None
+    names = list(names) if names is not None else short_names(columns, None, NAME_CHARS)
+    z = np.array(grid, dtype=float)[1:, :-1].copy()
+    z[np.triu_indices(n - 1, k=1)] = np.nan               # keep j <= i only
+    dense = n <= every_number_up_to
+    text = [["" if not np.isfinite(v) or (not dense and abs(v) < 0.5) else f"{v:.2f}"
+             for v in row] for row in z]
+    custom = np.array([[[design_label(columns[i + 1]), design_label(columns[j])]
+                        for j in range(n - 1)] for i in range(n - 1)], dtype=object)
+    pos = list(range(n - 1))
     fig = go.Figure(go.Heatmap(
-        z=z, x=short, y=short, zmin=-1, zmax=1, colorscale=DIVERGING[mode],
-        xgap=2, ygap=2, text=text, texttemplate="%{text}",
-        textfont=dict(size=10),
-        customdata=np.array([[[labels[i], labels[j]] for j in range(n)] for i in range(n)],
-                            dtype=object) if n else None,
-        hovertemplate="<b>%{z:.2f}</b>  %{customdata[0]} × %{customdata[1]}<extra></extra>",
+        z=z, x=pos, y=pos, zmin=-1, zmax=1, colorscale=DIVERGING[mode], xgap=2, ygap=2,
+        text=text, texttemplate="%{text}", textfont=dict(size=10 if dense else 9),
+        customdata=custom, hoverongaps=False,
+        hovertemplate="<b>r = %{z:.2f}</b><br>%{customdata[0]}<br>%{customdata[1]}"
+                      "<extra></extra>",
         colorbar=dict(title=dict(text="r", font=dict(color=ink["secondary"])), thickness=10,
                       tickvals=[-1, -0.5, 0, 0.5, 1], tickfont=dict(color=ink["muted"]),
                       outlinewidth=0)))
-    side = max(320, 22 * n + 140)
+    side = max(300, 26 * n + 150)
     _style(fig, mode, side, legend=False)
-    fig.update_layout(margin=dict(l=8, r=8, t=12, b=8), plot_bgcolor=ink["surface"])
-    fig.update_xaxes(showgrid=False, tickangle=-60, side="bottom", automargin=True,
+    fig.update_layout(margin=dict(l=8, r=8, t=12, b=8), plot_bgcolor="rgba(0,0,0,0)")
+    fig.update_xaxes(showgrid=False, tickmode="array", tickvals=pos, ticktext=names[:-1],
+                     tickangle=-45, automargin=True,
                      tickfont=dict(color=ink["secondary"], size=10))
-    fig.update_yaxes(showgrid=False, autorange="reversed", automargin=True,
+    fig.update_yaxes(showgrid=False, autorange="reversed", tickmode="array", tickvals=pos,
+                     ticktext=names[1:], automargin=True,
                      tickfont=dict(color=ink["secondary"], size=10))
     return fig
 
 
-def vif_figure(points: pd.DataFrame, mode: str = "light", warn: float = VIF_WARN,
-               bad: float = VIF_BAD):
-    """Each variable's VIF as a dot on a log axis (VIFs run from 1 to the
-    thousands - a bar from an arbitrary log baseline would mislead), worst at
-    the top, with the 5 and 10 guides. One series, so one colour and no
-    legend; the value is in the hover and the table."""
+def correlation_heatmap_figure(labels: list, grid, mode: str = "light", mark: float = 0.8):
+    """Kept for callers of the old square heatmap: the lower triangle now."""
+    return correlation_triangle_figure(labels, grid, None, mode)
+
+
+VIF_BAND_TEXT = {"ok": "OK (VIF ≤ 5)", "watch": "Watch (5 - 10)", "high": "High (> 10)"}
+
+
+def vif_figure(bars: pd.DataFrame, mode: str = "light", warn: float = VIF_WARN,
+               bad: float = VIF_BAD, cap: float = VIF_CAP):
+    """Each variable's VIF (vif_bars) as a horizontal bar, worst at the top,
+    on a LINEAR axis that ends at `cap`: a larger VIF fills the bar and its
+    label says so ("» 1.0M") - past ~100 its size means nothing more than
+    "near-duplicate", and a log axis made 1.0M look like a modest dot. The
+    bands are status colours with their names in the legend (OK in the
+    recessive neutral, watch amber, high red); hairline guides at 5 and 10."""
     import plotly.graph_objects as go
-    ink, blue = _ink(mode), SERIES[mode][0]
-    d = points.dropna(subset=["vif"])
-    d = d[d["vif"] > 0]
+    ink = _ink(mode)
+    d = bars.reset_index(drop=True)
+    fill = {"ok": ink["neutral"], "watch": STATUS["warning"], "high": STATUS["critical"]}
     fig = go.Figure()
-    # on a log axis a shape is placed in data units but an annotation in log10
-    # units - add_vline's own label would land at 10^10, so they go separately
-    for x, label in ((warn, f"{warn:g} warn"), (bad, f"{bad:g} severe")):
-        fig.add_shape(type="line", x0=x, x1=x, xref="x", y0=0, y1=1, yref="paper",
+    for band in ("high", "watch", "ok"):
+        part = d[d["band"] == band]
+        if part.empty:
+            continue
+        by = part["explained_by"].fillna("").astype(str) if "explained_by" in part \
+            else pd.Series([""] * len(part), index=part.index)
+        fig.add_trace(go.Bar(
+            x=part["shown"], y=list(part.index), orientation="h", width=0.62,
+            name=VIF_BAND_TEXT[band], marker=dict(color=fill[band]),
+            text=part["text"], textposition="outside", cliponaxis=False,
+            textfont=dict(color=ink["secondary"], size=11),
+            customdata=np.stack([part["name"].astype(str), part["text"].astype(str),
+                                 by.map(lambda x: x or "-")], axis=-1),
+            hovertemplate="<b>VIF %{customdata[1]}</b>  %{customdata[0]}"
+                          "<br>explained by: %{customdata[2]}<extra></extra>"))
+    for x in (warn, bad):
+        fig.add_shape(type="line", x0=x, x1=x, y0=0, y1=1, yref="paper",
                       line=dict(color=ink["axis"], width=1, dash="dot"))
-        fig.add_annotation(x=math.log10(x), y=1, yref="paper", yanchor="bottom",
-                           text=label, showarrow=False,
-                           font=dict(color=ink["muted"], size=11))
-    fig.add_trace(go.Scatter(
-        x=d["vif"], y=[_short(c, 34) for c in d["column"]], mode="markers",
-        marker=dict(size=10, color=blue, line=dict(color=ink["surface"], width=2)),
-        customdata=np.stack([d["column"].astype(str),
-                             d.get("duplicates", pd.Series([""] * len(d))).fillna("").astype(str),
-                             d.get("explained_by", pd.Series([""] * len(d))).fillna("").astype(str)],
-                            axis=-1) if len(d) else None,
-        hovertemplate="<b>VIF %{x:,.1f}</b>  %{customdata[0]}<br>duplicates: "
-                      "%{customdata[1]}<br>explained by: %{customdata[2]}<extra></extra>"))
-    _style(fig, mode, max(220, 24 * len(d) + 80), x_title="VIF (log scale)", legend=False)
-    fig.update_layout(hovermode="closest", margin=dict(t=28))
-    top = max(float(d["vif"].max()) if len(d) else bad, bad) * 1.8
-    ticks = [m * 10 ** e for e in range(0, 7) for m in (1, 2, 5) if m * 10 ** e <= top]
-    fig.update_xaxes(type="log", range=[math.log10(0.8), math.log10(top)], tickvals=ticks,
-                     ticktext=[f"{t:,.0f}" for t in ticks])
-    fig.update_yaxes(showgrid=False, autorange="reversed",
+    _style(fig, mode, max(240, 26 * len(d) + 110), x_title="VIF", legend=True)
+    fig.update_layout(barmode="overlay", bargap=0.3, barcornerradius=4,
+                      hovermode="closest", legend_traceorder="reversed")
+    ticks = [t for t in (0, 5, 10, 20, 30, 50, 100) if t <= cap]
+    fig.update_xaxes(range=[0, cap * 1.22], tickvals=ticks,
+                     ticktext=[f"{t:g}" if t < cap else f"{t:g}+" for t in ticks])
+    fig.update_yaxes(showgrid=False, autorange="reversed", tickmode="array",
+                     tickvals=list(d.index), ticktext=list(d["name"]),
                      tickfont=dict(color=ink["secondary"]))
     return fig
 
 
 PLOTLY_CONFIG = {"displaylogo": False,
+                 # the camera button saves the chart as a PNG at twice the screen
+                 # size - sharp enough for a client deck
+                 "toImageButtonOptions": {"format": "png", "scale": 2,
+                                          "filename": "bridge_chart"},
                  "modeBarButtonsToRemove": ["select2d", "lasso2d", "autoScale2d",
                                             "toggleSpikelines", "hoverCompareCartesian",
                                             "hoverClosestCartesian"]}

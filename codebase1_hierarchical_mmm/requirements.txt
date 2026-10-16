@@ -23,6 +23,10 @@ numpyro
 jax[cuda]
 netCDF4
 openpyxl
+# serverless compute has no /dbfs/mnt: the job reads and writes ADLS itself
+# (mmm/adls.py) - not needed on a classic cluster with the mount
+azure-identity
+azure-storage-file-datalake
 # On a Linux GPU machine (Databricks GPU cluster / Colab) instead install:
 #   pip install "jax[cuda12]"
 # Optional alternative fast CPU sampler:

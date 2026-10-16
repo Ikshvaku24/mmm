@@ -44,7 +44,8 @@ the contributions are a story about a model that doesn't describe your business.
 
 The **core tables are always written**: `panel_summary.csv`,
 `feature_scaling_stats.csv`, `coefficient_report.csv`, `fit_metrics.csv`,
-`contribution_totals.csv`, `contribution_by_pillar.csv`. Everything else is a
+`contribution_totals.csv`, `contribution_by_pillar.csv`,
+`contribution_by_sub_pillar.csv`. Everything else is a
 **reconciliation output** and is switched on or off in `config.OutputConfig`,
 passed to `run(...)` as `out_cfg=`.
 
@@ -319,7 +320,8 @@ the regional file.
   `members` names the variables combined, `contribution_basis` says whether the
   number was regional or a national figure allocated by support.
 - **cases b/c** (shares) — one row per variable × region: `section`, `pillar`,
-  `share_of_sales`, `spend_split` (spend / computed pillar spend, media and
+  🆕 `sub_pillar`, `share_of_sales`, `spend_split` (spend / computed pillar
+  spend — or sub-pillar spend when the sub-pillar has its own share — media and
   expert only) and `share_formula`.
 
 `usable` and `skipped_because` say why any cell was left out — almost always
@@ -547,7 +549,7 @@ One row per region × feature — the same 135 cells as
 
 | Column | Meaning |
 |---|---|
-| `pillar`, `sign`, `pooling`, `baseline`, `contribution_reference` | Config as applied |
+| `pillar`, 🆕 `sub_pillar`, 🆕 `label`, `sign`, `pooling`, `baseline`, `contribution_reference` | Config as applied (`sub_pillar` / `label` blank when the prior file has none) |
 | `scaling_method`, `center_used`, `scale_used` | The transform |
 | `n_train`, `n_obs`, `n_active_train` | Support |
 | `raw_mean_train`, `raw_sd_train`, `raw_min`, `raw_max`, `raw_sum_all` | The raw column |
@@ -1072,6 +1074,8 @@ Contributions in **real KPI units**, per feature per region, plus a
 | `region` | Region or `__portfolio__` |
 | `group` | `baseline_total` / `baseline_part` / `incremental` |
 | 🆕 `pillar` | Reporting group (Online Media, TV & Digital TV, Expert, …) |
+| 🆕 `sub_pillar` | The group inside the pillar (Search, Social, …); blank when the prior file gives none |
+| 🆕 `label` | The client-facing name from the prior file; blank = use `feature` |
 | `mean`, `sd`, `median`, `hdi_low`, `hdi_high` | Posterior summary of the total |
 | `sign_constrained` | TRUE if the coefficient can't cross zero |
 | `contribution_vs` | `zero` or `feature average` — **the counterfactual** |
@@ -1124,6 +1128,7 @@ sales**.
 | `n_periods` | Weeks in that block — 52 / 52 / 104, or 1 for a weekly block |
 | `region` | Region or `__portfolio__` |
 | `pillar`, `feature` | Reporting group and driver |
+| 🆕 `sub_pillar`, `label` | The driver's sub-pillar and client-facing name (component rows only; blank elsewhere). There is no sub-pillar subtotal row — sum the components, or read `contribution_by_sub_pillar.csv` |
 | `group` | `baseline_core` / `baseline_part` / `incremental` / `residual` |
 | `row_type` | `actual` / `component` / `pillar_total` / `grand_total` |
 | `volume` | **Volume contribution in KPI units** |
@@ -1254,7 +1259,9 @@ words). Filter `scope = all`, `region = __portfolio__` and read down.
 ### 🆕 `contribution_timeseries.csv` — the weekly decomposition as data
 
 `decomposition_area.png` in a form you can pivot. One row per region × week ×
-component: `region, date, dataset, period, pillar, feature, group, volume`.
+component: `region, date, dataset, period, pillar, sub_pillar, feature, label,
+group, volume` (🆕 `sub_pillar` and `label` come from the prior file, blank when
+it has none).
 
 `feature` also carries four reference rows per week — `__median_gap__`,
 `__fitted__`, `__actual__`, `__residual__` — so a pivot reconciles exactly:
@@ -1280,6 +1287,7 @@ and this file prints each factor so it can be recomputed in a spreadsheet.
 
 | Column | Meaning |
 |---|---|
+| `region`, `feature`, `pillar`, 🆕 `sub_pillar`, `group` | Which cell the row explains |
 | `scaling_method`, `center_used`, `scale_used` | The transform applied |
 | `contribution_reference`, `reference_raw_value` | The counterfactual, in raw units |
 | `reference_shift_scaled` | The per-week shift re-referencing adds. **0 when `auto`** |
@@ -1311,6 +1319,20 @@ and `share_of_actual_pct`.
 
 For the full vendor layout — pillar subtotals, a Residual line and a Grand Total
 that ties to actual sales — use `contribution_summary.csv` instead.
+
+### 🆕 `contribution_by_sub_pillar.csv`
+
+One level down: each pillar split by the prior file's `sub_pillar` (Online Media
+→ Search / Social / Display). Columns `pillar`, `sub_pillar`, `region`,
+`median`, `volume`, `share_of_actual_pct`.
+
+A variable with **no** sub-pillar is listed under a sub-pillar **named like its
+pillar** (TV & DTV → TV & DTV), so every pillar's rows add up exactly to its line
+in `contribution_by_pillar.csv`; a run whose prior file has no `sub_pillar`
+column gets one row per pillar, the same numbers as the pillar file. Like the
+pillar file it sums `baseline_total` + `incremental` only, so baseline drivers
+sit inside the single **Baseline** line whatever sub-pillar they carry. Written
+on every run (a core table).
 
 ### 🆕 `benchmark_comparison.xlsx` — paste a benchmark, formulas do the rest
 

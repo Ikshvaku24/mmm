@@ -19,6 +19,177 @@ needs no redeploy.
 
 ---
 
+## Update 15 - results you can show a client: a Summary view, the waterfall, sub-pillars and readable names, a new Collinearity, the sampler's health in two numbers (2026-10-16)
+
+| You asked | Now |
+|---|---|
+| Collinearity: why do only some cells have a number? | Two reasons, both gone. **By design**, only cells at \|r\| ≥ 0.8 carried a number. **A bug** put even those in the wrong place: names were cut to 28 characters, several came out the same (`sales__brand__all-benefit__…`), and Plotly merges rows and columns with the same name - so the colours and the numbers drifted apart. In your screenshot the dark-red cell (btl expert-calls × btl shopper-marketing) has no number and its `1.00` sits one cell to the right. The VIF dots had the same bug: two or three dots on one row. Every chart now places its rows by position, with names that are always unique |
+| A better way than row × column (each pair shown twice) | **Pairs that move together**: the 12 most correlated pairs, each once, as bars from −1 to +1 with dotted lines at ±0.8 - red = they rise together, blue = one rises as the other falls - each pair's two names on two lines, the table underneath. The full matrix is still there, in an expander: the **lower triangle**, each pair once, **every cell numbered** (the 20 most correlated columns; with *All*, past 20 columns only cells at \|r\| ≥ 0.5 are numbered - hover for the rest) |
+| Why is the VIF number so big? | VIF = 1 / (1 − R²), where R² is how much of a variable the other variables explain. It has **no ceiling**: R² 0.9 gives 10, 0.99 gives 100, 0.999999 gives 1,000,000. In Base_Droguerias btl expert-calls and btl shopper-marketing are, to two decimals, the same series (r = 1.00): the other columns explain all but about a millionth of one of them, so its VIF is about a million - and the condition number (589 million) says the same. The model cannot split those two: combine them, drop one, or hold one with a tight prior. Past ~100 the size of a VIF says nothing more than "near-duplicate" |
+| The VIF presentation is not good | Bars on a plain axis that stops at 30, in three bands with a legend: up to 5 fine (grey), 5-10 worth a look (amber), over 10 the data barely separate it (red). A bar past 30 stops at the edge with its real value on it (*» 1.0M*). The hover says what explains the variable; the table keeps every number. Above the charts: **What it means** - the findings in plain sentences (*"… move together almost exactly (r = 1.00): the model cannot tell their effects apart …"*) - and the tiles in readable numbers (*Largest VIF 1.0M*, *Variable pairs above 0.8*, *Condition number 589.2M*) |
+| Convergence doesn't need a full tab - only max R-hat and divergences | The Convergence view is gone. Above every view: **Max R-hat** and **Divergences**, each with its state as an icon and a word beside a coloured dot (✓ converged / ! check / ✕ not converged; ✓ none / ! a few / ✕ too many), and the share of draws that diverged. **Full report** downloads `convergence_report.txt` |
+| Two pillar levels - a main pillar and a sub-pillar (Online Media → Search, Social) - in the feature prior and share CSVs, and the docs | Codebase 1 **2026.10.16.2** - *Sub-pillars and readable names* below |
+| The presentation should be fit for a client - tell the improvements, add them | *Client-ready* below |
+
+### Sub-pillars and readable names
+
+The **prior file** gets two optional columns - reporting only, the fit never reads them:
+
+| Column | Example | What it does |
+|---|---|---|
+| `sub_pillar` | `Search` (with `pillar` = `Online Media`) | the level under the pillar. Blank = the variable sits straight under its pillar |
+| `label` | `Paid search` | the name charts show instead of `media__digital-search__all-plac__all-plat__clicks`. Blank = a readable form of the variable name (below) |
+
+The **share file** gets two optional columns:
+- `sub_pillar` names the group, in any section; the pre-model step copies it
+  into the prior files it writes.
+- `sub_pillar_share_pct` gives a sub-pillar **its own part of its pillar's
+  share** (media and expert, whose shares are split by spend). Its variables
+  split that part by spend; the pillar's other variables split what is left.
+  Online Media 4.5% with Search 1.8%: Search's variables share 1.8%, the rest
+  of Online Media 2.7%. Blank = the sub-pillar is a reporting group only, and
+  the pillar's share is split as before. The run stops, with a message, if a
+  pillar's sub-pillar shares add up to more than its own share, if a share
+  has no sub-pillar named, or if one sub-pillar has two different shares.
+
+`samples/share_sample.csv` and the app's share template have the new columns.
+A new file, `05_contributions/contribution_by_sub_pillar.csv`, splits each
+pillar by its sub-pillars and adds up to `contribution_by_pillar.csv`. The
+rules and the arithmetic: codebase 1's `docs/FEATURE_PRIOR_GUIDE.md` (§1, and
+§5 File 2) and `docs/OUTPUTS_GUIDE.md`.
+
+**In the app:** a pillar's **+** opens its sub-pillars, and a sub-pillar's
+**+** its variables; the chart indents them, in lighter shades of the
+pillar's colour. Decomposition → **Show** → one pillar, split week by week
+into its sub-pillars (into its variables when it has none). The prior editor
+has both columns, with their help.
+
+**Names without a label** lose the datacube's boilerplate in charts - the
+`all-…` parts, and `__` reads as a space:
+`media__digital-display__all-plac__all-plat__impressions` shows as *media
+digital-display impressions*. A name up to 40 characters is shown whole;
+longer ones are cut in the middle. Tables, hovers and downloads keep the real
+names.
+
+Files without the new columns work exactly as before, and so do runs made
+before 2026.10.16.2: their pillars open straight to the variables.
+
+### Client-ready - what was added
+- **Summary**, the new first view: one page to put in front of a client, for
+  any region and period - **Base** and **Incremental** shares of sales,
+  **R² · training** and **MAPE · holdout**; *What drives sales* (the
+  waterfall); *The largest drivers* (the top ten); *How well the model fits*.
+- **The waterfall** (Summary and Contributions): each pillar's bar starts
+  where the one before ended, and the last bar is the incremental total.
+  *Include the base* (Contributions) starts from the base and the baseline
+  drivers and builds to 100% of sales. It is off by default, so the pillars
+  fill the chart instead of sitting beside a base many times their size.
+- **Base / Incremental / Not explained** tiles on Contributions - they add up
+  to 100%.
+- **Readable names**: the prior file's `label`, else the name without its
+  boilerplate (above).
+- **Plain-language findings** on Collinearity, and its tiles in readable
+  numbers.
+- **Numbers for reading**: percentages with two decimals, volumes with
+  thousands separators, very large values compact (589.2M).
+- **Every chart saves as a PNG at twice the screen resolution** - the camera
+  button on the chart - sharp in a deck.
+- **A state is never shown by colour alone**: every status has an icon and a
+  word, so it survives a black-and-white print and colour-blind readers.
+- The views in the order you would present them: Summary, Fit,
+  Contributions, Decomposition, Collinearity, Warnings.
+
+**Not built - worth considering next:**
+- intervals on the pillar totals, computed draw by draw (codebase 1's
+  METHODOLOGY §3c proposes it), so a client sees *Online Media 2.6%
+  (1.9-3.4%)* rather than a single number;
+- a period-on-period waterfall (MAT 1 → MAT 2: what changed sales);
+- one-click export of the Summary page to PowerPoint or PDF (needs
+  `python-pptx` or `kaleido` on the app).
+
+Checked in a real browser (Edge), light and dark, on two runs in codebase 1's
+formats: one with sub-pillars and labels, one with real datacube names and
+neither. Tests: v20-v22 cover each view, the new names, a run from an older
+codebase, the positional matrix and the VIF bands; v5 and v17 cover the new
+codebase 1 columns, the sub-pillar file and the share rules.
+
+**What to do in Databricks:**
+1. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3) -
+   codebase 1 2026.10.16.2. The job then writes the new columns and file, and
+   the app's prior editor and pre-model step offer `sub_pillar` and `label`.
+2. **Copy `web/` to the app's source folder and press Deploy.** `app.yml` and
+   `requirements.txt` are unchanged.
+3. When you want them: `sub_pillar` and `label` in your prior files;
+   `sub_pillar` (and `sub_pillar_share_pct` where you have the numbers) in
+   your share files. To see sub-pillars on an earlier run, **Reuse inputs**
+   with a prior file that has them, and run it again.
+
+Existing runs show the new Summary, waterfall, Collinearity and health strip
+straight away; only sub-pillars and labels need a new run. `MIN_CODEBASE`
+stays 2026.10.09.3.
+
+---
+
+## Update 14 - the job on serverless GPU: it reads and writes ADLS itself; no cluster in the app (2026-10-16)
+
+| You asked | Now |
+|---|---|
+| Remove **Start cluster** - the job runs on serverless GPU now | The top bar keeps your name and ☾ / ☀. The cluster badge and **Start cluster** are gone (`src/clusters.py` is deleted). A run that waits for its compute says *Compute starting*, no longer *Cluster starting* |
+| Codebase 1 must read and write ADLS with the service principal - serverless has no `/dbfs/mnt` | **Codebase 1 2026.10.16.1.** On compute without the mount, the job signs in to ADLS as the service principal in a secret scope (`mmm/adls.py`). It copies the run folder's inputs to local disk, runs the model, and copies the outputs back - and the **live job log**, every 30 s, as before. Same folders, same files. On a classic cluster it still uses the mount |
+
+**The proposed fix (the notebook cell) - checked.** Its idea is what was built:
+mirror the run folder on local disk with the service principal, and copy the
+outputs back. Not pasted as is:
+
+| In the proposal | Problem | Built instead |
+|---|---|---|
+| a notebook cell downloads the run folder before `run_app_job` | a failed download (missing folder, wrong secret, no permission) fails the notebook before anything is published - the app shows a failed run with no log | the copy happens inside `run_app_job`: a failure is recorded, published and shown like any other |
+| outputs uploaded by a custom `copier` | the live job log is not copied through `copier` - the app would show no log until the run ended | the live log goes to ADLS every 30 s too |
+| blank `bmc_name` / `run_name`: downloads `Secondary Modelling` | every run's inputs AND outputs | the old layout copies only the files the parameters name |
+| the whole run folder | a re-run folder's old `Outputs/` come along | `Outputs/` is skipped |
+| `copy_tree` into the mirror, then upload with `fh.read()` | every output twice on disk; the whole `trace.nc` in memory | uploaded straight from the run's folder, streamed |
+| `base_path` = the temporary folder | `run_info.json` would name that folder | it names the ADLS folders (`ADLS:Secondary Modelling/...`) |
+| the logic in the notebook | cannot be tested on a laptop | `mmm/adls.py` + `app_job`, tested with an in-memory ADLS (v19, step 8) |
+
+**What to do in Databricks:**
+1. **Re-upload the whole `codebase1_hierarchical_mmm` folder** (Step 3): the
+   new `mmm/adls.py`, `demo.ipynb` and `requirements.txt` come with it.
+2. **The job's environment** (serverless GPU: the task's Environment →
+   Dependencies): codebase 1's `requirements.txt`, which now also lists
+   `azure-identity` and `azure-storage-file-datalake`.
+3. **The secrets.** The job reads the service principal from the scope
+   `am03-mmm-uat-adb-secret-scope`, keys `am03-mmm-uat-sp-tenantid`,
+   `am03-mmm-uat-sp-appid`, `am03-mmm-uat-sp-secret`, `uat-adls-account-name`
+   and `adls-model-container-name` - the names in the proposal, set in
+   `mmm/adls.py`. Check they exist:
+   `dbutils.secrets.list("am03-mmm-uat-adb-secret-scope")`. For another scope,
+   set the job parameter `adls_secret_scope`; for other key names, edit
+   `SECRET_KEYS` in `mmm/adls.py`. Whoever the job runs as needs **Read** on
+   the scope.
+   - The app signs in with its own secrets (`CLIENT_ID`, `ACCOUNT_NAME`,
+     `FILE_SYSTEM`, ... in `app.yml`). The job's principal must reach the
+     **same** storage account and container, or the app will not find the
+     outputs.
+4. **The principal's rights:** read AND write on the container -
+   *Storage Blob Data Contributor*, or ACLs (Read, Write, Execute) on
+   `Secondary Modelling` (Step 1).
+5. **Copy `web/` to the app's source folder and press Deploy** (the cluster
+   is gone from the top bar). `app.yml` is unchanged.
+6. Re-run the failed run once codebase 1 is uploaded:
+   `databricks jobs repair-run 772034605566224 --rerun-all-failed-tasks`.
+
+Two optional job parameters:
+- `storage`: `auto` (default - the mount when the compute has it, ADLS
+  otherwise), `mount` or `adls`;
+- `adls_secret_scope`: see 3.
+
+The job log says which it used:
+`[app_job] storage  ADLS (no mount on this compute): 4 input file(s) from ADLS:Secondary Modelling/...`.
+The app needs no newer codebase (`MIN_CODEBASE` stays 2026.10.09.3), but the
+job does: an older codebase on serverless fails reading `/dbfs/mnt`.
+
+---
+
 ## Update 13 - when Databricks refuses the app's token, the app says why (2026-10-12)
 
 You saw, after deploying: *codebase 1 (the backend) could not be loaded: 403
@@ -113,7 +284,7 @@ The eight points, in order:
 | 4. ①'s choices carried over to Runs and results | Each filter follows ①: when the BMC, a quarter, a year or the type changes on ①, the filter takes the new value; a filter you change on Runs and results keeps yours until ① changes again. **See the runs and their results**, on ①, copies all of ①'s choices and opens the page. Nothing needs anything else: no BMC is needed for a year, no year for a BMC |
 | 5. A slight animation as it filters | The list redraws the moment a filter is chosen and fades in - a third of a second, rising a few pixels; the counter beside it says how many runs match and which filters are on. Anyone who switched animations off in their system settings gets none |
 | 6. Delete a run - for config_advanced_access and above, and only when app_access.yaml allows it | A run's panel has **🗑️ Delete**: type the run's name to enable it. It deletes the run's folder in ADLS - inputs, outputs, note - for good, records who and when in the period's `deleted.json`, and the name is never used again (an old link to the run opens a "deleted" notice). Never while the run runs, never the period's reported run (mark another one first). Who: `app_access.yaml` `delete_runs` - nobody unless it lists levels; shipped: `full_access`, `config_full_access`, `config_advanced_access` |
-| 7. Start cluster top right, where the ⋮ is - and no ⋮ | The top-right corner of every page shows who is signed in and the cluster - a dot and a word (running, starting, stopped) - with **Start cluster** when it is stopped. Streamlit's ⋮ menu is gone (`client.toolbarMode = minimal`, and hidden by the page's CSS). Without it there is no switch for light and dark in the app: it follows each person's system setting. *(Update 11: the menu is `viewer` again - still hidden - and a ☾ / ☀ button top right switches light and dark)* |
+| 7. Start cluster top right, where the ⋮ is - and no ⋮ *(Update 14: the cluster and Start cluster are gone - the job runs on serverless compute)* | The top-right corner of every page shows who is signed in and the cluster - a dot and a word (running, starting, stopped) - with **Start cluster** when it is stopped. Streamlit's ⋮ menu is gone (`client.toolbarMode = minimal`, and hidden by the page's CSS). Without it there is no switch for light and dark in the app: it follows each person's system setting. *(Update 11: the menu is `viewer` again - still hidden - and a ☾ / ☀ button top right switches light and dark)* |
 | 8. Co-branding: AOMMM in the side panel, and the two company themes | Below |
 
 **How the two company themes are kept** - my recommendation, and what is built:
@@ -186,7 +357,7 @@ The nine points from the team, in order:
 | 2. No "Edit settings" switch | Opening ③ Model settings shows the settings at once |
 | 3. Rename a run and add a note after seeing its results | A run's panel has **📝 Edit note** (any time) and **✏️ Rename** (once it has finished). Renaming moves its folder where it sits (also in Results Reported / Archived); the old name is kept in its `run_request.json`, and in `renames.json`, so the Jobs API's record of the run - which keeps the name it ran under - still opens it (All recent runs shows *new name (was old name)*). A name another run had before can never be reused, so an old link never opens the wrong run. The note keeps every version in `run_request.json`; `note.txt` holds the latest. Who may: `edit_runs` in `app_access.yaml` - by default the person who started the run and full access |
 | 4. One button in the prior editor: Remove all, and a tick = keep | The first column is now **Keep**, ticked on every row. **Remove all** unticks them all - then tick the rows to keep and Save. (Untick one row to drop just that one.) Keep all is gone |
-| 5. Replace prior-vs-posterior with collinearity (heatmap) and VIF | The view **Collinearity**, per region: the condition number, the largest VIF, the worst variable and the verdict as tiles; a **heatmap** of the correlation between every pair of the model's columns (red = move together, blue = opposite, grey = unrelated; cells at \|r\| ≥ 0.8 carry their number; the 25 most correlated columns, or all; with or without seasonality and trend), the most correlated pairs as its table; each variable's **VIF** as a dot on a log scale with the 5 and 10 lines, and the VIF table (what explains each). Prior vs posterior is gone from the app (its file is still in the run's zip) |
+| 5. Replace prior-vs-posterior with collinearity (heatmap) and VIF | The view **Collinearity**, per region: the condition number, the largest VIF, the worst variable and the verdict as tiles; a **heatmap** of the correlation between every pair of the model's columns (red = move together, blue = opposite, grey = unrelated; cells at \|r\| ≥ 0.8 carry their number; the 25 most correlated columns, or all; with or without seasonality and trend), the most correlated pairs as its table; each variable's **VIF** as a dot on a log scale with the 5 and 10 lines, and the VIF table (what explains each). Prior vs posterior is gone from the app (its file is still in the run's zip) *(Update 15: replaced - plain-language findings, the pairs each once, VIF bars in bands, the matrix as a numbered lower triangle)* |
 | 6. A warning said "1" but showed no variable | The warnings file names a variable only when the warning is about one; for the others the old table showed an empty row - and never what the warning SAID (that text lives in `warning_texts.csv`). Now each category shows its message first, and a warning about no single variable is listed as "(not about one variable)" |
 | 7. "174 variables" for one warning | That was 174 ROWS - one per variable × region. The table now counts **variables** once whatever the number of regions, with **regions** and **warnings** beside it; a chosen category lists each variable once, with the regions it was warned in |
 | 8. The aggregate R² on the fit chart | The tiles follow the chart: with **All regions** they are the **aggregate** - every region summed per date, one national series (codebase 1's `__aggregate__` row) - R² training and holdout, holdout MAPE and band coverage; with one region chosen, that region's own |
@@ -379,7 +550,7 @@ app and the job need no change.
 | Remove **Open in Databricks** (the log is in the app), and make sure the complete log is shown | Nobody else sees it any more. The run panel shows the **complete** job log - also while the run runs: the job now copies its log into the run's `Outputs/` every 30 seconds, and the panel re-reads it every 15, with the newest line above it. A failed run shows its **full** traceback (it used to be cut to the last 60 lines), and its job log opens by itself |
 | One RBAC file that merges the config one with the above, and two full-access lists | `codebase1_hierarchical_mmm/app_access.yaml` replaces `config_ui.yaml`. It has `full_access` (every setting and the admin tools), `config_full_access` (every setting), `editable` (what everyone else may change) and `show_fixed` |
 | Nobody can change a non-editable setting, even by uploading a config.yaml; the run folder keeps only the editable settings | An uploaded config.yaml gives only its editable settings, and the app lists the ones it ignored. The run folder's `Config/config.yaml` now holds only the settings that person may change. The job lays it over the team's `config.yaml`, so the fixed settings always come from there. `run_request.json` records the person's role |
-| Charts instead of the CSV tables - the important ones, not cluttered | The results are six views: **Fit** (actual vs fitted, the 90% band, the holdout shaded, and the headline fit numbers as tiles); **Contributions** (each driver's share of sales, coloured by pillar - by variable or by pillar, for any region and period); **Decomposition** (weekly sales split into the baseline core and each pillar - *Drivers only* zooms in); **Prior vs posterior** (every variable as a point, contraction against shift, with the ones to read labelled - **click a point** for its prior, data and posterior curves); **Convergence** (the report as text); **Warnings**. Every chart has a *Table* under it with its numbers and a download of the file. A pillar has the same colour in every view |
+| Charts instead of the CSV tables - the important ones, not cluttered | The results are six views: **Fit** (actual vs fitted, the 90% band, the holdout shaded, and the headline fit numbers as tiles); **Contributions** (each driver's share of sales, coloured by pillar - by variable or by pillar, for any region and period); **Decomposition** (weekly sales split into the baseline core and each pillar - *Drivers only* zooms in); **Prior vs posterior** (every variable as a point, contraction against shift, with the ones to read labelled - **click a point** for its prior, data and posterior curves); **Convergence** (the report as text); **Warnings**. Every chart has a *Table* under it with its numbers and a download of the file. A pillar has the same colour in every view *(Update 15: a Summary view first; Convergence is two numbers above every view)* |
 
 Also found and fixed:
 - **A run with a `pooling: independent` + `sign_constraint: free` variable could
@@ -564,7 +735,7 @@ folder, `Secondary Modelling/<bmc_name>/<run_name>/`.
 | Sent the files straight to the job | First saves the datacube, the settings (a config file with the settings you may change - the job fills in the rest from the team's `config.yaml`) and the prior file (and mapping/share files) into the run's folder, and writes `run_request.json`. Then it starts the job. If nothing changed since the run you reused, it asks first |
 | A popup showed the run; closing it lost the run | A panel under **Run Model** shows the run and stays until you press **Dismiss**: the status every 5 seconds, **Cancel run**, the job log as it grows (and **Open in Databricks** for full access) |
 | The popup only knew Pending / Running / Success / Terminated | Also handles Queued, Failed and Internal error, and shows why a run failed |
-| After the run: a Download button | After the run: the run's zip, the complete **job log**, and the results as charts - fit, contributions, decomposition, collinearity - with the convergence report and the warnings (Updates 5 and 9); a note and a new name can be added afterwards |
+| After the run: a Download button | After the run: the run's zip, the complete **job log**, and the results as charts - a client summary, fit, contributions, decomposition, collinearity - with the sampler's health and the warnings (Updates 5, 9 and 15); a note and a new name can be added afterwards |
 
 A BMC's runs are listed on the **Runs and results** page (① says how many
 there are and links to it), and **All recent runs**, below them, lists every
@@ -667,17 +838,18 @@ client instead of logging in again for every file.
   year, and modelling type - each filter optional and independent, each
   following ① (Update 10). A run's panel can rename it, edit its note and
   delete it, as `app_access.yaml` allows.
-- **The top bar and the look.** Top right: who is signed in, the light /
-  dark button and the cluster with **Start cluster**. Each company's theme -
+- **The top bar and the look.** Top right: who is signed in and the light /
+  dark button (no cluster since Update 14: serverless compute). Each company's theme -
   Haleon for everyone by default; press a company's logo in the left-hand
   panel to see the app in its look, just for you (Updates 10 and 11).
 - **Run panel, the BMC's runs, All recent runs.** Described under "2. Run
   Model button" above. The **job log** is `job_log.txt`, in the run's
   `Outputs/` in ADLS: everything the job printed. The job copies it there
   every 30 seconds while it runs, so the panel shows it live.
-- **Results.** Six views of a finished run - Fit, Contributions,
-  Decomposition, Collinearity, Convergence, Warnings - each chart with
-  its numbers in a table underneath (Updates 5 and 9).
+- **Results.** Six views of a finished run - Summary, Fit, Contributions,
+  Decomposition, Collinearity, Warnings - under the sampler's health (max
+  R-hat, divergences), each chart with its numbers in a table underneath
+  (Updates 5, 9 and 15).
 
 ## Changes in the job notebook (`codebase1_hierarchical_mmm/demo.ipynb`)
 
@@ -714,7 +886,7 @@ overwrite each other.
 | You need | Where to check |
 |---|---|
 | to create apps | Compute → Apps: the **Create app** button works |
-| to create jobs, and **Can Attach To** on the cluster `meridian_model_mmm_test` | Compute → the cluster → ⋮ → Permissions |
+| to create jobs (on a classic cluster also **Can Attach To** on it; serverless needs nothing more) | Compute → the cluster → ⋮ → Permissions |
 | **Can Edit** on `/Workspace/Modelling/Backend` (to add `mmm_v5`) | Workspace → the folder → Share |
 | **Can Manage** on the secret scope `am03-mmm…` that holds all seven of `model-app`'s secrets. Giving a new app access to a secret needs *Can Manage* on its scope | `model-app` → Settings → Resources: the first box on each row is the scope (the full name also shows in `databricks secrets list-scopes`). If you don't have it, ask the scope's owner to add the resources to your app for you |
 | to create personal access tokens | Settings → Developer → Access tokens |
@@ -722,9 +894,8 @@ overwrite each other.
 **The token owner.** The app talks to Databricks as the person whose token is
 in `DATABRICKS_TOKEN`. That person needs:
 - **Can Manage Run** on the new job (start it, watch it, cancel it, read its result);
-- **Can Read** on the new backend folder (the app loads codebase 1 from it);
-- **Can Attach To** on the cluster (the status badge), and **Can Restart** if
-  the app's **Start Cluster** button should work.
+- **Can Read** on the new backend folder (the app loads codebase 1 from it).
+(No cluster rights any more: the app no longer shows or starts a cluster.)
 
 **In Azure (ADLS).**
 - The service principal behind `CLIENT_ID`, which the app uploads and
@@ -739,7 +910,8 @@ in `DATABRICKS_TOKEN`. That person needs:
 - **The app and the job share each run folder.** The app creates
   `Secondary Modelling/<BMC>/<period> <type>/<run name>/` and saves the inputs
   in it. The job reads those inputs and writes `Outputs/` into the same
-  folder, through the cluster's mount. The app then reads `Outputs/` - and,
+  folder - through the mount on a classic cluster, or on serverless compute
+  as its own service principal (Update 14). The app then reads `Outputs/` - and,
   when someone marks the reported run, moves run folders into `Results
   Reported/` and `Archived/`. So each identity needs access to folders the
   other one created:
@@ -757,8 +929,9 @@ in `DATABRICKS_TOKEN`. That person needs:
   run's panel shows a permission error (403) instead of the results.
 - Its client secret has not expired (Azure portal → App registrations → the
   app → Certificates & secrets).
-- The cluster can still read the mount the job uses. In a notebook on
-  `meridian_model_mmm_test`, run:
+- On a classic cluster: it can still read the mount the job uses (on
+  serverless there is no mount - the job signs in itself, Update 14). In a
+  notebook on `meridian_model_mmm_test`, run:
 
   ```python
   display(dbutils.fs.ls("/mnt/testuat/Secondary Modelling"))
@@ -833,8 +1006,8 @@ version.
    | Field | New value |
    |---|---|
    | Path | `/Workspace/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm/demo` |
-   | Compute | `meridian_model_mmm_test`, as before |
-   | Dependent libraries | `/Workspace/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm/requirements.txt` |
+   | Compute | serverless GPU (or the classic cluster `meridian_model_mmm_test`) |
+   | Dependent libraries | `/Workspace/Modelling/Backend/mmm_v5/codebase1_hierarchical_mmm/requirements.txt` - on serverless, in the task's Environment → Dependencies |
    | Parameters | **delete** `prior_file`, `data_file` and `modelling_type` here |
 
 3. In the job's side panel, open **Job parameters** → Edit and add:
@@ -845,6 +1018,7 @@ version.
    | `config_file`, `data_file`, `prior_file`, `mapping_file`, `share_file` | empty |
    | `run_id` | `{{job.run_id}}` |
    | `base_path` | empty (see note 1) |
+   | `storage`, `adls_secret_scope` | optional - leave them out (Update 14) |
 
    These must be **job** parameters, not task parameters. The app sends them as
    job parameters, and Databricks passes them on to the notebook.
@@ -960,9 +1134,8 @@ Then open the app's URL.
                        headers={"Authorization": f"Bearer {token}"})
     print(job.status_code, job.json().get("message"))
     ```
-- The cluster, top right on every page (with **Start cluster** when it is
-  stopped), is the one whose ID is written into `src/clusters.py`
-  (`cluster_id`). If the new job uses a different cluster, change that ID.
+- There is no cluster in the app: the job runs on serverless compute, which
+  starts with each run (Update 14).
 
 ### Every run
 The steps are pages in the left-hand panel; a step gets ✅ once it is done,
@@ -996,10 +1169,10 @@ and everything chosen on a page stays chosen when you move to another.
 6. **⑥ Run** - once every checklist line is ticked, press **Run Model**. It
    saves the files in `Secondary Modelling/<BMC>/<period> <type>/<run name>/`
    and starts the job. If nothing changed since the run you reused, it asks
-   first. The run's panel stays on the page - queued / cluster pending /
+   first. The run's panel stays on the page - queued / compute starting /
    running, with the time - **Cancel run** stops it, **Dismiss** hides it.
-7. When the run ends, the same panel shows the results (fit, contributions,
-   decomposition, collinearity, convergence, warnings) and the job log, and
+7. When the run ends, the same panel shows the results (the sampler's health;
+   summary, fit, contributions, decomposition, collinearity, warnings) and the job log, and
    **Download run (zip)** gives the inputs and the outputs in one file
    (**Download trace.nc** gives the raw posterior on its own). **📝 Edit note**
    and **✏️ Rename** record what you made of it; **🗑️ Delete** removes a run
@@ -1023,7 +1196,7 @@ This uses the same steps, applied to the existing objects:
 It is quicker, but you lose the old version to fall back on while you test.
 
 ### On your laptop (no Databricks needed)
-- `python tests/run_all.py` runs all tests (2098 checks), including 4 suites
+- `python tests/run_all.py` runs all tests (2182 checks), including 4 suites
   that cover the app.
   The last of them clicks through the real Streamlit UI, and is skipped when
   Streamlit is not installed.
@@ -1049,11 +1222,13 @@ Databricks supplies `DATABRICKS_HOST`. Optional new ones:
 | `ADLS_ROOT` | change the `Secondary Modelling` folder name |
 | `LOCAL_STORAGE_DIR`, `CODEBASE1_DIR` | local testing only |
 
-**The job** installs codebase 1's `requirements.txt`, attached to the task as
-a dependent library: `pymc`, `arviz`, `numpyro`, `jax[cuda]`, `numpy`,
-`pandas`, `xarray`, `scipy`, `matplotlib`, `netCDF4`, `openpyxl`. `pyyaml`
-comes with the Databricks runtime. The old job ran on the all-purpose cluster
-`meridian_model_mmm_test` (DBR 17.3 LTS ML).
+**The job** installs codebase 1's `requirements.txt` (on serverless, in the
+task's Environment; on a cluster, as a dependent library): `pymc`, `arviz`,
+`numpyro`, `jax[cuda]`, `numpy`, `pandas`, `xarray`, `scipy`, `matplotlib`,
+`netCDF4`, `openpyxl`, and - for serverless, where it reads and writes ADLS
+itself - `azure-identity` and `azure-storage-file-datalake`. `pyyaml` comes
+with the runtime. The job now runs on serverless GPU; the old one ran on the
+all-purpose cluster `meridian_model_mmm_test` (DBR 17.3 LTS ML).
 
 **Codebase 1** must be version **2026.09.30.1 or newer** (the run folders came
 in 2026.09.29.2, `app_access.yaml` and the live job log in 2026.09.30.1);
@@ -1063,9 +1238,10 @@ the app says so if it is older. Runs made with a version older than
 ---
 
 **Notes**
-1. If the job cannot read `/dbfs/mnt/...` on its compute, set the job parameter
-   `base_path` to a Unity Catalog volume path
-   (`/Volumes/<catalog>/<schema>/<volume>/Secondary Modelling`). No code change.
+1. Serverless compute cannot read `/dbfs/mnt/...`: there the job reads and
+   writes ADLS itself (Update 14). A Unity Catalog volume path
+   (`/Volumes/<catalog>/<schema>/<volume>/Secondary Modelling`) as `base_path`
+   works on either compute.
 2. The OCR mistakes fixed while rebuilding the code are listed in
    `_reference/OCR_FIXES.md`.
 3. Full setup details are in `README.md`.

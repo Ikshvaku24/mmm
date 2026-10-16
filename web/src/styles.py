@@ -3,7 +3,7 @@
 The colours, fonts and corners come from the company theme the viewer sees;
 the accents here come from src/brand.py, so they follow the same choice. Kept
 to what the app needs: Streamlit's top bar made click-through and its ⋮ menu
-hidden (the cluster and the light / dark button sit there - the top bar), the
+hidden (the light / dark button sits there - the top bar), the
 header's baseline, the page titles' marker, the text on primary buttons, the
 side panel's logos (the company logos are buttons), the run counter and the
 run list's fade-in on the Runs and results page.
@@ -21,7 +21,7 @@ from src import brand
 _COMMON = """
 /* Streamlit's top bar: see-through, and it no longer catches clicks - a
    button scrolled up under it could not be pressed. Its ⋮ menu and the
-   Deploy button are hidden: the cluster sits there instead (the top bar). */
+   Deploy button are hidden: the top bar sits there instead. */
 [data-testid="stHeader"] { background: transparent; }
 [data-testid="stHeader"],
 [data-testid="stHeader"] [data-testid="stToolbar"],
@@ -34,8 +34,8 @@ _COMMON = """
 [data-testid="stAppDeployButton"] { display: none !important; }
 .block-container { padding-top: 2.6rem; padding-bottom: 2.5rem; }
 
-/* the top bar: who is signed in, and the cluster with its Start button -
-   top right on every page */
+/* the top bar: who is signed in, and the light / dark button - top right on
+   every page */
 .st-key-bridge_topbar {
     position: fixed; top: 0.62rem; right: 1rem; z-index: 999991;
     width: auto !important; flex-wrap: nowrap; align-items: center; gap: 0.6rem;
@@ -43,31 +43,14 @@ _COMMON = """
 div:has(> .st-key-bridge_topbar) { min-height: 0; }
 .st-key-bridge_topbar [data-testid="stMarkdownContainer"] p { margin: 0; }
 /* Streamlit pulls every markdown block up by -1rem; in a row that only offsets
-   the greeting and the cluster from the light / dark button */
+   the greeting from the light / dark button */
 .st-key-bridge_topbar [data-testid="stMarkdownContainer"] { margin-bottom: 0; }
 .bridge-hello {
     font-size: 0.8rem; font-weight: 600; color: var(--bridge-subtitle);
     white-space: nowrap; display: inline-block; max-width: 30vw;
     overflow: hidden; text-overflow: ellipsis; vertical-align: middle;
 }
-.bridge-cluster {
-    display: inline-flex; align-items: center; gap: 0.42rem; white-space: nowrap;
-    padding: 0.2rem 0.65rem; border-radius: 999px; font-size: 0.78rem; font-weight: 600;
-    border: 1px solid var(--bridge-rule); background: var(--bridge-surface);
-    color: var(--bridge-ink); line-height: 1.35;
-}
-.bridge-cluster-dot { width: 0.55rem; height: 0.55rem; border-radius: 50%;
-                      background: var(--bridge-off); flex: 0 0 auto; }
-.bridge-cluster--good .bridge-cluster-dot { background: var(--bridge-good); }
-.bridge-cluster--busy .bridge-cluster-dot { background: var(--bridge-busy);
-                                            animation: bridge-pulse 1.4s ease-in-out infinite; }
-.bridge-cluster--unknown .bridge-cluster-dot { background: transparent;
-                                               border: 1.5px dashed var(--bridge-off); }
-.bridge-cluster-note { font-size: 0.74rem; color: var(--bridge-subtitle); white-space: nowrap; }
-.st-key-start_cluster_button button {
-    min-height: 1.75rem; padding: 0 0.6rem; font-size: 0.78rem; white-space: nowrap;
-}
-/* the light / dark button - a pill like the cluster's */
+/* the light / dark button - a small pill */
 .st-key-bridge_topbar [data-testid="stHtml"] { width: auto; }
 .st-key-bridge_topbar [data-testid="stElementContainer"] { align-self: center; }
 .st-key-bridge_topbar [data-testid="stHtml"] { display: flex; align-items: center; }
@@ -84,7 +67,6 @@ div:has(> .st-key-bridge_topbar) { min-height: 0; }
 }
 .bridge-theme-toggle:hover { border-color: var(--bridge-accent-ink); }
 .bridge-theme-toggle:focus-visible { outline: 2px solid var(--bridge-accent-ink); outline-offset: 2px; }
-@keyframes bridge-pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
 
 /* the header: BRIDGE, what it stands for, and the baseline under it */
 .bridge-header { margin: 0 0 1.2rem; }
@@ -142,6 +124,26 @@ div:has(> .st-key-bridge_topbar) { min-height: 0; }
     background: var(--bridge-chip-bg); color: var(--bridge-chip-fg);
 }
 .bridge-count-note { color: var(--bridge-subtitle); font-size: 0.85rem; }
+/* the run's health above its results: two checks, each its number and its
+   state - an icon + a word beside a dot in the status colour (never the colour
+   alone); the status colours are fixed, the rest follows the company theme */
+.bridge-health { display: flex; flex-wrap: wrap; gap: 0.75rem; margin: 0.1rem 0 0.3rem; }
+.bridge-health-item {
+    display: grid; grid-template-columns: auto auto; column-gap: 0.7rem;
+    align-items: baseline; padding: 0.45rem 0.85rem; border-radius: 8px;
+    border: 1px solid var(--bridge-rule); background: var(--bridge-surface);
+}
+.bridge-health-label { grid-column: 1 / span 2; font-size: 0.75rem; color: var(--bridge-subtitle); }
+.bridge-health-value { font-size: 1.2rem; font-weight: 600; color: var(--bridge-ink); }
+.bridge-health-status {
+    display: inline-flex; align-items: center; gap: 0.35rem; white-space: nowrap;
+    font-size: 0.8rem; color: var(--bridge-ink);
+}
+.bridge-health-dot { width: 0.6rem; height: 0.6rem; border-radius: 50%; background: #8d979d; }
+.bridge-health-status--good .bridge-health-dot { background: #0ca30c; }
+.bridge-health-status--warning .bridge-health-dot { background: #fab219; }
+.bridge-health-status--critical .bridge-health-dot { background: #d03b3b; }
+.bridge-health-detail { grid-column: 1 / span 2; font-size: 0.72rem; color: var(--bridge-subtitle); }
 /* room above the table for its hover toolbar (it would cover Refresh) */
 .st-key-rf_list_a [data-testid="stDataFrame"],
 .st-key-rf_list_b [data-testid="stDataFrame"] { margin-top: 1.1rem; }
@@ -150,7 +152,7 @@ div:has(> .st-key-bridge_topbar) { min-height: 0; }
 @keyframes bridge-in-a { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @keyframes bridge-in-b { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 @media (prefers-reduced-motion: reduce) {
-    .st-key-rf_list_a, .st-key-rf_list_b, .bridge-cluster--busy .bridge-cluster-dot { animation: none; }
+    .st-key-rf_list_a, .st-key-rf_list_b { animation: none; }
 }
 
 /* No grey flash while the page refreshes: Streamlit dims "stale" elements
@@ -189,8 +191,6 @@ _CAPGEMINI = """
 def _pairs(t) -> dict:
     """The CSS variables for one company and one mode."""
     dark = bool(t.get("dark"))
-    status = ({"good": "#3DD68C", "busy": "#F0B429", "off": "#8D979D"} if dark else
-              {"good": "#1E8E3E", "busy": "#C98500", "off": "#8D979D"})
     baseline = (f"linear-gradient(90deg, {t['accent']} 0 7rem, {t['rule']} 7rem 100%)"
                 if t["key"] == "haleon" else
                 f"linear-gradient(90deg, #0070AD 0 6rem, {t['accent']} 6rem 11rem, "
@@ -201,8 +201,7 @@ def _pairs(t) -> dict:
             "subtitle": t["subtitle"], "rule": t["rule"], "on-primary": t["on_primary"],
             "chip-bg": t["chip_bg"], "chip-fg": t["chip_fg"], "danger": t["danger"],
             "sidebar-bg": t["sidebar_bg"], "surface": t["surface"], "ink": ink,
-            "baseline": baseline, "good": status["good"], "busy": status["busy"],
-            "off": status["off"]}
+            "baseline": baseline}
 
 
 def _block(selector, pairs) -> str:

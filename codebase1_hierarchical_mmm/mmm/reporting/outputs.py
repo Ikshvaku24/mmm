@@ -18,7 +18,7 @@ equal scaled effects generally differ - both are exported, explicitly labelled.
 """
 from __future__ import annotations
 
-__codebase__ = "2026.10.14.2"   # must equal mmm.__version__ (python -m mmm.release)
+__codebase__ = "2026.10.16.2"   # must equal mmm.__version__ (python -m mmm.release)
 
 import math
 import os
@@ -729,6 +729,9 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
                    # the base; a feature flagged baseline=1 rolls up there too.
                    "pillar": ("Baseline" if spec is None or spec.baseline
                               else (spec.pillar or "")),
+                   "sub_pillar": ("" if spec is None
+                                  else (getattr(spec, "sub_pillar", "") or "")),
+                   "label": "" if spec is None else (getattr(spec, "label", "") or ""),
                    **st,
                    "sign_constrained": constrained,
                    "contribution_vs": vs,
@@ -761,6 +764,17 @@ def contribution_report(decomp: Decomposition, pdata: PreparedData, outdir: str,
         .sort_values(["region", "share_of_actual_pct"],
                      ascending=[True, False]))
     pil.to_csv(os.path.join(outdir, "contribution_by_pillar.csv"), index=False)
+    # one level down: each pillar's sub-pillars. A variable with no sub-pillar
+    # sits in a sub-pillar named like its pillar, so every pillar's rows add up
+    # to its line in contribution_by_pillar.csv
+    roll["sub_pillar"] = [s or p for s, p in zip(roll["sub_pillar"].fillna(""),
+                                                 roll["pillar"])]
+    sub = (roll.groupby(["pillar", "sub_pillar", "region"])[
+        ["median", "volume", "share_of_actual_pct"]]
+        .sum().reset_index()
+        .sort_values(["region", "pillar", "share_of_actual_pct"],
+                     ascending=[True, True, False]))
+    sub.to_csv(os.path.join(outdir, "contribution_by_sub_pillar.csv"), index=False)
 
     write_contribution_diagnostics(
         decomp, pdata, outdir, out_cfg, coef,
